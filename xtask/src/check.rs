@@ -20,6 +20,24 @@ fn cargo_step(root: &Path, args: &[&str]) -> Result<(), Vec<Finding>> {
     }
 }
 
+/// What the DCO gate does for this run. A pull request must always be checked, so an empty
+/// base there is an error; elsewhere (a local run, a push to main) the gate is skipped, loudly.
+/// `event` is `GITHUB_EVENT_NAME`, a mode marker the platform sets.
+pub fn dco_plan<'a>(
+    base: Option<&'a str>,
+    event: Option<&str>,
+) -> Result<Option<&'a str>, Finding> {
+    match base.filter(|b| !b.is_empty()) {
+        Some(b) => Ok(Some(b)),
+        None if event == Some("pull_request") => Err(Finding::new(
+            "dco-no-base",
+            "--base",
+            "this is a pull request but no --base was given, so no commit would be checked",
+        )),
+        None => Ok(None),
+    }
+}
+
 /// Runs every gate; `base` (when non-empty) also enables the DCO check over `base..HEAD`.
 /// Returns the number of failed gates.
 pub fn run(root: &Path, base: Option<&str>, install_tools: bool) -> usize {
@@ -57,8 +75,10 @@ pub fn run(root: &Path, base: Option<&str>, install_tools: bool) -> usize {
         ("workflowlint", Box::new(|| workflowlint::run(root))),
         ("deny", Box::new(|| deny::run(root))),
     ];
-    if let Some(base) = base.filter(|b| !b.is_empty()) {
-        steps.push(("dco", Box::new(move || dco::run(root, base))));
+    match dco_plan(base, std::env::var("GITHUB_EVENT_NAME").ok().as_deref()) {
+        Ok(Some(base)) => steps.push(("dco", Box::new(move || dco::run(root, base)))),
+        Ok(None) => eprintln!("== dco: skipped (no --base)"),
+        Err(finding) => steps.push(("dco", Box::new(move || Err(vec![finding.clone()])))),
     }
     let mut failed = 0;
     for (name, step) in &steps {

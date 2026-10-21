@@ -8,7 +8,9 @@ until then, open an issue before you start work.
 Every commit carries a `Signed-off-by:` trailer in its final paragraph, made with
 `git commit -s`. It certifies the [Developer Certificate of Origin](https://developercertificate.org/)
 and must carry the email address of the commit's author. You may use your GitHub no-reply
-address. `cargo xtask check` refuses a commit without one.
+address (compared case-insensitively). `cargo xtask check` refuses a commit without one.
+Merge commits inside a pull request are exempt from the sign-off, because the pull request is
+squash-merged and the merge commits do not survive.
 
 ## One command
 

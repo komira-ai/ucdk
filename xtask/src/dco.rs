@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-//! DCO: every non-merge commit carries a `Signed-off-by:` trailer for its own author.
+//! DCO: every non-merge commit carries a `Signed-off-by:` trailer for its own author. Emails
+//! compare case-insensitively, names are not compared.
 
 use std::path::Path;
 use std::process::Command;
@@ -42,7 +43,10 @@ pub fn check_dco(commits: &[CommitInfo]) -> Vec<Finding> {
                 &c.id,
                 "no Signed-off-by trailer in the final paragraph (use git commit -s)",
             ));
-        } else if !emails.contains(&c.author_email) {
+        } else if !emails
+            .iter()
+            .any(|e| e.eq_ignore_ascii_case(&c.author_email))
+        {
             out.push(Finding::new(
                 "dco-other-person",
                 &c.id,

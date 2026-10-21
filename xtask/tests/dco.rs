@@ -52,9 +52,40 @@ fn empty_range_green() {
 }
 
 #[test]
-fn case_insensitive_key_ok_but_exact_email_required() {
+fn case_insensitive_key_and_email_ok() {
     let ok = "Add x\n\nsigned-off-BY: A <a@example.org>\n";
     assert!(rules(commit(1, A, ok)).is_empty());
-    let wrong_case = "Add x\n\nSigned-off-by: A <A@example.org>\n";
-    assert_eq!(rules(commit(1, A, wrong_case)), ["dco-other-person"]);
+    let upper = "Add x\n\nSigned-off-by: A <A@Example.ORG>\n";
+    assert!(rules(commit(1, A, upper)).is_empty());
+    assert!(rules(commit(1, "A@EXAMPLE.org", ok)).is_empty());
+}
+
+#[test]
+fn different_local_part_still_red_despite_case() {
+    let m = "Add x\n\nSigned-off-by: A <B@example.org>\n";
+    assert_eq!(rules(commit(1, A, m)), ["dco-other-person"]);
+}
+
+mod plan {
+    use xtask::check::dco_plan;
+
+    #[test]
+    fn pull_request_without_base_is_an_error() {
+        for base in [None, Some("")] {
+            let f = dco_plan(base, Some("pull_request")).expect_err("must refuse");
+            assert_eq!(f.rule, "dco-no-base");
+        }
+    }
+
+    #[test]
+    fn other_events_without_base_skip() {
+        assert_eq!(dco_plan(None, None), Ok(None));
+        assert_eq!(dco_plan(Some(""), Some("push")), Ok(None));
+    }
+
+    #[test]
+    fn a_base_always_runs_the_check() {
+        assert_eq!(dco_plan(Some("abc"), Some("pull_request")), Ok(Some("abc")));
+        assert_eq!(dco_plan(Some("abc"), None), Ok(Some("abc")));
+    }
 }

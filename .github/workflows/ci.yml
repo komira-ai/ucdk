@@ -52,7 +52,9 @@ jobs:
         run: rustup toolchain install
       - name: cargo xtask check
         env:
-          # Empty on a push to main, which skips the DCO check.
+          # Always the base of the pull request, so every commit is checked; empty on a push to
+          # main, where the check reports that the DCO gate is skipped (and refuses an empty
+          # base on a pull request).
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: cargo xtask check --install-tools --base "$BASE_SHA"
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

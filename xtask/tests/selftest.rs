@@ -70,6 +70,92 @@ fn planted_command_new_fails_clippy() {
 }
 
 #[test]
+fn planted_fs_read_to_string_fails_clippy() {
+    assert_refused(
+        "fs_read_to_string",
+        "fs_read_to_string.rs",
+        "clippy::disallowed_methods",
+    );
+}
+
+#[test]
+fn planted_fs_open_options_fails_clippy() {
+    assert_refused(
+        "fs_open_options",
+        "fs_open_options.rs",
+        "clippy::disallowed_methods",
+    );
+}
+
+#[test]
+fn planted_fs_remove_file_fails_clippy() {
+    assert_refused(
+        "fs_remove_file",
+        "fs_remove_file.rs",
+        "clippy::disallowed_methods",
+    );
+}
+
+#[test]
+fn planted_env_vars_fails_clippy() {
+    assert_refused("env_vars", "env_vars.rs", "clippy::disallowed_methods");
+}
+
+#[test]
+fn planted_env_vars_os_fails_clippy() {
+    assert_refused(
+        "env_vars_os",
+        "env_vars_os.rs",
+        "clippy::disallowed_methods",
+    );
+}
+
+#[test]
+fn planted_process_exit_fails_clippy() {
+    assert_refused(
+        "process_exit",
+        "process_exit.rs",
+        "clippy::disallowed_methods",
+    );
+}
+
+#[test]
+fn planted_process_abort_fails_clippy() {
+    assert_refused(
+        "process_abort",
+        "process_abort.rs",
+        "clippy::disallowed_methods",
+    );
+}
+
+#[test]
+fn planted_systemtime_elapsed_fails_clippy() {
+    assert_refused(
+        "systemtime_elapsed",
+        "systemtime_elapsed.rs",
+        "clippy::disallowed_methods",
+    );
+}
+
+#[test]
+fn planted_instant_now_fails_clippy() {
+    assert_refused(
+        "instant_now",
+        "instant_now.rs",
+        "clippy::disallowed_methods",
+    );
+}
+
+#[test]
+fn planted_path_exists_fails_clippy() {
+    assert_refused(
+        "path_exists",
+        "path_exists.rs",
+        "clippy::disallowed_methods",
+    );
+}
+
+#[test]
 fn unplanted_fixture_passes_clippy() {
     let (ok, out) = clippy_on("valid", "valid.rs");
     assert!(ok, "valid code must pass the template:\n{out}");

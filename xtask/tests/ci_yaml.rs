@@ -55,3 +55,28 @@ fn job_runs_cargo_xtask_check() {
         "exactly one step runs cargo xtask check: {runs:?}"
     );
 }
+
+#[test]
+fn check_step_always_passes_the_pull_request_base() {
+    let doc = ci();
+    let job = get(get(&doc, "jobs"), "check");
+    let steps = get(job, "steps").as_array().expect("steps");
+    let step = steps
+        .iter()
+        .find(|s| {
+            s.get("run")
+                .and_then(Value::as_str)
+                .is_some_and(|r| r.contains("xtask check"))
+        })
+        .expect("xtask check step");
+    assert!(
+        get(step, "run")
+            .as_str()
+            .unwrap()
+            .contains("--base \"$BASE_SHA\"")
+    );
+    assert_eq!(
+        get(get(step, "env"), "BASE_SHA").as_str(),
+        Some("${{ github.event.pull_request.base.sha }}")
+    );
+}
