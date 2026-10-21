@@ -6,37 +6,34 @@
 use std::fs;
 use std::path::Path;
 
-use serde_yaml_ng::Value;
+use serde_json::Value;
 
 use crate::{Finding, to_result};
 
 fn key<'a>(map: &'a Value, name: &str) -> Option<&'a Value> {
-    map.as_mapping()?.get(name)
+    map.as_object()?.get(name)
 }
 
 fn is_full_sha(s: &str) -> bool {
     s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// The `on:` value. YAML 1.1 reads a bare `on` key as `true`, so both are accepted.
+/// The `on:` value. A YAML 1.1 reader turns a bare `on` key into `true`; the 1.2 reader used here keeps `on`.
 fn on_value(doc: &Value) -> Option<&Value> {
-    let map = doc.as_mapping()?;
-    map.get("on").or_else(|| map.get(Value::Bool(true)))
+    let map = doc.as_object()?;
+    map.get("on").or_else(|| map.get("true"))
 }
 
 /// Trigger names with their configuration, if any.
 fn triggers(on: &Value) -> Vec<(String, Option<&Value>)> {
     match on {
         Value::String(s) => vec![(s.clone(), None)],
-        Value::Sequence(seq) => seq
+        Value::Array(seq) => seq
             .iter()
             .filter_map(|v| v.as_str())
             .map(|s| (s.to_owned(), None))
             .collect(),
-        Value::Mapping(map) => map
-            .iter()
-            .filter_map(|(k, v)| k.as_str().map(|k| (k.to_owned(), Some(v))))
-            .collect(),
+        Value::Object(map) => map.iter().map(|(k, v)| (k.clone(), Some(v))).collect(),
         _ => Vec::new(),
     }
 }
@@ -57,12 +54,12 @@ fn lint_triggers(doc: &Value, out: &mut Vec<Finding>) {
             "push" => {
                 let branches = config
                     .and_then(|c| key(c, "branches"))
-                    .and_then(Value::as_sequence);
+                    .and_then(Value::as_array);
                 let only_main =
                     branches.is_some_and(|b| b.len() == 1 && b[0].as_str() == Some("main"));
                 let extra = config
-                    .and_then(Value::as_mapping)
-                    .is_some_and(|m| m.keys().any(|k| k.as_str() != Some("branches")));
+                    .and_then(Value::as_object)
+                    .is_some_and(|m| m.keys().any(|k| k != "branches"));
                 if !only_main || extra {
                     out.push(Finding::new(
                         "trigger",
@@ -140,9 +137,9 @@ fn lint_permissions(perms: Option<&Value>, subject: &str, required: bool, out: &
         return;
     };
     let ok = match perms {
-        Value::Mapping(m) => m
+        Value::Object(m) => m
             .iter()
-            .all(|(k, v)| k.as_str() == Some("contents") && v.as_str() == Some("read")),
+            .all(|(k, v)| k == "contents" && v.as_str() == Some("read")),
         _ => false,
     };
     if !ok {
@@ -166,19 +163,19 @@ fn lint_continue_on_error(node: &Value, subject: &str, out: &mut Vec<Finding>) {
 
 /// Lints one workflow file's text.
 pub fn lint_workflow(yaml: &str) -> Vec<Finding> {
-    let doc: Value = match serde_yaml_ng::from_str(yaml) {
+    let doc: Value = match serde_saphyr::from_str(yaml) {
         Ok(v) => v,
         Err(e) => return vec![Finding::new("yaml", "workflow", e.to_string())],
     };
     let mut out = Vec::new();
     lint_triggers(&doc, &mut out);
     lint_permissions(key(&doc, "permissions"), "permissions", true, &mut out);
-    let Some(jobs) = key(&doc, "jobs").and_then(Value::as_mapping) else {
+    let Some(jobs) = key(&doc, "jobs").and_then(Value::as_object) else {
         out.push(Finding::new("jobs", "jobs", "workflow has no jobs"));
         return out;
     };
     for (job_id, job) in jobs {
-        let jid = job_id.as_str().unwrap_or("?");
+        let jid = job_id.as_str();
         let subject = format!("jobs.{jid}");
         lint_permissions(
             key(job, "permissions"),
@@ -191,7 +188,7 @@ pub fn lint_workflow(yaml: &str) -> Vec<Finding> {
             lint_uses(uses, &subject, &mut out);
         }
         let steps = key(job, "steps")
-            .and_then(Value::as_sequence)
+            .and_then(Value::as_array)
             .map_or(&[][..], Vec::as_slice);
         for (i, step) in steps.iter().enumerate() {
             let subject = format!("{subject}.steps[{i}]");
