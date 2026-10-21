@@ -1,0 +1,10 @@
+[package]
+name = "deny-banned"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+openssl-sys = { path = "openssl-sys" }
+
+[workspace]

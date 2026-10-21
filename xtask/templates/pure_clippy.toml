@@ -1,0 +1,30 @@
+# Template for every pure crate: copy to <crate>/clippy.toml unchanged.
+# Time, randomness and I/O enter a pure crate as inputs or trait objects.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+
+disallowed-methods = [
+    { path = "std::time::SystemTime::now", reason = "pure crates take this as an input" },
+    { path = "std::time::Instant::now", reason = "pure crates take this as an input" },
+    { path = "std::thread::sleep", reason = "pure crates take this as an input" },
+    { path = "std::env::var", reason = "pure crates take this as an input" },
+    { path = "std::env::var_os", reason = "pure crates take this as an input" },
+    { path = "std::env::args", reason = "pure crates take this as an input" },
+    { path = "std::fs::read", reason = "pure crates take this as an input" },
+    { path = "std::fs::write", reason = "pure crates take this as an input" },
+    { path = "std::fs::File::open", reason = "pure crates take this as an input" },
+    { path = "std::fs::File::create", reason = "pure crates take this as an input" },
+    { path = "std::net::TcpStream::connect", reason = "pure crates take this as an input" },
+    { path = "std::net::TcpListener::bind", reason = "pure crates take this as an input" },
+    { path = "std::process::Command::new", reason = "pure crates take this as an input" },
+]
+
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "pure crates use BTreeMap/BTreeSet and take I/O as an input" },
+    { path = "std::collections::HashSet", reason = "pure crates use BTreeMap/BTreeSet and take I/O as an input" },
+    { path = "std::fs::File", reason = "pure crates use BTreeMap/BTreeSet and take I/O as an input" },
+    { path = "std::net::TcpStream", reason = "pure crates use BTreeMap/BTreeSet and take I/O as an input" },
+    { path = "std::net::TcpListener", reason = "pure crates use BTreeMap/BTreeSet and take I/O as an input" },
+    { path = "std::net::UdpSocket", reason = "pure crates use BTreeMap/BTreeSet and take I/O as an input" },
+    { path = "std::process::Command", reason = "pure crates use BTreeMap/BTreeSet and take I/O as an input" },
+]

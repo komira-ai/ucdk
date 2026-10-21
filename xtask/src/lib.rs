@@ -1,0 +1,55 @@
+// SPDX-License-Identifier: Apache-2.0
+//! The repository checks behind `cargo xtask`. Each check is a function that returns its
+//! findings, so a test calls it without spawning a process.
+
+use std::fmt;
+use std::path::{Path, PathBuf};
+
+pub mod check;
+pub mod dco;
+pub mod deny;
+pub mod deps;
+pub mod purity;
+pub mod spdx;
+pub mod tools;
+pub mod workflowlint;
+
+/// One thing a check refuses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Finding {
+    /// A stable rule name; tests match on it.
+    pub rule: &'static str,
+    /// What the rule found fault with: a crate, a file, a commit.
+    pub subject: String,
+    pub detail: String,
+}
+
+impl Finding {
+    pub fn new(rule: &'static str, subject: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            rule,
+            subject: subject.into(),
+            detail: detail.into(),
+        }
+    }
+}
+
+impl fmt::Display for Finding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[{}] {}: {}", self.rule, self.subject, self.detail)
+    }
+}
+
+/// The workspace root, fixed at compile time (xtask lives directly under it).
+pub fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
+}
+
+/// `Ok` when there are no findings.
+pub fn to_result(findings: Vec<Finding>) -> Result<(), Vec<Finding>> {
+    if findings.is_empty() {
+        Ok(())
+    } else {
+        Err(findings)
+    }
+}

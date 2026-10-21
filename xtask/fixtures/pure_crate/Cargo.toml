@@ -1,0 +1,11 @@
+[package]
+name = "pure-fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Its own workspace root: the fixture is not part of the repository's workspace.
+[workspace]
+
+[lib]
+path = "src/lib.rs"

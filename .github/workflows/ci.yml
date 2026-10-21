@@ -1,0 +1,66 @@
+# The pull-request gate: one job, `check`, which runs `cargo xtask check` (format, clippy,
+# tests, dependency direction, purity, SPDX headers, workflow lint, cargo-deny and, on a pull
+# request, the DCO sign-off of every commit). The workflow lint in xtask holds this file to
+# its own rules: only pull requests and pushes to main trigger it, every action is a
+# GitHub-owned action pinned by a full commit SHA, and the token is read-only.
+#
+# The Cargo cache (registry, git checkouts, the installed cargo-deny and target) is restored
+# on every run and saved only by a push to main, and only when the exact key missed, so a
+# pull request never writes it.
+name: ci
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental artifacts only bloat a cached target directory.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The whole history: the DCO check reads every commit of the pull request.
+          fetch-depth: 0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-deny
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'xtask/src/tools.rs') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+      - name: cargo xtask check
+        env:
+          # Empty on a push to main, which skips the DCO check.
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: cargo xtask check --install-tools --base "$BASE_SHA"
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ !cancelled() && github.event_name == 'push' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-deny
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}

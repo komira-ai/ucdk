@@ -1,0 +1,10 @@
+[package]
+name = "deny-git-source"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+git_dep = { git = "GIT_URL" }
+
+[workspace]

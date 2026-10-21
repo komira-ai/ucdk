@@ -1,0 +1,36 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "xtask"]
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/komira-ai/ucdk"
+# The toolchain pinned in rust-toolchain.toml.
+rust-version = "1.95"
+version = "0.0.0"
+publish = false
+
+[workspace.dependencies]
+# Derive support for reading cargo metadata and workflow files in xtask.
+serde = { version = "1", features = ["derive"] }
+# Parses `cargo metadata` output in xtask.
+serde_json = "1"
+# Parses .github/workflows files in xtask (a maintained fork of serde_yaml).
+serde_yaml_ng = "0.10"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+# A named subset of clippy::pedantic, not the whole group.
+cloned_instead_of_copied = "warn"
+explicit_iter_loop = "warn"
+implicit_clone = "warn"
+manual_let_else = "warn"
+map_unwrap_or = "warn"
+needless_pass_by_value = "warn"
+redundant_closure_for_method_calls = "warn"
+semicolon_if_nothing_returned = "warn"
+uninlined_format_args = "warn"

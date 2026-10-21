@@ -1,0 +1,5 @@
+# Applies to the impure crates (the CLI, xtask). A crate that declares itself pure
+# (`[package.metadata.ucdk] pure = true`) carries its own clippy.toml, a copy of
+# xtask/templates/pure_clippy.toml, and `cargo xtask purity` checks the copy.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

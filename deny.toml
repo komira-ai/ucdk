@@ -1,0 +1,43 @@
+# cargo-deny configuration, run by `cargo xtask deny` (and so by `cargo xtask check`).
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+# A vulnerability or an unmaintained crate fails the check.
+unmaintained = "all"
+
+[licenses]
+version = 2
+# Permissive licences only. Anything not listed, including every copyleft licence
+# (GPL, LGPL, AGPL, MPL, EPL, CDDL, EUPL, OSL), is refused.
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+# Pure-Rust backends are preferred over C libraries.
+deny = [
+    { crate = "openssl-sys" },
+    { crate = "native-tls" },
+    { crate = "libz-sys" },
+    { crate = "lzma-sys" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

@@ -1,0 +1,3 @@
+- [ ] Every commit is signed off (`git commit -s`).
+- [ ] Nothing internal or private is in the code, commits, branch name or this text.
+- [ ] Each behaviour change has a test that failed first.
