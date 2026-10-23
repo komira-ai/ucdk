@@ -7,7 +7,8 @@ use std::collections::BTreeMap;
 
 use common::{Fake, cache_tools, scratch, strings, write};
 use xtask::coverage::{
-    Counts, FLOOR, LCOV, check_main_rs, crate_of, gate, members, parse_lcov, run,
+    Counts, FLOOR, LCOV, check_branches_measured, check_main_rs, crate_of, excluded, gate, members,
+    parse_lcov, run,
 };
 
 /// One lcov record: `lines` lines of which `hit` ran, `branches` branches of which `taken` ran.
@@ -125,7 +126,6 @@ fn coverage_leaves_out_generated_code_and_main_rs_only() {
         record("/r/crates/a/src/lib.rs", 10, 10, 2, 2),
         record("/r/target/debug/build/a/out/gen.rs", 50, 0, 10, 0),
         record("/r/crates/a/src/main.rs", 5, 0, 0, 0),
-        record("/r/crates/a/src/bin/main.rs", 5, 0, 0, 0),
         record("/r/crates/a/src/main_helper.rs", 5, 5, 0, 0),
     ]
     .concat();
@@ -214,7 +214,7 @@ fn the_verb_runs_the_tests_on_the_pinned_nightly_and_gates_the_lcov_file() {
     );
 
     let bad = [
-        record("/r/crates/c/src/lib.rs", 10, 5, 0, 0),
+        record("/r/crates/c/src/lib.rs", 10, 5, 2, 2),
         record("/r/xtask/src/lib.rs", 10, 10, 0, 0),
     ]
     .concat();
@@ -285,4 +285,87 @@ fn the_verb_stops_when_a_tool_cannot_be_installed() {
     );
     assert!(report.is_empty());
     assert!(fake.log.borrow().iter().all(|c| c.starts_with("curl")));
+}
+
+#[test]
+fn only_prost_output_and_a_members_src_main_rs_are_left_out() {
+    for path in [
+        "target/debug/build/ucdk-proto-0a1b/out/ucdk.resource.v1.rs",
+        "target/llvm-cov-target/debug/build/p-1/out/x.rs",
+        "crates/ucdk-cli/src/main.rs",
+        "xtask/src/main.rs",
+    ] {
+        assert!(excluded(path), "{path}");
+    }
+    for path in [
+        "crates/a/src/bin/tool/main.rs",
+        "crates/a/src/bin/main.rs",
+        "crates/a/tests/main.rs",
+        "crates/a/src/target/mod.rs",
+        "crates/a/src/target/debug/build/x/out/y.rs",
+        "crates/a/src/x/main.rs",
+        "crates/a/b/src/main.rs",
+        "src/main.rs",
+        "target/debug/build/p-1/out/notes.txt",
+        "target/debug/deps/x.rs",
+        "xtask/tests/main.rs",
+    ] {
+        assert!(!excluded(path), "{path}");
+    }
+    // And the lcov parser measures what `excluded` keeps.
+    let lcov = [
+        record("/r/crates/a/src/bin/tool/main.rs", 4, 0, 0, 0),
+        record("/r/crates/a/tests/main.rs", 4, 0, 0, 0),
+        record("/r/crates/a/src/target/mod.rs", 4, 0, 0, 0),
+    ]
+    .concat();
+    let counts = parse_lcov(&lcov, "/r");
+    assert_eq!(counts["a"].lines, 12);
+    assert_eq!(
+        findings(&lcov, &["a"]),
+        [("coverage-lines", "a".to_owned())]
+    );
+}
+
+#[test]
+fn coverage_with_no_branch_measured_anywhere_fails() {
+    let none = [
+        record("/r/crates/a/src/lib.rs", 10, 10, 0, 0),
+        record("/r/xtask/src/lib.rs", 10, 10, 0, 0),
+    ]
+    .concat();
+    let found = check_branches_measured(&parse_lcov(&none, "/r"));
+    assert_eq!(
+        found
+            .iter()
+            .map(|f| (f.rule, f.subject.as_str()))
+            .collect::<Vec<_>>(),
+        [("coverage-no-branches", "workspace")]
+    );
+    assert_eq!(check_branches_measured(&BTreeMap::new()).len(), 1);
+    // One crate with branches is enough; a crate without any is fine on its own.
+    let some = [
+        record("/r/crates/a/src/lib.rs", 10, 10, 0, 0),
+        record("/r/xtask/src/lib.rs", 10, 10, 4, 4),
+    ]
+    .concat();
+    assert!(check_branches_measured(&parse_lcov(&some, "/r")).is_empty());
+}
+
+#[test]
+fn the_verb_fails_when_the_lcov_file_has_no_branch_records() {
+    let no_branches = [
+        record("/r/crates/c/src/lib.rs", 10, 10, 0, 0),
+        record("/r/xtask/src/lib.rs", 10, 10, 0, 0),
+    ]
+    .concat();
+    let fake = Fake {
+        on_run: llvm_cov_writes(Box::leak(no_branches.into_boxed_str())),
+        ..Fake::default()
+    };
+    let (found, _) = run(&project("verb-no-branches"), &fake);
+    assert_eq!(
+        found.iter().map(|f| f.rule).collect::<Vec<_>>(),
+        ["coverage-no-branches"]
+    );
 }

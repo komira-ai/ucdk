@@ -5,19 +5,29 @@ use common::{scratch, write};
 use xtask::tree::read_tree;
 
 #[test]
-fn tree_reads_text_files_sorted_and_skips_build_output_git_and_binary_files() {
+fn tree_reads_files_sorted_and_skips_build_output_and_git() {
     let dir = scratch("tree");
     write(&dir, "b.txt", "b");
     write(&dir, "a/inner.txt", "inner");
     write(&dir, "target/skipped.txt", "x");
     write(&dir, ".git/skipped.txt", "x");
-    std::fs::write(dir.join("blob.bin"), [0xff, 0xfe, 0x00]).expect("write blob");
     let names: Vec<String> = read_tree(&dir)
         .expect("read")
         .into_iter()
         .map(|(p, _)| p)
         .collect();
     assert_eq!(names, ["a/inner.txt", "b.txt"]);
+}
+
+#[test]
+fn tree_reads_a_file_that_is_not_utf8_with_its_text_around_the_bad_bytes() {
+    let dir = scratch("tree-lossy");
+    let mut bytes = vec![0xff, 0xfe, b' '];
+    bytes.extend_from_slice(b"text after");
+    std::fs::write(dir.join("blob.bin"), bytes).expect("write blob");
+    let tree = read_tree(&dir).expect("read");
+    assert_eq!(tree.len(), 1);
+    assert!(tree[0].1.ends_with(" text after"), "{:?}", tree[0].1);
 }
 
 #[test]

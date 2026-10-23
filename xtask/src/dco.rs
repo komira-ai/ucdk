@@ -60,24 +60,31 @@ pub fn check_dco(commits: &[CommitInfo]) -> Vec<Finding> {
     out
 }
 
-/// Parses `git log --format=%x1e%H%x1f%P%x1f%ae%x1f%B` output.
-pub fn parse_log(text: &str) -> Vec<CommitInfo> {
-    text.split('\u{1e}')
-        .filter(|r| !r.trim().is_empty())
-        .map(|r| {
-            let mut f = r.splitn(4, '\u{1f}');
-            let id = f.next().unwrap_or("").trim().to_owned();
-            let parent_count = f.next().unwrap_or("").split_whitespace().count();
-            let author_email = f.next().unwrap_or("").to_owned();
-            let message = f.next().unwrap_or("").to_owned();
-            CommitInfo {
-                id,
-                parent_count,
-                author_email,
-                message,
-            }
-        })
-        .collect()
+/// Parses `git log -z --format=%H%x1f%P%x1f%ae%x1f%B` output: one NUL-terminated record per
+/// commit. Git cannot store a NUL in a commit message, so a message cannot start a record of its
+/// own; a message may hold U+001F, which stays in the last field. A record that is not
+/// `<hex id> <hex parents> <email> <message>` is an error, never a skipped commit.
+pub fn parse_log(text: &str) -> Result<Vec<CommitInfo>, String> {
+    let is_hex = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit());
+    let mut out = Vec::new();
+    for record in text.split('\0').filter(|r| !r.trim().is_empty()) {
+        let fields: Vec<&str> = record.splitn(4, '\u{1f}').collect();
+        let [id, parents, email, message] = fields[..] else {
+            return Err(format!("unreadable git log record: {record:?}"));
+        };
+        let id = id.trim();
+        let parents: Vec<&str> = parents.split_whitespace().collect();
+        if !is_hex(id) || !parents.iter().all(|p| is_hex(p)) {
+            return Err(format!("unreadable git log record: {record:?}"));
+        }
+        out.push(CommitInfo {
+            id: id.to_owned(),
+            parent_count: parents.len(),
+            author_email: email.to_owned(),
+            message: message.to_owned(),
+        });
+    }
+    Ok(out)
 }
 
 /// The commits in `base..HEAD`, oldest first.
@@ -92,10 +99,11 @@ pub fn commits_since(
         &[
             "log",
             "--reverse",
-            "--format=%x1e%H%x1f%P%x1f%ae%x1f%B",
+            "-z",
+            "--format=%H%x1f%P%x1f%ae%x1f%B",
             &range,
         ],
         root,
     );
-    runner.run(&log).map(|text| parse_log(&text))
+    runner.run(&log).and_then(|text| parse_log(&text))
 }

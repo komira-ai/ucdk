@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+mod common;
+
 use xtask::spdx::check_spdx;
 use xtask::tree::read_tree;
 
@@ -35,4 +37,16 @@ fn every_source_file_in_the_repository_has_the_header() {
         "the walk found sources"
     );
     assert_eq!(check_spdx(&tree), vec![]);
+}
+
+#[test]
+fn spdx_checks_a_source_file_that_is_not_utf8() {
+    let dir = common::scratch("spdx-lossy");
+    std::fs::write(dir.join("bad.rs"), [0xff, b'\n']).expect("write");
+    let mut ok = b"// SPDX-License-Identifier: Apache-2.0\n".to_vec();
+    ok.push(0xff);
+    std::fs::write(dir.join("ok.rs"), ok).expect("write");
+    let tree = read_tree(&dir).expect("read");
+    let bad: Vec<String> = check_spdx(&tree).into_iter().map(|f| f.subject).collect();
+    assert_eq!(bad, ["bad.rs"]);
 }

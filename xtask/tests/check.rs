@@ -129,7 +129,7 @@ fn pull_request(base: &str) -> Event {
 }
 
 fn log_line(email: &str, message: &str) -> String {
-    format!("\u{1e}abcdef0123456789\u{1f}parent\u{1f}{email}\u{1f}{message}")
+    format!("abcdef0123456789\u{1f}0123abcd\u{1f}{email}\u{1f}{message}\0")
 }
 
 #[test]
@@ -309,7 +309,7 @@ fn the_coverage_verb_prints_the_per_crate_table() {
             let base = cmd.dir.canonicalize().expect("root");
             let line = |krate: &str| {
                 format!(
-                    "SF:{}/{krate}/src/lib.rs\nDA:1,1\nend_of_record\n",
+                    "SF:{}/{krate}/src/lib.rs\nDA:1,1\nBRDA:1,0,0,1\nend_of_record\n",
                     base.display()
                 )
             };
@@ -327,7 +327,7 @@ fn the_coverage_verb_prints_the_per_crate_table() {
     let (code, text) = cli::run(&strings(&["coverage"]), &env_of(vec![]), &fake, &root);
     assert_eq!(code, 0, "{text}");
     assert!(
-        text.contains("c: lines 100.00% (1/1), branches 0.00% (0/0)"),
+        text.contains("c: lines 100.00% (1/1), branches 100.00% (1/1)"),
         "{text}"
     );
 }

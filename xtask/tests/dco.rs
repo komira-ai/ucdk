@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 mod common;
 
-use common::{Fake, git, scratch};
+use common::{Fake, git, scratch, write};
 use xtask::cmd::System;
 use xtask::dco::{CommitInfo, check_dco, commits_since, parse_log};
 use xtask::event::{Event, commit_base, parse_event};
+use xtask::lint::check_commits;
 
 const A: &str = "a@example.org";
 
@@ -119,13 +120,18 @@ fn event_without_a_pull_request_has_no_base() {
 
 #[test]
 fn log_output_is_split_into_commits() {
-    let text = "\u{1e}h1\u{1f}p0\u{1f}a@example.org\u{1f}one\n\nbody\n\u{1e}h2\u{1f}p1 p2\u{1f}b@example.org\u{1f}merge\n";
-    let commits = parse_log(text);
+    let text = "h1\u{1f}p0\u{1f}a@example.org\u{1f}one\n\nbody\n\0h2\u{1f}p1 p2\u{1f}b@example.org\u{1f}merge\n\0";
+    let text = text
+        .replace("h1", "a1")
+        .replace("h2", "b2")
+        .replace("p0", "c0")
+        .replace("p1 p2", "d1 e2");
+    let commits = parse_log(&text).expect("parse");
     assert_eq!(commits.len(), 2);
-    assert_eq!((commits[0].id.as_str(), commits[0].parent_count), ("h1", 1));
+    assert_eq!((commits[0].id.as_str(), commits[0].parent_count), ("a1", 1));
     assert_eq!(commits[0].message, "one\n\nbody\n");
     assert_eq!(commits[1].parent_count, 2);
-    assert!(parse_log("").is_empty());
+    assert!(parse_log("").expect("empty").is_empty());
     let fake = Fake::default();
     assert!(
         commits_since(&scratch("dco-fake"), &fake, "b")
@@ -133,4 +139,65 @@ fn log_output_is_split_into_commits() {
             .is_empty()
     );
     assert_eq!(fake.log.borrow().len(), 1);
+}
+
+#[test]
+fn a_control_character_in_a_message_cannot_hide_a_commit_from_the_log_reader() {
+    // The old record separator (U+001E) and the field separator (U+001F) are ordinary text now.
+    let date = format!("{}-{:02}-{:02}", 2025, 1, 1);
+    let message = format!(
+        "clean subject\n\nSigned-off-by: A <a@example.org>\n\n\u{1e}0000\u{1f}1111 2222\u{1f}a@example.org\u{1f}leak {date}\n"
+    );
+    let text = format!("abc123\u{1f}def456\u{1f}a@example.org\u{1f}{message}\0");
+    let commits = parse_log(&text).expect("parse");
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0].parent_count, 1);
+    assert_eq!(commits[0].message, message);
+    let rules: Vec<_> = check_commits(&commits).iter().map(|f| f.rule).collect();
+    assert_eq!(rules, ["lint-date"]);
+
+    // The same, through a real repository and `git log`.
+    let repo = scratch("dco-control-char");
+    git(&repo, &["init", "--quiet"]);
+    git(&repo, &["commit", "--quiet", "--allow-empty", "-m", "base"]);
+    let base = git(&repo, &["rev-parse", "HEAD"]).trim().to_owned();
+    write(
+        &repo,
+        "msg.txt",
+        &message.replace("a@example.org", "fixture@example.org"),
+    );
+    git(
+        &repo,
+        &["commit", "--quiet", "--allow-empty", "-F", "msg.txt"],
+    );
+    let commits = commits_since(&repo, &System, &base).expect("log");
+    assert_eq!(commits.len(), 1, "{commits:?}");
+    assert_eq!(
+        commits[0].message.trim_end(),
+        message
+            .replace("a@example.org", "fixture@example.org")
+            .trim_end()
+    );
+    assert_eq!(
+        check_dco(&commits).len(),
+        1,
+        "the sign-off is not in the final paragraph"
+    );
+    assert_eq!(
+        check_commits(&commits).len(),
+        1,
+        "the lint reads the whole message"
+    );
+}
+
+#[test]
+fn a_log_record_that_is_not_a_commit_is_an_error() {
+    for text in [
+        "abc123\u{1f}def456\u{1f}a@example.org\0",
+        "not hex\u{1f}def456\u{1f}a@example.org\u{1f}m\0",
+        "abc123\u{1f}zz\u{1f}a@example.org\u{1f}m\0",
+        "junk\0",
+    ] {
+        assert!(parse_log(text).is_err(), "{text:?}");
+    }
 }

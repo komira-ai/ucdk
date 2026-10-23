@@ -3,9 +3,12 @@
 //! on the pinned nightly (branch coverage needs it), reads the lcov file itself and holds every
 //! crate to the floor for lines and for branches, each crate on its own.
 //!
-//! Left out of the measurement: generated code (anything under a `target` directory, where
-//! prost output lands) and a `main.rs`. A `main.rs` is only allowed to be a forwarding stub: more
-//! than `MAIN_RS_LINES` lines after the licence header is a finding.
+//! Left out of the measurement, and nothing else: generated code (a `.rs` file in the `out`
+//! directory of a build script under the workspace `target` directory, where prost output lands)
+//! and the `src/main.rs` of a workspace member. A `main.rs` is only allowed to be a forwarding
+//! stub: more than `MAIN_RS_LINES` lines after the licence header is a finding. Any other file,
+//! including a `main.rs` elsewhere in a crate or a directory that happens to be named `target`
+//! inside `src`, is measured.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -56,8 +59,18 @@ fn relative<'a>(path: &'a str, root: &str) -> &'a str {
 
 /// `path` is relative to the workspace root, so a checkout that itself sits under a `target`
 /// directory is still measured.
-fn excluded(path: &str) -> bool {
-    path.ends_with("/main.rs") || path.split('/').any(|part| part == "target")
+pub fn excluded(path: &str) -> bool {
+    let generated = path.starts_with("target/")
+        && path.ends_with(".rs")
+        && path.contains("/build/")
+        && path.contains("/out/");
+    let stub = path.strip_suffix("/src/main.rs").is_some_and(|dir| {
+        dir == "xtask"
+            || dir
+                .strip_prefix("crates/")
+                .is_some_and(|n| !n.contains('/'))
+    });
+    generated || stub
 }
 
 /// Sums the `DA:` (line) and `BRDA:` (branch) records of an lcov file per crate.
@@ -142,6 +155,20 @@ pub fn gate(
         }
     }
     (findings, report)
+}
+
+/// A finding when no branch was measured anywhere: a toolchain that stopped writing branch
+/// records would otherwise pass every crate. (One crate may have no branches; the workspace
+/// always has some.)
+pub fn check_branches_measured(counts: &BTreeMap<String, Counts>) -> Vec<Finding> {
+    if counts.values().any(|c| c.branches > 0) {
+        return Vec::new();
+    }
+    vec![Finding::new(
+        "coverage-no-branches",
+        "workspace",
+        "no branch was measured in any crate; the coverage run did not report branches",
+    )]
 }
 
 /// The workspace members: every directory under `crates/`, and `xtask`.
@@ -245,7 +272,9 @@ pub fn run(root: &Path, runner: &dyn Runner) -> (Vec<Finding>, Vec<String>) {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .into_owned();
-            let (found, report) = gate(&parse_lcov(&text, &root_text), &names, FLOOR);
+            let counts = parse_lcov(&text, &root_text);
+            let (found, report) = gate(&counts, &names, FLOOR);
+            findings.extend(check_branches_measured(&counts));
             findings.extend(found);
             findings.extend(check_main_rs(root, &names));
             (findings, report)

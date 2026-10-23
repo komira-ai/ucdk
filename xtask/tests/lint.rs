@@ -251,3 +251,127 @@ fn tree_scan_skips_the_lint_source_and_the_licence_text() {
     let subjects: Vec<_> = check_tree(&files).into_iter().map(|f| f.subject).collect();
     assert_eq!(subjects, ["other.rs:1"]);
 }
+
+#[test]
+fn lint_flags_internal_names_as_whole_words_in_any_case() {
+    for text in [
+        join(&["the C", "EO said"]),
+        join(&["fl", "eet"]),
+        join(&["see k", "bf docs"]),
+        join(&["Mi", "ra:"]),
+        join(&["uni", "ty_", "cir"]),
+        join(&["SPO", "OLR and others"]),
+        join(&["ash", "win"]),
+        join(&["jer", "ry"]),
+    ] {
+        assert_eq!(rules(&text), ["lint-name"], "{text}");
+    }
+    for text in [
+        "a fleeting moment and a miracle",
+        "kbfs and ceos and miras",
+        "unity of purpose",
+    ] {
+        assert!(rules(text).is_empty(), "{text}");
+    }
+}
+
+#[test]
+fn lint_flags_dates_written_other_ways() {
+    let before = [
+        "2026 - 08 - 31".to_owned(),
+        "item 5 - 2025-10-05".to_owned(),
+        "end. 2025 / 10 / 05".to_owned(),
+        join(&["2026", "0831"]),
+        "08/31/2026".to_owned(),
+        "31/08/2026".to_owned(),
+        "31.8.2026".to_owned(),
+        "31.8.26".to_owned(),
+        "3/12/2025".to_owned(),
+        "2026年8月31日".to_owned(),
+        "\u{ff12}\u{ff10}\u{ff12}\u{ff15}-10-05".to_owned(),
+        "\u{0662}\u{0660}\u{0662}\u{0665}-10-05".to_owned(),
+        join(&["Ao", "ût 2026"]),
+        join(&["31 ", "août 2026"]),
+        join(&["Mä", "rz 2025"]),
+        join(&["agos", "to de 2026"]),
+        join(&["ju", "lho 2026"]),
+        join(&["Aug", "\u{200b}ust 31 2026"]),
+    ];
+    for text in &before {
+        assert_eq!(rules(text), ["lint-date"], "{text}");
+    }
+    let after = [
+        "2026 - 09 - 01".to_owned(),
+        "13/09/2026 and 09/13/2026".to_owned(),
+        "15.9.26".to_owned(),
+        "2026年9月1日".to_owned(),
+        join(&["se", "ptembre 2026"]),
+        "20260901 and 12345678 and 99999999999".to_owned(),
+        "version 1.2.3.4.5 and 12.12.25.100.1 and 1.2.3".to_owned(),
+        "3/12/2027 and 2026-13-45".to_owned(),
+        "5 - 3 = 2 and 2026 年".to_owned(),
+    ];
+    for text in &after {
+        assert!(rules(text).is_empty(), "{text}");
+    }
+}
+
+#[test]
+fn lint_sees_through_invisible_characters_and_look_alike_letters() {
+    assert_eq!(rules(&join(&["mu", "\u{200b}", "tant"])), ["lint-word"]);
+    assert_eq!(rules(&join(&["m", "\u{03c5}", "tant"])), ["lint-word"]);
+    assert_eq!(rules(&join(&["mu", "\u{0301}", "tant"])), ["lint-word"]);
+    assert_eq!(rules(&join(&["\u{ff4d}\u{ff55}tant"])), ["lint-word"]);
+    assert_eq!(rules(&join(&["c", "\u{0435}", "o"])), ["lint-name"]);
+    assert_eq!(
+        rules(&join(&["/h", "\u{043e}", "me/x"])),
+        ["lint-home-path"]
+    );
+    assert!(rules("na\u{ef}ve caf\u{e9} stra\u{df}e \u{153}uvre \u{e6}").is_empty());
+}
+
+#[test]
+fn a_file_that_is_not_utf8_is_still_linted() {
+    let dir = common::scratch("lint-lossy");
+    let mut bytes = vec![0xff, b' '];
+    bytes.extend_from_slice(format!("{}-{:02}-{:02}", 2025, 1, 1).as_bytes());
+    std::fs::write(dir.join("notes.txt"), bytes).expect("write");
+    let found = check_tree(&read_tree(&dir).expect("read"));
+    assert_eq!(
+        found.iter().map(|f| f.rule).collect::<Vec<_>>(),
+        ["lint-date"]
+    );
+}
+
+#[test]
+fn a_trailer_is_not_a_way_to_carry_text() {
+    let own = join(&["adi@kom", "ira.com"]);
+    let date = format!("{}-{:02}-{:02}", 2025, 1, 1);
+    let name = join(&["mi", "ra"]);
+    let sign = format!("Add x\n\nSigned-off-by: leaked on {date} {name} <{own}>\n");
+    let found: Vec<_> = check_commits(&[commit(&own, &sign)])
+        .iter()
+        .map(|f| f.rule)
+        .collect();
+    assert_eq!(found, ["lint-date", "lint-name"]);
+    let host = format!(
+        "Co-Authored-By: host {}.{}.{}.{} <noreply@anthropic.com>\n",
+        10, 0, 0, 1
+    );
+    let found: Vec<_> = check_commits(&[commit(&own, &format!("Add x\n\n{host}"))])
+        .iter()
+        .map(|f| f.rule)
+        .collect();
+    assert_eq!(found, ["lint-host"]);
+    // Another address, another key, a missing address: the whole line is scanned.
+    for line in [
+        format!("Signed-off-by: Adi <someone@example.org> {own}"),
+        format!("Reviewed-by: Adi <{own}>"),
+        format!("Signed-off-by: Adi {own}"),
+    ] {
+        assert!(
+            !check_commits(&[commit(&own, &format!("x\n\n{line}\n"))]).is_empty(),
+            "{line}"
+        );
+    }
+}

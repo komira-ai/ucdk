@@ -6,8 +6,9 @@ use std::path::Path;
 
 use crate::io_err;
 
-/// Every UTF-8 file under `root` as (path relative to `root` with `/` separators, text), sorted
-/// by path. `target` and `.git` are skipped; a file that is not UTF-8 text is skipped.
+/// Every file under `root` as (path relative to `root` with `/` separators, text), sorted by
+/// path. `target` and `.git` are skipped. A file that is not valid UTF-8 is read lossily (each bad
+/// byte becomes U+FFFD), so the text around it is still scanned.
 pub fn read_tree(root: &Path) -> Result<Vec<(String, String)>, String> {
     let mut out = Vec::new();
     walk(root, "", &mut out)?;
@@ -27,8 +28,9 @@ fn walk(dir: &Path, prefix: &str, out: &mut Vec<(String, String)>) -> Result<(),
             if name != "target" && name != ".git" {
                 walk(&entry.path(), &format!("{rel}/"), out)?;
             }
-        } else if let Ok(text) = fs::read_to_string(entry.path()) {
-            out.push((rel, text));
+        } else {
+            let bytes = fs::read(entry.path()).map_err(io_err)?;
+            out.push((rel, String::from_utf8_lossy(&bytes).into_owned()));
         }
     }
     Ok(())
