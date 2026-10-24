@@ -13,6 +13,22 @@ use crate::engine::Engine;
 use crate::error::EngineError;
 use crate::seam::Report;
 
+/// What a node that reads outputs comes to when it is reached.
+enum Applied {
+    /// Every value is known: the node as it will be applied.
+    Node(Node),
+    /// A producer is still coming up, or not confirmed: nothing is written.
+    Waiting,
+    /// A producer is still failed after this run's update: nothing is written. The path is
+    /// the producer's.
+    Blocked(NodePath),
+}
+
+/// The `run` node of the resource that produces a value.
+fn producer_path(resource: &str) -> NodePath {
+    NodePath::new(&format!("{resource}/{ROLE_RUN}")).expect("a resource id is one valid segment")
+}
+
 /// A record for the node, as a first intent.
 fn first_intent(pn: &PlanNode) -> Record {
     Record::intent(
@@ -40,19 +56,24 @@ fn intent_for(prior: Option<Record>, pn: &PlanNode) -> Record {
 
 impl Engine<'_> {
     /// The node as it will be applied: its literal fields plus each output it reads, as the
-    /// ledger records it for the producer now. `None` when a producer is not confirmed yet (it
-    /// is still coming up), so the value does not exist and the node waits for a later run. A
-    /// producer that is confirmed and has no such output is an error.
-    fn applied(&self, pn: &PlanNode) -> Result<Option<Node>, EngineError> {
+    /// ledger records it for the producer now. A producer that this run has read as still
+    /// coming up leaves the node waiting, whatever its record says: its recorded outputs may
+    /// be about to change. So does a producer that is not confirmed yet, since the value does
+    /// not exist; if such a producer is still failed after this run's update, the node is
+    /// blocked by it. A producer that is confirmed and has no such output is an error.
+    fn applied(&self, pn: &PlanNode, report: &Report) -> Result<Applied, EngineError> {
         if pn.refs.is_empty() {
-            return Ok(Some(pn.node.clone()));
+            return Ok(Applied::Node(pn.node.clone()));
+        }
+        if pn
+            .refs
+            .iter()
+            .any(|r| report.converging.contains(&producer_path(&r.resource)))
+        {
+            return Ok(Applied::Waiting);
         }
         let records = self.ledger.read()?.records;
-        let producer = |resource: &str| {
-            let path = NodePath::new(&format!("{resource}/{ROLE_RUN}"))
-                .expect("a resource id is one valid segment");
-            records.get(&path)
-        };
+        let producer = |resource: &str| records.get(&producer_path(resource));
         let bound = pn.bound(|resource, output| {
             // Only a confirmed record's outputs are the live object's: an intent written by an
             // update still carries the previous outputs, which the update is about to change.
@@ -62,18 +83,24 @@ impl Engine<'_> {
                 .map(String::as_str)
         });
         match bound {
-            Ok(node) => Ok(Some(node)),
-            Err(pending) => match pending
-                .iter()
-                .find(|r| producer(&r.resource).is_some_and(|p| p.state == State::Confirmed))
-            {
-                Some(r) => Err(EngineError::OutputUnknown {
-                    path: pn.node.path().clone(),
-                    resource: r.resource.clone(),
-                    output: r.output.as_str_name().to_owned(),
-                }),
-                None => Ok(None),
-            },
+            Ok(node) => Ok(Applied::Node(node)),
+            Err(pending) => {
+                if let Some(r) = pending
+                    .iter()
+                    .find(|r| producer(&r.resource).is_some_and(|p| p.state == State::Confirmed))
+                {
+                    return Err(EngineError::OutputUnknown {
+                        path: pn.node.path().clone(),
+                        resource: r.resource.clone(),
+                        output: r.output.as_str_name().to_owned(),
+                    });
+                }
+                Ok(pending
+                    .iter()
+                    .map(|r| producer_path(&r.resource))
+                    .find(|path| report.failed.contains(path))
+                    .map_or(Applied::Waiting, Applied::Blocked))
+            }
         }
     }
 
@@ -93,9 +120,18 @@ impl Engine<'_> {
         pn: &PlanNode,
         report: &mut Report,
     ) -> Result<(), EngineError> {
-        let Some(node) = self.applied(pn)? else {
-            report.converging.push(pn.node.path().clone());
-            return Ok(());
+        let node = match self.applied(pn, report)? {
+            Applied::Node(node) => node,
+            Applied::Waiting => {
+                report.converging.push(pn.node.path().clone());
+                return Ok(());
+            }
+            Applied::Blocked(producer) => {
+                report
+                    .blocked_by_failed
+                    .push((pn.node.path().clone(), producer));
+                return Ok(());
+            }
         };
         let record = self.record_of(node.path())?;
         match self.observe_node(&node, record.as_ref())? {

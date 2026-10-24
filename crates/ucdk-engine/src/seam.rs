@@ -120,6 +120,10 @@ pub struct Report {
     /// Objects that read as failed after this run's create or repair: their records are not
     /// confirmed, and the run still succeeds; a later run updates them again.
     pub failed: Vec<NodePath>,
+    /// Objects that read an output of a resource still failed after this run's write, each with
+    /// that resource's path: nothing was written to them, and a later run settles them once
+    /// their producer is ready.
+    pub blocked_by_failed: Vec<(NodePath, NodePath)>,
     /// Objects a rollback deleted (or found gone).
     pub rolled_back: Vec<NodePath>,
     /// Objects a rollback could not delete.

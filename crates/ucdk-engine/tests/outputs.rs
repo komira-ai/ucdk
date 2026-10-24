@@ -171,6 +171,57 @@ fn a_consumer_waits_while_its_producer_is_coming_up() {
 }
 
 #[test]
+fn a_consumer_waits_while_a_confirmed_producer_reads_converging() {
+    let mut fake = Fake::standard();
+    let ledger = MemoryLedger::new();
+    done(apply(&mut fake, &ledger, &bound_pair()));
+    let db = physical_of(&ledger, "db/run");
+    assert_eq!(records(&ledger)[&path("db/run")].state, State::Confirmed);
+    assert!(fake.set_status(&db, ucdk_provider::Status::Converging));
+    // The consumer's own fields change: were the producer's recorded outputs enough, it would
+    // be updated now.
+    let changed = lowered(vec![
+        service_reading("app", 99, "DB_URL", "db", Output::Url),
+        service_of("db", 5432, false, &[]),
+    ]);
+    let written = mutations(&fake);
+    let report = done(apply(&mut fake, &ledger, &changed));
+    assert_eq!(report.converging, [path("db/run"), path("app/run")]);
+    assert!(report.updated.is_empty() && report.created.is_empty());
+    assert_eq!(mutations(&fake), written, "nothing was written");
+    assert!(
+        objects(&fake).contains("port=80") && !objects(&fake).contains("port=99"),
+        "the consumer was left as it was"
+    );
+    // Once the producer reads ready, a later run applies the consumer and confirms it.
+    assert!(fake.set_status(&db, ucdk_provider::Status::Ready));
+    let later = done(apply(&mut fake, &ledger, &changed));
+    assert_eq!(later.updated, [path("app/run")]);
+    assert!(objects(&fake).contains("port=99"));
+    assert_eq!(records(&ledger)[&path("app/run")].state, State::Confirmed);
+}
+
+#[test]
+fn a_consumer_of_a_still_failed_producer_is_reported_blocked() {
+    let mut fake = Fake::standard();
+    // The producer is born failed: it reads failed when the run looks at it again.
+    *fake.faults_mut().create_failed = true;
+    let ledger = MemoryLedger::new();
+    let report = done(apply(&mut fake, &ledger, &bound_pair()));
+    assert_eq!(report.created, [path("db/run")]);
+    assert_eq!(report.failed, [path("db/run")]);
+    assert_eq!(
+        report.blocked_by_failed,
+        [(path("app/run"), path("db/run"))]
+    );
+    assert!(
+        report.converging.is_empty(),
+        "a failed producer is not a coming-up one: {report:?}"
+    );
+    assert!(!records(&ledger).contains_key(&path("app/run")));
+}
+
+#[test]
 fn an_output_the_producer_does_not_report_stops_the_run() {
     let mut fake = Fake::standard();
     let ledger = MemoryLedger::new();

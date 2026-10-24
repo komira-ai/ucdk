@@ -33,7 +33,9 @@
 //!   outputs; a secret output is never written to the ledger. A node that reads an output is
 //!   applied with the producer's recorded value, and a run that changes the producer resolves
 //!   the node (a step planned as known after apply) only once the producer is confirmed. A
-//!   producer that is still coming up leaves the node waiting for a later run.
+//!   producer that this run reads as still coming up leaves the node waiting for a later run,
+//!   whatever its record says; one that is still failed after the run's update leaves the node
+//!   blocked, and the report names the producer.
 //! - **Rollback, opt in.** After a failed apply, only the objects that run created are deleted,
 //!   newest first; nothing it updated is touched.
 //!

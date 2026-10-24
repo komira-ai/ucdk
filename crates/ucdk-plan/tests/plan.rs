@@ -724,6 +724,34 @@ fn known_after_apply_in_plan_hash() {
 }
 
 #[test]
+fn known_after_apply_hash_tag_is_pinned() {
+    let l = app_with_db_url(false);
+    // The producer is a no-op in both plans; only the consumer's step differs.
+    let hash = |recorded: Option<&str>, live_url: &str| {
+        let mut o = observed()
+            .with(ours(node(&l, "db/run")))
+            .with(ours_bound(node(&l, "app/run"), live_url));
+        if let Some(url) = recorded {
+            o = o.with_output("db", "URL", url);
+        }
+        run(&l, &o)
+    };
+    let later = hash(None, "db-url-1");
+    assert_eq!(
+        steps(&later)[1],
+        ("app/run", &Action::KnownAfterApply),
+        "the plan holds a known-after-apply step"
+    );
+    assert_eq!(
+        later.hash().as_str(),
+        "2c03b5283a6c821c8f89bb887749ecf32fc4782a05948227a5b76926d0a4d556"
+    );
+    let update = hash(Some("db-url-1"), "db-url-0");
+    assert_eq!(steps(&update)[1], ("app/run", &Action::Update));
+    assert_ne!(later.hash(), update.hash());
+}
+
+#[test]
 fn consumer_of_a_producer_that_is_changing_is_known_after_apply() {
     let l = app_with_db_url(false);
     // The recorded output matches the object, but the producer is itself being updated, so

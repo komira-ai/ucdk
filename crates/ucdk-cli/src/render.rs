@@ -100,6 +100,12 @@ pub fn report_text(report: &Report) -> String {
             "  failed   {path} (still failed after the write; its record is not confirmed, run again to retry)"
         );
     }
+    for (path, producer) in &report.blocked_by_failed {
+        let _ = writeln!(
+            text,
+            "  blocked  {path} (its producer {producer} is still failed)"
+        );
+    }
     text.push_str(&if changes == 0 {
         "no changes\n".to_owned()
     } else {
