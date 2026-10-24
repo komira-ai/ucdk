@@ -48,7 +48,7 @@ impl fmt::Display for EngineError {
             Self::StillPresent(p) => write!(f, "{p}: the object is there when it should be gone"),
             Self::Unwitnessed(p) => write!(
                 f,
-                "{p}: no object is read, but none was ever read back after its create"
+                "{p}: no object is read, but the record is an intent that no read has confirmed"
             ),
         }
     }

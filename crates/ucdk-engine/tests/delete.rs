@@ -632,7 +632,7 @@ fn an_object_that_reappears_before_the_reap_keeps_its_record() {
 }
 
 #[test]
-fn an_intent_that_never_reached_a_create_is_reaped_when_no_object_is_read() {
+fn an_intent_with_no_object_id_is_not_reaped_when_no_object_is_read() {
     let (mut fake, ledger) = world();
     let intent = ucdk_ledger::Record::intent(
         path("web/public"),
@@ -642,7 +642,36 @@ fn an_intent_that_never_reached_a_create_is_reaped_when_no_object_is_read() {
     );
     let token = ledger.read().expect("read").token;
     ledger.write(&token, Change::Put(intent)).expect("write");
-    let report = done(apply(&mut fake, &ledger, &chain_with(5432, false)));
-    assert_eq!(report.reaped, paths(&["web/public"]));
-    assert!(!records(&ledger).contains_key(&path("web/public")));
+    let f = failure(apply(&mut fake, &ledger, &chain_with(5432, false)));
+    assert_eq!(f.error, EngineError::Unwitnessed(path("web/public")));
+    assert_eq!(records(&ledger)[&path("web/public")].state, State::Intent);
+}
+
+#[test]
+fn a_lost_create_reply_and_a_lagging_read_do_not_let_destroy_orphan_the_object() {
+    let (mut fake, ledger) = world();
+    // The create lands and its reply is lost: the intent names no object. Reads then lag, so
+    // the object reads as absent.
+    fake.faults_mut().ambiguous_at_call.replace(1);
+    *fake.faults_mut().read_lag = 20;
+    let f = failure(apply(&mut fake, &ledger, &chain()));
+    assert_eq!(f.at, Some(path("db/run")));
+    assert_eq!(fake.object_count(), 1);
+
+    // A destroy does not drop the record on that read: the object stays recorded.
+    let f = failure(destroy(&mut fake, &ledger, &chain()));
+    assert_eq!(f.error, EngineError::Unwitnessed(path("db/run")));
+    assert_eq!(fake.object_count(), 1);
+    assert_eq!(records(&ledger)[&path("db/run")].state, State::Intent);
+
+    // Once the lag has passed, an apply takes the object and a destroy removes it.
+    for _ in 0..30 {
+        plan_of(&mut fake, &ledger, &chain());
+    }
+    *fake.faults_mut().read_lag = 0;
+    *fake.faults_mut().ambiguous_at_call = None;
+    done(apply(&mut fake, &ledger, &chain()));
+    done(destroy(&mut fake, &ledger, &chain()));
+    assert_eq!(fake.object_count(), 0);
+    assert!(records(&ledger).is_empty());
 }

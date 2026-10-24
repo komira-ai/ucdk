@@ -17,10 +17,12 @@ enum Removal {
     Kept(Retained),
 }
 
-/// An absent read drops a record only if the object was read after it was created. An intent
-/// that names an object was created but never read back, so its absence may be a lagging read.
+/// An absent read drops a record only if it is not an intent. An intent is written before a
+/// create or an update, so its call may have landed with the reply lost: an intent that names
+/// an object was never read back, and one that names none may belong to a create that did
+/// land. Either way the absence may be a lagging read. A run of apply settles an intent.
 fn witnessed(record: &Record) -> Result<(), EngineError> {
-    if record.state == State::Intent && record.physical.is_some() {
+    if record.state == State::Intent {
         return Err(EngineError::Unwitnessed(record.path.clone()));
     }
     Ok(())

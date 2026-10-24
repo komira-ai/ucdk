@@ -9,8 +9,8 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use common::{
-    FlakyLedger, Hooked, apply, chain, destroy, done, lowered, mutations, objects, owned_by_fake,
-    path, paths, records, service_of,
+    FlakyLedger, Hooked, apply, apply_with, chain, destroy, done, lowered, mutations, objects,
+    owned_by_fake, path, paths, records, service_of,
 };
 use ucdk_engine::{EngineError, Outcome, Report};
 use ucdk_ledger::{LedgerError, MemoryLedger, Record, State};
@@ -251,6 +251,86 @@ fn crash_sweep_every_call_k_no_duplicates_or_orphans() {
     }
 }
 
+/// The state a rollback run leaves, without object ids: a rolled-back object comes back under
+/// a new id when the next run creates it again.
+fn state_without_ids(
+    fake: &Fake,
+    ledger: &MemoryLedger,
+) -> (Vec<String>, BTreeMap<ucdk_provider::NodePath, Record>) {
+    let mut lines: Vec<String> = objects(fake)
+        .lines()
+        .map(|l| {
+            l.trim()
+                .split_once(' ')
+                .map_or("", |(_, rest)| rest)
+                .to_owned()
+        })
+        .collect();
+    lines.sort();
+    let recorded = records(ledger)
+        .into_iter()
+        .map(|(p, r)| {
+            (
+                p,
+                Record {
+                    physical: None,
+                    ..r
+                },
+            )
+        })
+        .collect();
+    (lines, recorded)
+}
+
+#[test]
+fn crash_sweep_rollback_every_call_k_no_duplicates_or_orphans() {
+    let (mut clean, clean_ledger) = (Fake::standard(), MemoryLedger::new());
+    done(apply(&mut clean, &clean_ledger, &chain()));
+    let expected = state_without_ids(&clean, &clean_ledger);
+
+    // The run's own fourth mutation (the last create) fails, either by a refusal or by a lost
+    // reply, so the run rolls back. The rollback deletes are calls 5 to 7; a fault of the
+    // other kind is injected at each of them.
+    for trigger_ambiguous in [false, true] {
+        for k in 5..=7u64 {
+            let context = format!("rollback (trigger ambiguous={trigger_ambiguous}, k={k})");
+            let (mut fake, ledger) = (Fake::standard(), MemoryLedger::new());
+            {
+                let faults = fake.faults_mut();
+                if trigger_ambiguous {
+                    *faults.ambiguous_at_call = Some(4);
+                    *faults.fail_at_call = Some(k);
+                } else {
+                    *faults.fail_at_call = Some(4);
+                    *faults.ambiguous_at_call = Some(k);
+                }
+            }
+            let crashed = apply_with(&mut fake, &ledger, &chain(), true);
+            let f = failure(crashed);
+            assert_eq!(f.at, Some(path("web/public")), "{context}");
+            assert!(
+                !f.report.rollback_failed.is_empty(),
+                "{context}: the fault hit a rollback delete"
+            );
+            {
+                let faults = fake.faults_mut();
+                *faults.ambiguous_at_call = None;
+                *faults.fail_at_call = None;
+            }
+            done(apply(&mut fake, &ledger, &chain()));
+            assert_eq!(
+                state_without_ids(&fake, &ledger),
+                expected,
+                "{context}: not the clean state"
+            );
+            assert_consistent(&mut fake, &ledger, &context);
+            let settled = mutations(&fake);
+            done(apply(&mut fake, &ledger, &chain()));
+            assert_eq!(mutations(&fake), settled, "{context}: not settled");
+        }
+    }
+}
+
 #[test]
 fn crash_sweep_every_ledger_write_no_duplicates_or_orphans() {
     for scenario in scenarios() {
@@ -419,7 +499,7 @@ fn errors_and_refusals_read_as_sentences() {
             "the ledger kept changing under the run",
             "a/run: the object is not ours (stamp and record)",
             "a/run: the object is there when it should be gone",
-            "a/run: no object is read, but none was ever read back after its create",
+            "a/run: no object is read, but the record is an intent that no read has confirmed",
         ]
     );
     let (mut fake, ledger) = (Fake::standard(), MemoryLedger::new());
