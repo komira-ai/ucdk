@@ -74,6 +74,11 @@ impl Fake {
         self.calls.clear();
     }
 
+    /// Whether the fake hosts the kind: a create of a kind it does not host is refused.
+    pub fn hosts(&self, kind: &Kind) -> bool {
+        !self.config.unsupported.contains(kind)
+    }
+
     /// How many live objects the store holds, hidden ones included.
     pub fn object_count(&self) -> usize {
         self.objects.len()
@@ -265,7 +270,7 @@ impl Fake {
         if self.fail_now() {
             return Err(ProviderError::Refused(Refusal::Rejected));
         }
-        if self.config.unsupported.contains(node.kind()) {
+        if !self.hosts(node.kind()) {
             return Err(ProviderError::Refused(Refusal::Unsupported));
         }
         // A kind that cannot carry extra labels refuses them; it never stores the stamp without.

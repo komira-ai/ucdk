@@ -552,6 +552,15 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 [[package]]
 name = "ucdk-cli"
 version = "0.0.0"
+dependencies = [
+ "prost",
+ "ucdk-engine",
+ "ucdk-ledger",
+ "ucdk-plan",
+ "ucdk-proto",
+ "ucdk-provider",
+ "ucdk-provider-fake",
+]
 
 [[package]]
 name = "ucdk-engine"
