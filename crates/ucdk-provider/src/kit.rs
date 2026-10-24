@@ -290,6 +290,7 @@ pub fn update_missing_is_not_found<H: Harness>(h: &H) -> Result<(), Failure> {
             status: Status::Ready,
             digest: node.digest(),
             unmanaged: Vec::new(),
+            outputs: Vec::new(),
         };
         run.refused("update", p.update(&node, &ghost), Refusal::NotFound);
         run.absent("observe", p.observe(&node, None));

@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use ucdk_provider::node::digest_of;
 use ucdk_provider::{
     CellScope, Created, Deletability, Kind, Live, Node, Observation, OwnedObject, OwnerScope,
-    PhysicalId, Provider, ProviderError, Refusal, SCHEME, StampEvidence, StampMode, StateClass,
-    Status, Updated,
+    PhysicalId, Produced, Provider, ProviderError, Refusal, SCHEME, StampEvidence, StampMode,
+    StateClass, Status, Updated,
 };
 use ucdk_provider::{Digest, Stamp};
 
@@ -225,8 +225,24 @@ impl Fake {
         }
     }
 
+    /// What the object produces: a `service` has a URL and a host derived from its name, and a
+    /// kind in `secret_output` also has a secret token.
+    fn outputs_of(&self, object: &Object) -> Vec<Produced> {
+        let mut outputs = Vec::new();
+        if object.kind == Kind::service() {
+            let host = format!("{}.example.org", object.base);
+            outputs.push(Produced::new("URL", format!("https://{host}")));
+            outputs.push(Produced::new("HOST", host));
+        }
+        if self.config.secret_output.contains(&object.kind) {
+            outputs.push(Produced::new("TOKEN", format!("token-of-{}", object.base)).secret());
+        }
+        outputs
+    }
+
     fn live_of(&self, id: &PhysicalId, object: &Object, read: u64) -> Live {
         Live {
+            outputs: self.outputs_of(object),
             physical: id.clone(),
             name: object.base.clone(),
             stamp: object.evidence(self.is_tagless(&object.kind)),
@@ -495,7 +511,15 @@ impl Provider for Fake {
             landed.clone().map(|_| ()),
         );
         self.record(call);
-        self.reply(landed.map(|digest| Updated { digest }))
+        let updated = landed.map(|digest| Updated {
+            digest,
+            outputs: self
+                .objects
+                .get(&live.physical)
+                .map(|o| self.outputs_of(o))
+                .unwrap_or_default(),
+        });
+        self.reply(updated)
     }
 
     fn delete(&mut self, kind: &Kind, physical: &PhysicalId) -> Result<(), ProviderError> {

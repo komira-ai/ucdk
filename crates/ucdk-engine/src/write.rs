@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The writing steps: create, update, and finding an object an earlier run left.
 
+use std::collections::BTreeMap;
+
 use ucdk_ledger::{Change, Record, State};
-use ucdk_plan::PlanNode;
+use ucdk_plan::{PlanNode, ROLE_RUN};
 use ucdk_provider::{
-    Live, Node, Observation, ProviderError, Refusal as CallRefusal, Stamp, Status,
+    Live, Node, NodePath, Observation, ProviderError, Refusal as CallRefusal, Stamp, Status,
 };
 
 use crate::engine::Engine;
@@ -37,12 +39,38 @@ fn intent_for(prior: Option<Record>, pn: &PlanNode) -> Record {
 }
 
 impl Engine<'_> {
-    /// The node as it will be applied. A value reference to another resource's output has no
-    /// recorded value to fill in, so the node goes out with its literal fields.
-    fn applied(pn: &PlanNode) -> Node {
-        match pn.bound(|_, _| None) {
-            Ok(node) => node,
-            Err(_) => pn.node.clone(),
+    /// The node as it will be applied: its literal fields plus each output it reads, as the
+    /// ledger records it for the producer now. `None` when a producer is not confirmed yet (it
+    /// is still coming up), so the value does not exist and the node waits for a later run. A
+    /// producer that is confirmed and has no such output is an error.
+    fn applied(&self, pn: &PlanNode) -> Result<Option<Node>, EngineError> {
+        if pn.refs.is_empty() {
+            return Ok(Some(pn.node.clone()));
+        }
+        let records = self.ledger.read()?.records;
+        let producer = |resource: &str| {
+            let path = NodePath::new(&format!("{resource}/{ROLE_RUN}"))
+                .expect("a resource id is one valid segment");
+            records.get(&path)
+        };
+        let bound = pn.bound(|resource, output| {
+            producer(resource)
+                .and_then(|record| record.outputs.get(output))
+                .map(String::as_str)
+        });
+        match bound {
+            Ok(node) => Ok(Some(node)),
+            Err(pending) => match pending
+                .iter()
+                .find(|r| producer(&r.resource).is_some_and(|p| p.state == State::Confirmed))
+            {
+                Some(r) => Err(EngineError::OutputUnknown {
+                    path: pn.node.path().clone(),
+                    resource: r.resource.clone(),
+                    output: r.output.as_str_name().to_owned(),
+                }),
+                None => Ok(None),
+            },
         }
     }
 
@@ -62,7 +90,10 @@ impl Engine<'_> {
         pn: &PlanNode,
         report: &mut Report,
     ) -> Result<(), EngineError> {
-        let node = Self::applied(pn);
+        let Some(node) = self.applied(pn)? else {
+            report.converging.push(pn.node.path().clone());
+            return Ok(());
+        };
         let record = self.record_of(node.path())?;
         match self.observe_node(&node, record.as_ref())? {
             Observation::Absent => self.create(pn, &node, record, report),
@@ -82,6 +113,7 @@ impl Engine<'_> {
         // the create returns it.
         let intent = Record {
             physical: None,
+            outputs: BTreeMap::new(),
             ..intent_for(prior, pn)
         };
         self.commit(&Change::Put(intent.clone()))?;
@@ -99,7 +131,8 @@ impl Engine<'_> {
                 };
                 match self.observe_node(node, Some(&named)) {
                     Ok(Observation::Present(live)) if live.status == Status::Ready => {
-                        self.commit(&Change::Put(intent.confirmed(created.physical)))
+                        let confirmed = intent.confirmed(created.physical);
+                        self.commit(&Change::Put(confirmed.with_outputs(&live.outputs)))
                     }
                     Ok(Observation::Present(live)) => {
                         note_not_ready(report, node, live.status);
@@ -169,12 +202,12 @@ impl Engine<'_> {
             return Ok(());
         }
         let was_confirmed = record.as_ref().is_some_and(|r| r.state == State::Confirmed);
-        let base = if live.digest == node.digest() && live.status == Status::Ready {
+        let (base, outputs) = if live.digest == node.digest() && live.status == Status::Ready {
             if was_confirmed {
                 return Ok(());
             }
             report.resumed.push(node.path().clone());
-            intent_for(record, pn)
+            (intent_for(record, pn), live.outputs.clone())
         } else {
             // Written before the update, with the object's id: a crash leaves a record that
             // names the object the update may have changed.
@@ -183,14 +216,15 @@ impl Engine<'_> {
                 ..intent_for(record, pn)
             };
             self.commit(&Change::Put(intent.clone()))?;
-            self.provider.update(node, live)?;
+            let updated = self.provider.update(node, live)?;
             report.updated.push(node.path().clone());
             if live.status == Status::Failed {
                 return self.confirm_when_ready(node, intent, report);
             }
-            intent
+            (intent, updated.outputs)
         };
-        self.commit(&Change::Put(base.confirmed(live.physical.clone())))
+        let confirmed = base.confirmed(live.physical.clone());
+        self.commit(&Change::Put(confirmed.with_outputs(&outputs)))
     }
 
     /// After the update of a failed object: read it again and confirm the record only if the
@@ -204,7 +238,8 @@ impl Engine<'_> {
     ) -> Result<(), EngineError> {
         match self.observe_node(node, Some(&intent))? {
             Observation::Present(now) if now.status == Status::Ready => {
-                self.commit(&Change::Put(intent.confirmed(now.physical)))
+                let confirmed = intent.confirmed(now.physical);
+                self.commit(&Change::Put(confirmed.with_outputs(&now.outputs)))
             }
             Observation::Present(now) => {
                 note_not_ready(report, node, now.status);

@@ -200,6 +200,7 @@ pub struct Hooked<'f> {
     calls: usize,
     at: usize,
     hook: Option<Hook<'f>>,
+    silent: bool,
 }
 
 impl<'f> Hooked<'f> {
@@ -209,6 +210,15 @@ impl<'f> Hooked<'f> {
             calls: 0,
             at,
             hook: Some(Box::new(hook)),
+            silent: false,
+        }
+    }
+
+    /// The fake as a provider that reports no outputs for any object.
+    pub fn silent(fake: &'f mut Fake) -> Self {
+        Self {
+            silent: true,
+            ..Self::new(fake, usize::MAX, |_| {})
         }
     }
 
@@ -246,7 +256,11 @@ impl Provider for Hooked<'_> {
         hint: Option<&PhysicalId>,
     ) -> Result<Observation, ProviderError> {
         self.tick();
-        self.fake.observe(node, hint)
+        let mut seen = self.fake.observe(node, hint)?;
+        if let (true, Observation::Present(live)) = (self.silent, &mut seen) {
+            live.outputs.clear();
+        }
+        Ok(seen)
     }
 
     fn create(
@@ -260,7 +274,11 @@ impl Provider for Hooked<'_> {
 
     fn update(&mut self, node: &Node, live: &Live) -> Result<Updated, ProviderError> {
         self.tick();
-        self.fake.update(node, live)
+        let mut updated = self.fake.update(node, live)?;
+        if self.silent {
+            updated.outputs.clear();
+        }
+        Ok(updated)
     }
 
     fn delete(&mut self, kind: &Kind, physical: &PhysicalId) -> Result<(), ProviderError> {
@@ -333,4 +351,39 @@ impl Ledger for FlakyLedger {
         }
         self.inner.write(expected, change)
     }
+}
+
+// ---- value references ------------------------------------------------------------------------
+
+/// A service `id` whose env var `env_key` takes the `output` of the resource `producer`; it
+/// also calls `producer`, as a service that reads another's address does.
+pub fn service_reading(
+    id: &str,
+    port: u32,
+    env_key: &str,
+    producer: &str,
+    output: ucdk_proto::v1::Output,
+) -> Resource {
+    let mut resource = service_of(id, port, false, &[producer]);
+    let Some(Body::Service(service)) = &mut resource.body else {
+        unreachable!("service_of builds a service");
+    };
+    service.env.insert(
+        env_key.to_owned(),
+        ucdk_proto::v1::Value {
+            v: Some(ucdk_proto::v1::value::V::Ref(Ref {
+                resource: producer.to_owned(),
+                output: Some(ucdk_proto::v1::r#ref::Output::Standard(output as i32)),
+            })),
+        },
+    );
+    resource
+}
+
+/// `app` reads the URL of `db`: two services, `db/run` first.
+pub fn bound_pair() -> Lowered {
+    lowered(vec![
+        service_reading("app", 80, "DB_URL", "db", ucdk_proto::v1::Output::Url),
+        service_of("db", 5432, false, &[]),
+    ])
 }

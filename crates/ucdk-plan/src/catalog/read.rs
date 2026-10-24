@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use ucdk_proto::v1::r#ref::Output as Arm;
 use ucdk_proto::v1::resource::Body as Wire;
 use ucdk_proto::v1::{
-    Access, Image, Job, Output, Ref, Resource, ResourceList, SecretRef, Service, Size, Uses, Value,
-    image, value,
+    Access, Image, Job, Output, Portability, Ref, Resource, ResourceList, SecretRef, Service, Size,
+    Uses, Value, image, value,
 };
 use ucdk_provider::{DesiredField, FieldValue, Kind, OwnerLabel};
 
@@ -111,6 +111,8 @@ struct Reader<'a> {
     id: &'a str,
     /// Every resource of the list by id, with the outputs its type exposes.
     exposes: &'a BTreeMap<&'a str, &'static [Output]>,
+    /// The resources whose type is marked `CLOUD_BOUND`.
+    cloud_bound: &'a BTreeSet<&'a str>,
     findings: Vec<Finding>,
     deps: BTreeSet<String>,
     refs: Vec<ValueRef>,
@@ -119,10 +121,7 @@ struct Reader<'a> {
 /// A value as written: text now, or another resource's output later.
 enum Read {
     Text(String),
-    Ref {
-        resource: String,
-        output: &'static str,
-    },
+    Ref { resource: String, output: Output },
 }
 
 impl Reader<'_> {
@@ -131,9 +130,17 @@ impl Reader<'_> {
     }
 
     /// Resolves a reference to a resource of the list, recording the edge. An unbound target
-    /// is a finding.
+    /// is a finding, and so is a target whose type is not portable: another resource's
+    /// node cannot be bound to something only one cloud hosts.
     fn bind(&mut self, field: &str, target: &Ref) -> Option<&'static [Output]> {
         let found = self.exposes.get(target.resource.as_str()).copied();
+        if found.is_some() && self.cloud_bound.contains(target.resource.as_str()) {
+            let kind = FindingKind::NotPortable {
+                target: target.resource.clone(),
+            };
+            self.report(field, kind);
+            return None;
+        }
         if found.is_some() {
             self.deps.insert(target.resource.clone());
         } else {
@@ -160,7 +167,7 @@ impl Reader<'_> {
             Some(output @ (Output::Url | Output::Host)) if exposed.contains(&output) => {
                 Some(Read::Ref {
                     resource: target.resource.clone(),
-                    output: output.as_str_name(),
+                    output,
                 })
             }
             Some(output @ (Output::Url | Output::Host)) => {
@@ -290,10 +297,20 @@ impl Reader<'_> {
     }
 }
 
+/// How portable a type is, as the catalog marks it: both v1 types (`service`, `job`) are
+/// `PORTABLE`.
+pub fn catalog_portability(_type_name: &str) -> Portability {
+    Portability::Portable
+}
+
 /// Reads the list: every finding if anything is wrong, else the resources in dependency
-/// order.
-pub fn read(list: &ResourceList) -> Result<Vec<Spec>, Vec<Finding>> {
+/// order. `portability` says how portable each type is, by its name.
+pub fn read(
+    list: &ResourceList,
+    portability: impl Fn(&str) -> Portability,
+) -> Result<Vec<Spec>, Vec<Finding>> {
     let mut findings = Vec::new();
+    let mut cloud_bound: BTreeSet<&str> = BTreeSet::new();
     let mut exposes: BTreeMap<&str, &'static [Output]> = BTreeMap::new();
     let mut typed = Vec::new();
     for resource in &list.resource {
@@ -304,6 +321,9 @@ pub fn read(list: &ResourceList) -> Result<Vec<Spec>, Vec<Finding>> {
             findings.push(Finding::new(id, "", FindingKind::DuplicateId));
         } else if let Some(body) = Body::of(resource) {
             exposes.insert(id, body.exposes());
+            if portability(body.name()) == Portability::CloudBound {
+                cloud_bound.insert(id);
+            }
             typed.push((resource, body));
         } else {
             findings.push(Finding::new(id, "", FindingKind::MissingBody));
@@ -316,6 +336,7 @@ pub fn read(list: &ResourceList) -> Result<Vec<Spec>, Vec<Finding>> {
         let mut reader = Reader {
             id: &resource.id,
             exposes: &exposes,
+            cloud_bound: &cloud_bound,
             findings: Vec::new(),
             deps: BTreeSet::new(),
             refs: Vec::new(),

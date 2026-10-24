@@ -80,6 +80,9 @@ pub struct FakeConfig {
     /// Kinds declared [`ucdk_provider::StampMode::Embedded`]: the fake declares the mode and
     /// refuses to create one, as the behaviour is not there yet.
     pub embedded: BTreeSet<Kind>,
+    /// Kinds whose objects also produce a secret output (`TOKEN`), besides the `URL` and
+    /// `HOST` every `service` produces.
+    pub secret_output: BTreeSet<Kind>,
     pub faults: Faults,
 }
 

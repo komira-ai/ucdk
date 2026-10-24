@@ -51,6 +51,8 @@ pub enum FindingKind {
         target: String,
         output: &'static str,
     },
+    /// A reference to a resource whose type is `CLOUD_BOUND`: no other node may be bound to it.
+    NotPortable { target: String },
     /// Resources that cannot be ordered because they reference each other. The members are
     /// the resources on a cycle and those that depend on one.
     Cycle { members: Vec<String> },
@@ -92,6 +94,9 @@ impl fmt::Display for FindingKind {
             Self::NamedOutput => write!(f, "no type produces a named output"),
             Self::UnexposedOutput { target, output } => {
                 write!(f, "`{target}` does not expose {output}")
+            }
+            Self::NotPortable { target } => {
+                write!(f, "`{target}` is of a type that only one cloud hosts")
             }
             Self::Cycle { members } => {
                 write!(

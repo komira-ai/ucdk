@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use ucdk_provider::{Kind, NodePath, OwnerLabel, PhysicalId};
+use ucdk_provider::{Kind, NodePath, OwnerLabel, PhysicalId, Produced};
 
 /// Who owns a node, as a path: every segment of the node's path above its role. For `app/run`
 /// that is `app`; for a node nested one level down, `app/db/run`, it is `app/db`. The first
@@ -81,6 +81,10 @@ pub struct Record {
     pub physical: Option<PhysicalId>,
     /// The nodes this one needed: the edges deletion follows, in reverse.
     pub deps: BTreeSet<NodePath>,
+    /// The non-secret outputs the object had when it was last confirmed, by output name
+    /// (`URL`, `HOST`). A node that reads one of them is planned against this value. A secret
+    /// output is never here.
+    pub outputs: BTreeMap<String, String>,
 }
 
 impl Record {
@@ -100,7 +104,20 @@ impl Record {
             state: State::Intent,
             physical: None,
             deps,
+            outputs: BTreeMap::new(),
         }
+    }
+
+    /// The record holding the non-secret outputs of `produced`, in place of any held before.
+    /// A secret output is dropped: the ledger never holds one.
+    #[must_use]
+    pub fn with_outputs(self, produced: &[Produced]) -> Self {
+        let outputs = produced
+            .iter()
+            .filter(|p| !p.secret)
+            .map(|p| (p.name.clone(), p.value.clone()))
+            .collect();
+        Self { outputs, ..self }
     }
 
     /// The record, confirmed with the object's physical id.

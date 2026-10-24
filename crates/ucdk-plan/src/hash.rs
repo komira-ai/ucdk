@@ -59,6 +59,7 @@ fn feed_action(hash: &mut Sha256, action: &Action) {
         }
         Action::Retain(Retained::OwnerNotNamed) => hash.update([6, 3]),
         Action::Converging => hash.update([7]),
+        Action::KnownAfterApply => hash.update([8]),
     }
 }
 
@@ -90,7 +91,8 @@ pub fn compute(desired: &Lowered, steps: &[Step], provider_version: Option<&str>
         for r in &n.refs {
             feed(&mut hash, r.field.as_bytes());
             feed(&mut hash, r.resource.as_bytes());
-            feed(&mut hash, r.output.as_bytes());
+            // The name, as it was when the output was a string: a stored hash stays valid.
+            feed(&mut hash, r.output.as_str_name().as_bytes());
         }
         feed(&mut hash, n.node.digest().as_str().as_bytes());
         hash.update((n.deps.len() as u64).to_be_bytes());

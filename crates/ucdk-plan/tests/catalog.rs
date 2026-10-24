@@ -5,12 +5,14 @@ use std::collections::BTreeMap;
 
 use prost_types::Duration;
 use ucdk_plan::catalog::{ROLE_PUBLIC, ROLE_RUN, ROLE_SCHEDULE};
-use ucdk_plan::{Finding, FindingKind, Lowered, ValueRef, lower, validate};
+use ucdk_plan::{
+    Finding, FindingKind, Lowered, ValueRef, lower, validate, validate_with_portability,
+};
 use ucdk_proto::v1::r#ref::Output as Arm;
 use ucdk_proto::v1::resource::Body;
 use ucdk_proto::v1::{
-    Access, Image, Job, Output, Ref, Resource, ResourceList, Scale, SecretRef, Service, Size,
-    StepOutput, Uses, Value, image, job, service, value,
+    Access, Image, Job, Output, Portability, Ref, Resource, ResourceList, Scale, SecretRef,
+    Service, Size, StepOutput, Uses, Value, image, job, service, value,
 };
 use ucdk_provider::FieldValue;
 
@@ -348,7 +350,7 @@ fn value_reference_lowers_to_a_ref_and_not_to_a_field() {
         [ValueRef {
             field: "env.DB".to_owned(),
             resource: "db".to_owned(),
-            output: "URL",
+            output: Output::Url,
         }]
     );
     assert!(web.node.fields().iter().all(|f| f.name != "env.DB"));
@@ -776,6 +778,64 @@ fn a_value_reference_names_an_output_its_target_exposes() {
     );
 }
 
+#[test]
+fn non_portable_cross_node_ref_refused() {
+    // A catalog that marks `job` as bound to one cloud: another resource may not use it or
+    // read its values, and the finding names the field that does.
+    let bound_job = |name: &str| {
+        if name == "job" {
+            Portability::CloudBound
+        } else {
+            Portability::Portable
+        }
+    };
+    let resources = vec![
+        service_with(
+            "web",
+            Service {
+                image: digest_image(""),
+                ..Service::default()
+            },
+        ),
+        job_of("batch"),
+    ];
+    let mut with_use = resources.clone();
+    with_use[0].uses.push(uses("batch"));
+    let found = validate_with_portability(&list(with_use), bound_job);
+    assert_eq!(
+        found,
+        [finding(
+            "web",
+            "uses[0]",
+            FindingKind::NotPortable {
+                target: "batch".to_owned()
+            }
+        )]
+    );
+    // A value reference to it is refused the same way, once, and no second finding follows.
+    let mut with_ref = resources.clone();
+    with_ref[0] = service_env("web", "K", output_of("batch", Output::Url));
+    let found = validate_with_portability(&list(with_ref), bound_job);
+    assert_eq!(
+        found,
+        [finding(
+            "web",
+            "service.env.K",
+            FindingKind::NotPortable {
+                target: "batch".to_owned()
+            }
+        )]
+    );
+    // The same lists are fine for a portable type, and for the catalog as it is.
+    let mut portable = resources;
+    portable[0].uses.push(uses("batch"));
+    assert_eq!(validate(&list(portable.clone())), []);
+    assert_eq!(
+        validate_with_portability(&list(portable), |_| Portability::Portable),
+        []
+    );
+}
+
 // ---- Findings read as text -------------------------------------------------------------------
 
 #[test]
@@ -802,6 +862,9 @@ fn each_finding_reads_as_a_sentence_naming_its_resource() {
         FindingKind::UnexposedOutput {
             target: "t".to_owned(),
             output: "URL",
+        },
+        FindingKind::NotPortable {
+            target: "t".to_owned(),
         },
         FindingKind::Cycle {
             members: vec!["a".to_owned(), "b".to_owned()],
