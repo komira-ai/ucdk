@@ -22,7 +22,7 @@ prost-types = "0.14"
 protox = "0.10"
 # Parses the pull-request event file the platform provides to CI.
 serde_json = "1"
-# Verifies the SHA-256 pin of each downloaded tool.
+# Verifies the SHA-256 pin of each downloaded tool, and computes the node-key and field digests.
 sha2 = "0.10"
 
 [workspace.lints.rust]

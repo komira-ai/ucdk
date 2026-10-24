@@ -28,6 +28,8 @@ pub struct Faults {
     /// tells the truth at once. A read that fails by `fail_reads` still counts.
     pub read_lag: u64,
     /// Objects present from the start.
+    /// Read once, by the constructor: a fake that is already built ignores a change to it, so
+    /// [`crate::Fake::faults_mut`] does not offer it.
     pub foreign: Vec<ForeignObject>,
     /// Before the next create lands, another client creates the same object with the same
     /// stamp, so the create loses and is refused as `AlreadyExists`. Fires once.
@@ -41,6 +43,18 @@ pub struct Faults {
     /// here and change nothing; once the list is used up reads succeed again. Each failed
     /// read is logged with its error.
     pub fail_reads: Vec<ProviderError>,
+}
+
+/// The faults a test may arm on a live fake: every one of [`Faults`] except `foreign`, which
+/// only the constructor reads. Each field is the fault itself, set through the reference.
+#[derive(Debug)]
+pub struct FaultsMut<'a> {
+    pub fail_at_call: &'a mut Option<u64>,
+    pub read_lag: &'a mut u64,
+    pub race_next: &'a mut bool,
+    pub ambiguous_success: &'a mut bool,
+    pub ambiguous_at_call: &'a mut Option<u64>,
+    pub fail_reads: &'a mut Vec<ProviderError>,
 }
 
 /// What the fake hosts. Every kind not listed as unsupported is hosted.

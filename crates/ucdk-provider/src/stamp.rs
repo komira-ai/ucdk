@@ -13,7 +13,8 @@ const NAME_MARK: &str = "~ucdk";
 
 /// Who owns an object and which node it is. `extra` is an open label map for values added
 /// later (a validation run id, a composite depth) without changing what the stamp means; it
-/// travels only where the kind can carry tags.
+/// travels only where the kind can carry tags ([`StampMode::carries_extra`]); a create that asks a
+/// kind without tags to carry any is refused, never silently stripped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stamp {
     pub owner: OwnerLabel,
@@ -78,14 +79,28 @@ impl Stamp {
     }
 }
 
-/// Where a kind carries its stamp.
+/// Where a kind carries its stamp, and so whether it can carry the stamp's extra labels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StampMode {
-    /// A native tag, written in the create call.
+    /// A native tag, written in the create call. The extra labels are carried too: `observe`
+    /// and `list_owned` return them exactly as written.
     Tag,
     /// The kind cannot hold tags: the stamp is encoded in the physical name, written in the
-    /// create call.
+    /// create call. The name has room for the owner and node key only, so the extra labels
+    /// are not carried, and a create with a non-empty `Stamp::extra` is
+    /// `Refused(Unsupported)` and changes nothing. A provider never drops extra labels
+    /// silently.
     NameEncoded,
+}
+
+impl StampMode {
+    /// Whether a kind in this mode carries `Stamp::extra`.
+    pub fn carries_extra(self) -> bool {
+        match self {
+            Self::Tag => true,
+            Self::NameEncoded => false,
+        }
+    }
 }
 
 /// What an observed object says about its owner.

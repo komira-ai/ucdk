@@ -107,16 +107,12 @@ fn fake_limited_refuses_job_before_creating_anything() {
 
 #[test]
 fn fake_golden_state_dump() {
-    // The job is name-encoded, so its extra label has nowhere to go and is not stored.
     let mut fake = Fake::standard();
     let web = service("app/web", "web");
     let nightly = job("app/nightly", "nightly");
     fake.create(&web, &stamp(&web)).unwrap();
-    fake.create(
-        &nightly,
-        &Stamp::for_node(nightly.path()).with_extra("run", "r1"),
-    )
-    .unwrap();
+    fake.create(&nightly, &Stamp::for_node(nightly.path()))
+        .unwrap();
     let held = fake.add_foreign(&Kind::service(), "legacy", Some("other-tool".to_owned()));
     fake.set_unmodelled(&held, "owner", "ops");
     assert!(fake.create(&web, &stamp(&web)).is_err());
@@ -389,4 +385,35 @@ fn a_stamp_set_after_birth_is_not_a_birth_stamp_and_a_changed_one_does_not_rewri
     assert!(fake.set_label(&born, "ucdk-owner", Some("someone-else")));
     assert!(fake.birth_stamp(&born).unwrap().same_identity(&stamp(&web)));
     assert_eq!(fake.birth_stamp(&PhysicalId::new("nothing")), None);
+}
+
+#[test]
+fn a_name_encoded_kind_refuses_extra_labels_and_creates_nothing() {
+    let mut fake = Fake::standard();
+    let nightly = job("app/nightly", "nightly");
+    let asked = Stamp::for_node(nightly.path()).with_extra("run", "r1");
+    assert_eq!(
+        fake.create(&nightly, &asked),
+        Err(ProviderError::Refused(Refusal::Unsupported))
+    );
+    assert_eq!(fake.object_count(), 0, "nothing was created");
+    assert_eq!(fake.observe(&nightly, None), Ok(Observation::Absent));
+    assert_eq!(
+        fake.list_owned(&OwnerScope::new(nightly.path().owner())),
+        Ok(Vec::new())
+    );
+    // Without extra labels the same kind is created as before.
+    assert!(fake.create(&nightly, &stamp(&nightly)).is_ok());
+}
+
+#[test]
+fn stamp_modes_say_whether_extra_labels_are_carried() {
+    let fake = Fake::standard();
+    for kind in [Kind::service(), Kind::job()] {
+        assert_eq!(
+            fake.stamp_mode(&kind).carries_extra(),
+            kind == Kind::service(),
+            "only the tagged kind carries extra labels"
+        );
+    }
 }

@@ -63,6 +63,8 @@ struct Flaws {
     /// Not a defect: a create over a foreign object of the same name lands beside it (the
     /// stamp is part of the physical name) instead of being refused.
     beside_foreign: bool,
+    /// The stamp is stored without its extra labels, and the create still succeeds.
+    drops_extra: bool,
     /// The `k`th call (of any kind, counted from 1) fails with a transient error.
     fail_at: Option<u64>,
 }
@@ -216,6 +218,15 @@ impl Provider for Stub {
                 digest,
             });
         }
+        let stripped = Stamp {
+            extra: Default::default(),
+            ..stamp.clone()
+        };
+        let stamp = if self.flaws.drops_extra {
+            &stripped
+        } else {
+            stamp
+        };
         let other = Stamp::for_node(&NodePath::new("other/node").unwrap());
         let stamp = if self.flaws.stamp_of_another_node {
             &other
@@ -373,7 +384,11 @@ impl Harness for StubHarness {
 
 type Scenario = fn(&StubHarness) -> Result<(), Failure>;
 
-const SCENARIOS: [(&str, Scenario); 12] = [
+const SCENARIOS: [(&str, Scenario); 13] = [
+    (
+        "extra_labels_round_trip_or_are_refused",
+        kit::extra_labels_round_trip_or_are_refused,
+    ),
     (
         "create_stamps_in_create_call",
         kit::create_stamps_in_create_call,
@@ -440,7 +455,15 @@ fn kit_self_test_flags_nonconforming_stub() {
     assert_eq!(flagged(holds_data), Vec::<&str>::new());
 
     // Each defect is flagged by the scenario that guards that behaviour.
-    let defects: [(&str, Flaws, &str); 20] = [
+    let defects: [(&str, Flaws, &str); 21] = [
+        (
+            "extra labels dropped silently",
+            Flaws {
+                drops_extra: true,
+                ..Flaws::default()
+            },
+            "extra_labels_round_trip_or_are_refused",
+        ),
         (
             "stamped as another node",
             Flaws {

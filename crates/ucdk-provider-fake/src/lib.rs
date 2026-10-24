@@ -9,7 +9,8 @@
 //! the physical name for a kind that cannot hold tags.
 //!
 //! Faults are constructor data ([`Faults`]): `fail_at_call`, `read_lag`, `foreign`,
-//! `race_next`, `ambiguous_success`, `ambiguous_at_call` and `fail_reads`. A limited variant ([`FakeConfig::limited`]) refuses
+//! `race_next`, `ambiguous_success`, `ambiguous_at_call` and `fail_reads`; all but `foreign` can also be armed on a
+//! built fake ([`Fake::faults_mut`]). A limited variant ([`FakeConfig::limited`]) refuses
 //! the kind `job`. Limits and names here are this package's own, never a real cloud's.
 //!
 //! [`Provider`]: ucdk_provider::Provider
@@ -21,7 +22,7 @@ mod harness;
 mod log;
 mod store;
 
-pub use config::{FakeConfig, Faults, ForeignObject};
+pub use config::{FakeConfig, Faults, FaultsMut, ForeignObject};
 pub use fake::Fake;
 pub use harness::FakeHarness;
 pub use log::{Call, Op};

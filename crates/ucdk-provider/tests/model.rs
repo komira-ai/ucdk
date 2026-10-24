@@ -243,3 +243,9 @@ fn an_owner_scope_names_one_owner() {
     assert_eq!(OwnerScope::new(owner.clone()).owner, owner);
     assert_eq!(StampEvidence::Absent, StampEvidence::Absent);
 }
+
+#[test]
+fn only_a_tag_carries_extra_labels() {
+    assert!(ucdk_provider::StampMode::Tag.carries_extra());
+    assert!(!ucdk_provider::StampMode::NameEncoded.carries_extra());
+}

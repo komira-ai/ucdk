@@ -118,7 +118,7 @@ fn ambiguous_success_applies_to_update_and_delete() {
         panic!("not found");
     };
     let changed = common::node("app/a", Kind::service(), "a", 81);
-    fake.faults_mut().ambiguous_success = true;
+    *fake.faults_mut().ambiguous_success = true;
     assert!(matches!(
         fake.update(&changed, &live),
         Err(ProviderError::Unknown(_))
@@ -127,7 +127,7 @@ fn ambiguous_success_applies_to_update_and_delete() {
         panic!("not found");
     };
     assert_eq!(now.digest, changed.digest(), "the update happened");
-    fake.faults_mut().ambiguous_success = true;
+    *fake.faults_mut().ambiguous_success = true;
     assert!(matches!(
         fake.delete(a.kind(), &created.physical),
         Err(ProviderError::Unknown(_))
@@ -290,7 +290,7 @@ fn a_deleted_object_is_still_observed_for_n_reads_under_read_lag() {
     let scope = OwnerScope::new(a.path().owner());
     let created = fake.create(&a, &stamp(&a)).expect("create");
     assert!(present(&mut fake, &a));
-    fake.faults_mut().read_lag = 3;
+    *fake.faults_mut().read_lag = 3;
     fake.delete(a.kind(), &created.physical).expect("delete");
     assert_eq!(fake.object_count(), 0);
     assert!(
@@ -340,4 +340,46 @@ fn a_deleted_object_is_gone_at_the_next_read_without_read_lag() {
     assert!(present(&mut fake, &a));
     fake.delete(a.kind(), &created.physical).expect("delete");
     assert!(!present(&mut fake, &a));
+}
+
+#[test]
+fn a_race_over_a_taken_name_adds_no_second_object() {
+    let mut fake = with(Faults {
+        race_next: true,
+        foreign: vec![ForeignObject {
+            kind: Kind::service(),
+            name: "taken".to_owned(),
+            marker: None,
+        }],
+        ..Faults::default()
+    });
+    let taken = service("app/a", "taken");
+    assert_eq!(
+        fake.create(&taken, &stamp(&taken)),
+        Err(ProviderError::Refused(Refusal::AlreadyExists))
+    );
+    assert_eq!(fake.object_count(), 1, "one object per kind and name");
+    let creates: Vec<_> = fake.calls().iter().filter(|c| c.op == Op::Create).collect();
+    assert_eq!(creates.len(), 1, "no racing create was logged");
+    // The race was spent: a free name is created normally.
+    let free = service("app/b", "free");
+    assert!(fake.create(&free, &stamp(&free)).is_ok());
+    assert_eq!(fake.object_count(), 2);
+}
+
+#[test]
+fn faults_armed_on_a_built_fake_fire_like_constructor_faults() {
+    let mut fake = Fake::standard();
+    let a = service("app/a", "a");
+    *fake.faults_mut().race_next = true;
+    assert_eq!(
+        fake.create(&a, &stamp(&a)),
+        Err(ProviderError::Refused(Refusal::AlreadyExists))
+    );
+    *fake.faults_mut().fail_at_call = Some(2);
+    let b = service("app/b", "b");
+    assert_eq!(
+        fake.create(&b, &stamp(&b)),
+        Err(ProviderError::Refused(Refusal::Rejected))
+    );
 }

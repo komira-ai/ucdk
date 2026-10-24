@@ -73,6 +73,11 @@ fn kit_declarations_hold() {
 }
 
 #[test]
+fn kit_extra_labels_round_trip_or_are_refused() {
+    on_fake_and_fake_limited(kit::extra_labels_round_trip_or_are_refused);
+}
+
+#[test]
 fn kit_runs_every_scenario_on_both_fakes() {
     assert!(kit::run_all(&FakeHarness::standard()).is_empty());
     assert!(kit::run_all(&FakeHarness::limited()).is_empty());

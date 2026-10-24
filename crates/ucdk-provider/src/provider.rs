@@ -27,6 +27,9 @@ use crate::stamp::{Stamp, StampMode};
 /// - a create over a foreign object of the same name is refused as `AlreadyExists` or lands
 ///   beside it (a provider that puts the stamp in the physical name); either way the foreign
 ///   object is left as it was;
+/// - `create` with a non-empty `Stamp::extra` on a kind whose `stamp_mode` does not carry extra
+///   labels is `Refused(Unsupported)` and changes nothing; on a kind that does, `observe` and
+///   `list_owned` return the extra labels exactly as written (a provider never drops them);
 /// - `observe` with a hint finds the object by its physical id, whatever it is now called.
 pub trait Provider: Send {
     /// Whether the kind's objects carry data. A stateful kind is kept by default.

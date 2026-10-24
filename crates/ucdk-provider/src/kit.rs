@@ -560,6 +560,64 @@ pub fn declarations_hold<H: Harness>(h: &H) -> Result<(), Failure> {
     })
 }
 
+/// The extra labels of a stamp are never lost silently. For each kind, a create that carries
+/// extra labels either lands and then `observe` and `list_owned` return the stamp with those
+/// labels exactly as written (and the kind's stamp mode says it carries them), or is refused
+/// as `Unsupported`, creates nothing, and the stamp mode says it does not carry them.
+pub fn extra_labels_round_trip_or_are_refused<H: Harness>(h: &H) -> Result<(), Failure> {
+    each_kind(
+        h,
+        "extra_labels_round_trip_or_are_refused",
+        |h, kind, i, run| {
+            let mut p = h.fresh();
+            let node = sample(kind, i, 1);
+            let want = Stamp::for_node(node.path())
+                .with_extra("run", "r1")
+                .with_extra("depth", "2");
+            let carries = p.stamp_mode(kind).carries_extra();
+            let scope = OwnerScope::new(node.path().owner());
+            match p.create(&node, &want) {
+                Ok(created) => {
+                    run.check(
+                        carries,
+                        "create kept extra labels on a kind whose stamp mode says it does not carry them",
+                    );
+                    let seen = run.live("observe", p.observe(&node, Some(&created.physical)));
+                    run.check(
+                        seen.is_some_and(|l| l.stamp == StampEvidence::Present(want.clone())),
+                        "observe does not return the extra labels exactly as written",
+                    );
+                    let listed = run.call("list_owned", p.list_owned(&scope));
+                    run.check(
+                        listed.is_some_and(|l| {
+                            l.iter()
+                                .find(|o| o.physical == created.physical)
+                                .is_some_and(|o| o.stamp == want)
+                        }),
+                        "list_owned does not return the extra labels exactly as written",
+                    );
+                }
+                Err(e) => {
+                    run.check(
+                        e.refusal() == Some(Refusal::Unsupported),
+                        &format!("create with extra labels failed with `{e}`; it must succeed or be refused (Unsupported)"),
+                    );
+                    run.check(
+                        !carries,
+                        "create refused extra labels on a kind whose stamp mode says it carries them",
+                    );
+                    run.absent("observe after the refusal", p.observe(&node, None));
+                    let listed = run.call("list_owned", p.list_owned(&scope));
+                    run.check(
+                        listed.is_some_and(|l| l.is_empty()),
+                        "a refused create left an owned object",
+                    );
+                }
+            }
+        },
+    )
+}
+
 /// A kind the provider declares it does not host is refused before anything is created.
 pub fn declared_unsupported_kinds_refuse<H: Harness>(h: &H) -> Result<(), Failure> {
     let mut run = Run::new("declared_unsupported_kinds_refuse");
@@ -586,6 +644,7 @@ pub fn run_all<H: Harness>(h: &H) -> Vec<Failure> {
         delete_removes_only_the_named_object(h),
         list_owned_filters_by_owner(h),
         declarations_hold(h),
+        extra_labels_round_trip_or_are_refused(h),
         read_is_live_not_cached(h),
         rename_invariance(h),
         declared_unsupported_kinds_refuse(h),

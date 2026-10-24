@@ -10,7 +10,7 @@ use ucdk_provider::{
 };
 use ucdk_provider::{Digest, Stamp};
 
-use crate::config::{FakeConfig, Faults};
+use crate::config::{FakeConfig, FaultsMut};
 use crate::log::{Call, Op};
 use crate::store::{Object, labels_of};
 
@@ -50,10 +50,18 @@ impl Fake {
         Self::new(FakeConfig::standard())
     }
 
-    /// The faults still to fire. A test arms one between calls through this; the constructor
-    /// data in [`Faults`] is the usual way.
-    pub fn faults_mut(&mut self) -> &mut Faults {
-        &mut self.config.faults
+    /// The faults a test may arm between calls. `foreign` is not among them: the objects it
+    /// lists are added once, by the constructor, so it is set in [`Faults`] and nowhere else.
+    pub fn faults_mut(&mut self) -> FaultsMut<'_> {
+        let faults = &mut self.config.faults;
+        FaultsMut {
+            fail_at_call: &mut faults.fail_at_call,
+            read_lag: &mut faults.read_lag,
+            race_next: &mut faults.race_next,
+            ambiguous_success: &mut faults.ambiguous_success,
+            ambiguous_at_call: &mut faults.ambiguous_at_call,
+            fail_reads: &mut faults.fail_reads,
+        }
     }
 
     /// The call log, oldest first.
@@ -260,8 +268,14 @@ impl Fake {
         if self.config.unsupported.contains(node.kind()) {
             return Err(ProviderError::Refused(Refusal::Unsupported));
         }
+        // A kind that cannot carry extra labels refuses them; it never stores the stamp without.
+        if !stamp.extra.is_empty() && !self.stamp_mode(node.kind()).carries_extra() {
+            return Err(ProviderError::Refused(Refusal::Unsupported));
+        }
         let visible_at = self.reads + self.config.faults.read_lag;
-        if std::mem::take(&mut self.config.faults.race_next) {
+        // The racer only wins a name that is free: the cloud keeps one object per kind and name.
+        let racing = std::mem::take(&mut self.config.faults.race_next);
+        if racing && !self.taken(node.kind(), node.name()) {
             let racer = self.make_object(node, stamp, visible_at);
             let id = self.insert(racer);
             self.record(self.call_of(Op::Create, node, stamp, Some(id), Ok(())));
