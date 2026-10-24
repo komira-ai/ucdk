@@ -102,9 +102,7 @@ impl Engine<'_> {
                         self.commit(&Change::Put(intent.confirmed(created.physical)))
                     }
                     Ok(Observation::Present(live)) => {
-                        if live.status == Status::Converging {
-                            report.converging.push(node.path().clone());
-                        }
+                        note_not_ready(report, node, live.status);
                         self.commit(&Change::Put(named))
                     }
                     Ok(Observation::Absent) => self.commit(&Change::Put(named)),
@@ -209,12 +207,19 @@ impl Engine<'_> {
                 self.commit(&Change::Put(intent.confirmed(now.physical)))
             }
             Observation::Present(now) => {
-                if now.status == Status::Converging {
-                    report.converging.push(node.path().clone());
-                }
+                note_not_ready(report, node, now.status);
                 Ok(())
             }
             Observation::Absent => Ok(()),
         }
+    }
+}
+
+/// Records, in the report, an object that read as not ready after this run wrote to it.
+fn note_not_ready(report: &mut Report, node: &Node, status: Status) {
+    match status {
+        Status::Ready => {}
+        Status::Converging => report.converging.push(node.path().clone()),
+        Status::Failed => report.failed.push(node.path().clone()),
     }
 }

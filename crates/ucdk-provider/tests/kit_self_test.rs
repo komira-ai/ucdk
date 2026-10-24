@@ -81,6 +81,10 @@ struct Flaws {
     list_stamped_other_scheme: bool,
     /// `list_owned` lists the owner's objects of every cell.
     list_owned_ignores_cell: bool,
+    /// `list_stamped` tells cells apart by their id alone.
+    list_stamped_matches_uid_only: bool,
+    /// `list_owned` tells cells apart by their id alone.
+    list_owned_matches_uid_only: bool,
     /// A hosted kind declares `Embedded`.
     hosted_declares_embedded: bool,
     /// The embedded kind does not declare `Embedded`.
@@ -340,7 +344,12 @@ impl Provider for Stub {
                     (_, true) => Some(foreign_stamp.clone()),
                     (s, false) => s.clone().filter(|s| {
                         (flaws.list_ignores_owner || s.owner == scope.owner)
-                            && (flaws.list_owned_ignores_cell || s.cell == scope.cell)
+                            && (flaws.list_owned_ignores_cell
+                                || if flaws.list_owned_matches_uid_only {
+                                    s.cell.uid() == scope.cell.uid()
+                                } else {
+                                    s.cell == scope.cell
+                                })
                     }),
                 };
                 Some(OwnedObject {
@@ -363,7 +372,12 @@ impl Provider for Stub {
                 let stamp = match (&o.stamp, o.foreign && flaws.list_stamped_includes_foreign) {
                     (_, true) => Some(Stamp::for_node(&scope.cell, &NodePath::new("x/y").unwrap())),
                     (s, false) => s.clone().filter(|s| {
-                        (flaws.list_stamped_ignores_cell || s.cell == scope.cell)
+                        (flaws.list_stamped_ignores_cell
+                            || if flaws.list_stamped_matches_uid_only {
+                                s.cell.uid() == scope.cell.uid()
+                            } else {
+                                s.cell == scope.cell
+                            })
                             && (!flaws.list_stamped_one_owner || s.owner.as_str() == "kit")
                     }),
                 };
@@ -560,7 +574,7 @@ fn kit_self_test_flags_nonconforming_stub() {
     assert_eq!(flagged(holds_data), Vec::<&str>::new());
 
     // Each defect is flagged by the scenario that guards that behaviour.
-    let defects: [(&str, Flaws, &str); 32] = [
+    let defects: [(&str, Flaws, &str); 34] = [
         (
             "a failed object reported as ready",
             Flaws {
@@ -597,6 +611,22 @@ fn kit_self_test_flags_nonconforming_stub() {
             "list_owned across cells",
             Flaws {
                 list_owned_ignores_cell: true,
+                ..Flaws::default()
+            },
+            "list_stamped_ignores_other_cell",
+        ),
+        (
+            "list_stamped matching a cell by its id alone",
+            Flaws {
+                list_stamped_matches_uid_only: true,
+                ..Flaws::default()
+            },
+            "list_stamped_ignores_other_cell",
+        ),
+        (
+            "list_owned matching a cell by its id alone",
+            Flaws {
+                list_owned_matches_uid_only: true,
                 ..Flaws::default()
             },
             "list_stamped_ignores_other_cell",

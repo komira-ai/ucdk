@@ -210,6 +210,11 @@ fn an_object_born_failed_keeps_its_intent_and_is_updated_by_the_next_run() {
     let first = done(apply(&mut fake, &ledger, &chain()));
     assert_eq!(first.created.len(), 4);
     assert!(first.converging.is_empty(), "failed is not converging");
+    assert_eq!(
+        first.failed,
+        paths(&["db/run", "api/run", "web/run", "web/public"]),
+        "each object that read failed after its create is reported"
+    );
     for p in ["db/run", "api/run", "web/run", "web/public"] {
         assert_eq!(state_of(&ledger, p), State::Intent, "{p} is not confirmed");
     }
@@ -298,6 +303,11 @@ fn a_repaired_object_is_confirmed_only_if_it_reads_ready_afterwards() {
             report.converging == paths(&["db/run"]),
             converging,
             "{after:?}"
+        );
+        assert_eq!(
+            report.failed == paths(&["db/run"]),
+            after == Some(Status::Failed),
+            "{after:?}: only an object that reads failed again is reported as failed"
         );
         assert_eq!(
             state_of(&ledger, "db/run"),

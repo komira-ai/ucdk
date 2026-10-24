@@ -122,3 +122,28 @@ fn a_kind_with_no_stamp_of_its_own_exits_three() {
     );
     assert_eq!(world.fake.object_count(), 0);
 }
+
+#[test]
+fn an_object_born_failed_exits_zero_with_a_note_for_each_object() {
+    let dir = scratch("an_object_born_failed_exits_zero_with_a_note_for_each_object");
+    let input = write_list(&dir, "list.pb", pair());
+    let mut world = World::new();
+    *world.fake.faults_mut().create_failed = true;
+    let ran = approve_and_run(&mut world, "apply", "fake", &input, &dir);
+    assert_eq!(ran.code, 0, "{ran:?}");
+    assert_eq!(ran.err, "");
+    let paths: Vec<String> = records(&world)
+        .into_iter()
+        .map(|(p, _)| p.as_str().to_owned())
+        .collect();
+    assert!(!paths.is_empty());
+    for path in paths {
+        assert!(
+            ran.out.contains(&format!(
+                "  failed   {path} (still failed after the write; its record is not confirmed, run again to retry)\n"
+            )),
+            "{}",
+            ran.out
+        );
+    }
+}

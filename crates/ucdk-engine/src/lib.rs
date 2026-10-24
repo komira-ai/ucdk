@@ -26,6 +26,7 @@
 //! - **Status.** A failed object is updated toward its node even when its fields match. One
 //!   that is still converging gets no write, and its record is not confirmed until a read
 //!   shows it ready; the run still succeeds and the report says which objects are waiting.
+//!   An object that still reads failed after the run's create or repair is reported as failed.
 //! - **One cell.** Every stamp carries the engine's cell, and an object stamped for another
 //!   cell is not ours.
 //! - **Rollback, opt in.** After a failed apply, only the objects that run created are deleted,

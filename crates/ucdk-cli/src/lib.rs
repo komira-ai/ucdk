@@ -9,7 +9,7 @@
 //!
 //! | code | meaning |
 //! |---|---|
-//! | 0 | done, or planned; including "no changes", and including a run that left an object still converging (a note says so) |
+//! | 0 | done, or planned; including "no changes", and including a run that left an object still converging or still failed (a note says so) |
 //! | 2 | usage: a bad flag, or a file that cannot be read, written or decoded |
 //! | 3 | refused, nothing was changed: findings, a kind the provider lacks, an object that is not ours, a plan that is not the approved one |
 //! | 4 | failed with no effect: safe to run again |

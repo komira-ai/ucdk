@@ -28,9 +28,26 @@ pub fn other_cell() -> CellIdentity {
     identity("kit-cell", "bbbbbbbbbbbbbbbbbbbbbbbbbb")
 }
 
+/// Cells the scenarios about cells work in: the kit cell, then three that differ from it in
+/// one part each (the id, the cell name, the machine). The last two keep the kit cell's id,
+/// so a provider that tells cells apart by id alone merges them with it.
+pub fn neighbour_cells() -> Vec<CellIdentity> {
+    let uid = "aaaaaaaaaaaaaaaaaaaaaaaaaa";
+    vec![
+        cell(),
+        other_cell(),
+        identity_on("kit-machine", "kit-cell-two", uid),
+        identity_on("kit-machine-two", "kit-cell", uid),
+    ]
+}
+
 fn identity(cell: &str, uid: &str) -> CellIdentity {
+    identity_on("kit-machine", cell, uid)
+}
+
+fn identity_on(machine: &str, cell: &str, uid: &str) -> CellIdentity {
     CellIdentity::new(
-        CellName::new("kit-machine").expect("the literal name is valid"),
+        CellName::new(machine).expect("the literal name is valid"),
         CellName::new(cell).expect("the literal name is valid"),
         CellUid::from_text(uid).expect("the literal id is valid"),
     )
@@ -752,22 +769,24 @@ pub fn list_stamped_returns_all_owners_skips_foreign<H: Harness>(h: &H) -> Resul
 }
 
 /// `list_stamped` and `list_owned` of one cell never return an object of another cell, even
-/// one of the same owner, and each cell lists its own.
+/// one of the same owner, and each cell lists its own. The cells differ in the id, in the
+/// cell name or in the machine, so a provider that compares only one of the three is caught.
 pub fn list_stamped_ignores_other_cell<H: Harness>(h: &H) -> Result<(), Failure> {
     each_kind(h, "list_stamped_ignores_other_cell", |h, kind, i, run| {
         let mut p = h.fresh();
+        let cells = neighbour_cells();
         let mut ids = Vec::new();
-        for (j, which) in [cell(), other_cell()].into_iter().enumerate() {
+        for (j, which) in cells.iter().enumerate() {
             let node = sample_of("kit", kind, i + 10 * j, 1);
             let Some(created) = run.call(
                 "create",
-                p.create(&node, &Stamp::for_node(&which, node.path())),
+                p.create(&node, &Stamp::for_node(which, node.path())),
             ) else {
                 return;
             };
             ids.push(created.physical);
         }
-        for (j, which) in [cell(), other_cell()].into_iter().enumerate() {
+        for (j, which) in cells.iter().enumerate() {
             let owner = NodePath::new("kit/x")
                 .expect("the literal path is valid")
                 .owner();
@@ -775,7 +794,10 @@ pub fn list_stamped_ignores_other_cell<H: Harness>(h: &H) -> Result<(), Failure>
                 "list_stamped",
                 p.list_stamped(&CellScope::new(which.clone())),
             );
-            let owned = run.call("list_owned", p.list_owned(&OwnerScope::new(which, owner)));
+            let owned = run.call(
+                "list_owned",
+                p.list_owned(&OwnerScope::new(which.clone(), owner)),
+            );
             for (what, listed) in [("list_stamped", stamped), ("list_owned", owned)] {
                 let Some(listed) = listed else {
                     return;
@@ -785,14 +807,17 @@ pub fn list_stamped_ignores_other_cell<H: Harness>(h: &H) -> Result<(), Failure>
                     &format!("{what} omits an object of its own cell"),
                 );
                 run.check(
-                    listed.iter().all(|o| o.physical != ids[1 - j]),
+                    listed.iter().all(|o| {
+                        ids.iter()
+                            .enumerate()
+                            .all(|(k, id)| k == j || o.physical != *id)
+                    }),
                     &format!("{what} lists an object of another cell"),
                 );
             }
         }
     })
 }
-
 /// A hosted kind never declares [`StampMode::Embedded`] (no run can apply one yet), and a
 /// kind the harness lists as embedded declares it, carries no extra labels, and has a create
 /// refused as `Unsupported` that changes nothing.

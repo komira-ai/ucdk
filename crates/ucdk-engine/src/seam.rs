@@ -117,6 +117,9 @@ pub struct Report {
     /// Objects the provider reports as still converging: nothing was written to them and their
     /// records are not confirmed. The run still succeeds; a later run settles them.
     pub converging: Vec<NodePath>,
+    /// Objects that read as failed after this run's create or repair: their records are not
+    /// confirmed, and the run still succeeds; a later run updates them again.
+    pub failed: Vec<NodePath>,
     /// Objects a rollback deleted (or found gone).
     pub rolled_back: Vec<NodePath>,
     /// Objects a rollback could not delete.

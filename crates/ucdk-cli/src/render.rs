@@ -90,6 +90,12 @@ pub fn report_text(report: &Report) -> String {
             "  waiting  {path} (still converging; its record is not confirmed until it is ready)"
         );
     }
+    for path in &report.failed {
+        let _ = writeln!(
+            text,
+            "  failed   {path} (still failed after the write; its record is not confirmed, run again to retry)"
+        );
+    }
     text.push_str(&if changes == 0 {
         "no changes\n".to_owned()
     } else {
