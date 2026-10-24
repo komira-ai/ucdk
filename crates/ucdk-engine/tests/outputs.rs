@@ -220,7 +220,11 @@ fn a_consumer_does_not_read_the_outputs_of_an_unconfirmed_update() {
     let held = records(&ledger);
     assert_eq!(held[&path("db/run")].state, State::Intent);
     assert_eq!(held[&path("app/run")].state, State::Confirmed);
-    assert_eq!(mutations(&fake), written + 1, "only the producer was written");
+    assert_eq!(
+        mutations(&fake),
+        written + 1,
+        "only the producer was written"
+    );
     assert!(
         objects(&fake).contains("port=80") && !objects(&fake).contains("port=99"),
         "the consumer was left as it was"
