@@ -10,6 +10,9 @@
 //! including a `main.rs` elsewhere in a crate or a directory that happens to be named `target`
 //! inside `src`, is measured.
 //!
+//! A crate that is only generated code (see `generated_only`) is not failed for having no
+//! measured line; a crate with any other hand-written line is held to the floor like every other.
+//!
 //! The branch floor holds a crate only if it has branch points: a crate with measured lines
 //! and no `BRDA` record passes it, so that a crate without a single `if`, `match` arm or `?`
 //! is not failed for nothing. The pass is honest only when the crate truly has none; a crate
@@ -192,6 +195,55 @@ pub fn members(root: &Path) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+/// Whether `line`, trimmed, is what a crate made only of generated code may contain by hand: an
+/// attribute, a module header or its closing brace, or an `include!` of the generated file.
+fn glue_line(line: &str) -> bool {
+    let line = line.trim();
+    line.is_empty()
+        || line.starts_with("//")
+        || line == "}"
+        || (line.starts_with("#[") && line.ends_with(']'))
+        || (line.starts_with("#![") && line.ends_with(']'))
+        || ((line.starts_with("pub mod ") || line.starts_with("mod ")) && line.ends_with(" {"))
+        || (line.starts_with("include!(") && line.ends_with(");"))
+}
+
+/// The members whose `src` holds nothing but `include!` glue (see `glue_line`) and at least one
+/// `include!`: their code is all generated, and the generated file is left out of the measurement,
+/// so they have no measured line by construction. Any other line in any `.rs` file of `src`
+/// makes the crate an ordinary one.
+pub fn generated_only(root: &Path, members: &[String]) -> BTreeSet<String> {
+    members
+        .iter()
+        .filter(|name| {
+            let mut texts = Vec::new();
+            rust_sources(&root.join("crates").join(name).join("src"), &mut texts);
+            texts.iter().all(|t| t.lines().all(glue_line))
+                && texts.iter().any(|t| t.contains("include!("))
+        })
+        .cloned()
+        .collect()
+}
+
+fn rust_sources(dir: &Path, out: &mut Vec<String>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            rust_sources(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.extend(fs::read_to_string(&path));
+        }
+    }
+}
+
+/// Drops the "no line measured" finding of the crates in `generated`; every other finding stays.
+pub fn allow_generated_only(findings: &mut Vec<Finding>, generated: &BTreeSet<String>) {
+    findings.retain(|f| !(f.rule == "coverage-no-lines" && generated.contains(&f.subject)));
+}
+
 /// A finding for every `main.rs` that is more than a stub.
 pub fn check_main_rs(root: &Path, members: &[String]) -> Vec<Finding> {
     let mut out = Vec::new();
@@ -282,7 +334,8 @@ pub fn run(root: &Path, runner: &dyn Runner) -> (Vec<Finding>, Vec<String>) {
                 .to_string_lossy()
                 .into_owned();
             let counts = parse_lcov(&text, &root_text);
-            let (found, report) = gate(&counts, &names, FLOOR);
+            let (mut found, report) = gate(&counts, &names, FLOOR);
+            allow_generated_only(&mut found, &generated_only(root, &names));
             findings.extend(check_branches_measured(&counts));
             findings.extend(found);
             findings.extend(check_main_rs(root, &names));
