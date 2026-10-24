@@ -13,6 +13,8 @@ pub enum ModelError {
     BadSegment(String),
     /// Two fields of one node share a name.
     DuplicateField(String),
+    /// A cell id that is not 26 lowercase base32 characters.
+    BadCellUid(String),
 }
 
 impl fmt::Display for ModelError {
@@ -21,16 +23,22 @@ impl fmt::Display for ModelError {
             Self::EmptyPath => write!(f, "a node path is empty"),
             Self::BadSegment(s) => write!(f, "`{s}` is not a valid path segment"),
             Self::DuplicateField(n) => write!(f, "field `{n}` is given twice"),
+            Self::BadCellUid(t) => write!(f, "`{t}` is not a valid cell id"),
         }
     }
 }
 
 impl std::error::Error for ModelError {}
 
-fn valid_segment(s: &str) -> bool {
+/// The longest path segment, owner label, machine name or cell name, in bytes. It reaches
+/// cloud labels and the ledger, so it is a format promise: a longer limit later is a
+/// compatible change, a shorter one is not.
+pub const SEGMENT_MAX: usize = 32;
+
+pub(crate) fn valid_segment(s: &str) -> bool {
     let mut chars = s.chars();
     chars.next().is_some_and(|c| c.is_ascii_lowercase())
-        && s.len() <= 32
+        && s.len() <= SEGMENT_MAX
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
@@ -99,7 +107,14 @@ impl fmt::Display for NodePath {
 const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
 /// The domain prefix of the node-key digest.
 const KEY_DOMAIN: &[u8] = b"ucdk/node-key/1\n";
-const KEY_LEN: usize = 26;
+/// The length of a node key's text, in characters. A format promise, like [`SEGMENT_MAX`].
+pub const NODE_KEY_LEN: usize = 26;
+
+/// Whether `text` has the shape of a 128-bit key written in base32: [`NODE_KEY_LEN`]
+/// characters of the alphabet.
+pub(crate) fn key_text_is_well_formed(text: &str) -> bool {
+    text.len() == NODE_KEY_LEN && text.bytes().all(|b| ALPHABET.contains(&b))
+}
 
 /// The stamped identity of a node: SHA-256 over a fixed domain prefix and the path, cut to
 /// 128 bits and written as 26 lowercase base32 characters. A provider's label value is short,
@@ -126,8 +141,7 @@ impl NodeKey {
 
     /// Reads a key back from the text a provider stored: the shape is checked, nothing else.
     pub fn from_text(text: &str) -> Option<Self> {
-        let shaped = text.len() == KEY_LEN && text.bytes().all(|b| ALPHABET.contains(&b));
-        shaped.then(|| Self(text.to_owned()))
+        key_text_is_well_formed(text).then(|| Self(text.to_owned()))
     }
 
     pub fn as_str(&self) -> &str {

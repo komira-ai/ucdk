@@ -58,6 +58,7 @@ fn feed_action(hash: &mut Sha256, action: &Action) {
             feed(hash, reason.as_bytes());
         }
         Action::Retain(Retained::OwnerNotNamed) => hash.update([6, 3]),
+        Action::Converging => hash.update([7]),
     }
 }
 

@@ -23,6 +23,11 @@
 //!   data (kept), the provider says it cannot be deleted, or the file no longer names its owner.
 //!   The record of an object is dropped only after a read that shows the object gone; a read
 //!   that fails leaves the record where it was.
+//! - **Status.** A failed object is updated toward its node even when its fields match. One
+//!   that is still converging gets no write, and its record is not confirmed until a read
+//!   shows it ready; the run still succeeds and the report says which objects are waiting.
+//! - **One cell.** Every stamp carries the engine's cell, and an object stamped for another
+//!   cell is not ours.
 //! - **Rollback, opt in.** After a failed apply, only the objects that run created are deleted,
 //!   newest first; nothing it updated is touched.
 //!

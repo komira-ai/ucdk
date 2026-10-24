@@ -6,7 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use ucdk_provider::{
-    Deletability, Kind, Live, NodePath, OwnerLabel, PhysicalId, Stamp, StampEvidence, StateClass,
+    CellIdentity, Deletability, Kind, Live, NodePath, OwnerLabel, PhysicalId, Stamp, StampEvidence,
+    StateClass,
 };
 
 use crate::catalog::{Lowered, PlanNode, ROLE_RUN};
@@ -37,6 +38,9 @@ pub enum Action {
     },
     /// The object is already gone: drop the record, with no provider call.
     Reap,
+    /// The object is there and still coming up: nothing is written and its record is not
+    /// confirmed. A later run, when the object is ready, settles it.
+    Converging,
     Retain(Retained),
 }
 
@@ -120,13 +124,18 @@ pub struct Refused {
     pub conflicts: Vec<Conflict>,
 }
 
-/// Whether the object of `seen` is ours: stamped for this node and recorded.
-fn classify(path: &NodePath, live: &Live, record: Option<&Record>) -> Option<ConflictKind> {
+/// Whether the object of `seen` is ours: stamped for this node in this cell, and recorded.
+fn classify(
+    cell: &CellIdentity,
+    path: &NodePath,
+    live: &Live,
+    record: Option<&Record>,
+) -> Option<ConflictKind> {
     match &live.stamp {
         StampEvidence::OtherTool { marker } => Some(ConflictKind::OtherTool(marker.clone())),
         StampEvidence::Absent if record.is_some() => Some(ConflictKind::StampStripped),
         StampEvidence::Absent => Some(ConflictKind::Foreign),
-        StampEvidence::Present(stamp) if !stamp.same_identity(&Stamp::for_node(path)) => {
+        StampEvidence::Present(stamp) if !stamp.same_identity(&Stamp::for_node(cell, path)) => {
             Some(ConflictKind::OtherOwner)
         }
         StampEvidence::Present(_) => match record {
@@ -139,9 +148,9 @@ fn classify(path: &NodePath, live: &Live, record: Option<&Record>) -> Option<Con
     }
 }
 
-fn conflict_of(seen: &Seen, wanted: bool) -> Option<ConflictKind> {
+fn conflict_of(cell: &CellIdentity, seen: &Seen, wanted: bool) -> Option<ConflictKind> {
     match &seen.live {
-        Some(state) => classify(&seen.path, &state.live, seen.record.as_ref()),
+        Some(state) => classify(cell, &seen.path, &state.live, seen.record.as_ref()),
         None => {
             let confirmed = seen.record.as_ref().is_some_and(|r| r.confirmed);
             let kept = seen.state_class == StateClass::Stateful;
@@ -168,8 +177,9 @@ fn forward(
     });
     let action = match (seen.and_then(|s| s.live.as_ref()), bound) {
         (None, _) => Action::Create,
+        (Some(state), _) if state.converging() => Action::Converging,
         (Some(_), Err(_)) => Action::Update,
-        (Some(state), Ok(bound)) if state.failed || state.live.digest != bound.digest() => {
+        (Some(state), Ok(bound)) if state.failed() || state.live.digest != bound.digest() => {
             Action::Update
         }
         (Some(_), Ok(_)) => Action::Noop,
@@ -208,7 +218,9 @@ fn removal(seen: &Seen, owners: &BTreeSet<OwnerLabel>) -> Step {
 /// whole run.
 ///
 /// - A node the file wants with no object is created; one whose object differs from the node
-///   in a modelled field, or is failed, is updated in place; one that matches is a no-op.
+///   in a modelled field, or is failed, is updated in place (a failed object is updated even
+///   when its fields match); one whose object is still converging is left alone, with no
+///   write, until it is ready or failed; one that matches is a no-op.
 /// - A path the file does not want (a role turned off, a resource removed) with an object
 ///   that is ours is deleted, unless its kind holds data (kept), the provider says it cannot
 ///   be deleted, or the file no longer names its owner at all (retained, never deleted by a
@@ -242,9 +254,11 @@ pub fn plan(
         .entries()
         .values()
         .filter_map(|seen| {
-            conflict_of(seen, wanted.contains_key(&seen.path)).map(|why| Conflict {
-                path: seen.path.clone(),
-                why,
+            conflict_of(observed.cell(), seen, wanted.contains_key(&seen.path)).map(|why| {
+                Conflict {
+                    path: seen.path.clone(),
+                    why,
+                }
             })
         })
         .collect();

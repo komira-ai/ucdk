@@ -10,12 +10,31 @@
 
 use std::fmt;
 
+use crate::cell::{CellIdentity, CellName, CellUid};
 use crate::error::{ProviderError, Refusal};
 use crate::ids::{NodePath, PhysicalId};
 use crate::node::{DesiredField, FieldValue, Kind, Node};
-use crate::observe::{Deletability, Live, Observation, OwnerScope};
+use crate::observe::{CellScope, Deletability, Live, Observation, OwnerScope, Status};
 use crate::provider::Provider;
-use crate::stamp::{Stamp, StampEvidence};
+use crate::stamp::{SCHEME, Stamp, StampEvidence, StampMode};
+
+/// The cell every scenario works in, unless it says otherwise.
+pub fn cell() -> CellIdentity {
+    identity("kit-cell", "aaaaaaaaaaaaaaaaaaaaaaaaaa")
+}
+
+/// A second cell on the same machine, with another id, for the scenarios about cells.
+pub fn other_cell() -> CellIdentity {
+    identity("kit-cell", "bbbbbbbbbbbbbbbbbbbbbbbbbb")
+}
+
+fn identity(cell: &str, uid: &str) -> CellIdentity {
+    CellIdentity::new(
+        CellName::new("kit-machine").expect("the literal name is valid"),
+        CellName::new(cell).expect("the literal name is valid"),
+        CellUid::from_text(uid).expect("the literal id is valid"),
+    )
+}
 
 /// What the kit needs from a provider under test beyond the trait.
 pub trait Harness {
@@ -43,6 +62,14 @@ pub trait Harness {
     /// The stamp the object carried in the very call that created it, or `None` when it was
     /// born without one (a stamp written after creation is not a stamp at birth).
     fn stamp_at_birth(&self, provider: &Self::Provider, physical: &PhysicalId) -> Option<Stamp>;
+
+    /// Puts a live object in `status` out of band, as the cloud would: a failed object stays
+    /// failed and a converging one stays converging until the next `update` of it.
+    fn set_status(&self, provider: &mut Self::Provider, physical: &PhysicalId, status: Status);
+
+    /// The kinds this provider declares with [`StampMode::Embedded`]; empty when it declares
+    /// none.
+    fn embedded(&self) -> Vec<Kind>;
 }
 
 /// A scenario that found the provider nonconforming.
@@ -177,7 +204,7 @@ pub fn create_stamps_in_create_call<H: Harness>(h: &H) -> Result<(), Failure> {
     each_kind(h, "create_stamps_in_create_call", |h, kind, i, run| {
         let mut p = h.fresh();
         let node = sample(kind, i, 1);
-        let want = Stamp::for_node(node.path());
+        let want = Stamp::for_node(&cell(), node.path());
         let Some(created) = run.call("create", p.create(&node, &want)) else {
             return;
         };
@@ -215,7 +242,7 @@ pub fn create_existing_is_already_exists<H: Harness>(h: &H) -> Result<(), Failur
         let mut p = h.fresh();
         let first = sample(kind, i, 1);
         let second = sample(kind, i, 2);
-        let want = Stamp::for_node(first.path());
+        let want = Stamp::for_node(&cell(), first.path());
         if run.call("create", p.create(&first, &want)).is_none() {
             return;
         }
@@ -243,6 +270,7 @@ pub fn update_missing_is_not_found<H: Harness>(h: &H) -> Result<(), Failure> {
             physical: PhysicalId::new("kit-ghost"),
             name: node.name().to_owned(),
             stamp: StampEvidence::Absent,
+            status: Status::Ready,
             digest: node.digest(),
             unmanaged: Vec::new(),
         };
@@ -260,7 +288,7 @@ pub fn update_changes_digest_and_keeps_stamp<H: Harness>(h: &H) -> Result<(), Fa
             let mut p = h.fresh();
             let before = sample(kind, i, 1);
             let after = sample(kind, i, 2);
-            let want = Stamp::for_node(before.path());
+            let want = Stamp::for_node(&cell(), before.path());
             let Some(created) = run.call("create", p.create(&before, &want)) else {
                 return;
             };
@@ -298,7 +326,7 @@ pub fn foreign_same_name_untouched<H: Harness>(h: &H) -> Result<(), Failure> {
     each_kind(h, "foreign_same_name_untouched", |h, kind, i, run| {
         let mut p = h.fresh();
         let node = sample(kind, i, 1);
-        let want = Stamp::for_node(node.path());
+        let want = Stamp::for_node(&cell(), node.path());
         let foreign = h.add_foreign(&mut p, kind, node.name());
         // By name the foreign object is found (and is not ours) or, for a provider that
         // looks names up with the stamp in them, not found.
@@ -336,7 +364,7 @@ pub fn foreign_same_name_untouched<H: Harness>(h: &H) -> Result<(), Failure> {
         run.check(after == before, "the foreign object was changed");
         let owned = run.call(
             "list_owned",
-            p.list_owned(&OwnerScope::new(node.path().owner())),
+            p.list_owned(&OwnerScope::new(cell(), node.path().owner())),
         );
         run.check(
             owned.is_some_and(|o| o.iter().all(|o| o.physical != foreign)),
@@ -350,7 +378,7 @@ pub fn delete_absent_is_idempotent<H: Harness>(h: &H) -> Result<(), Failure> {
     each_kind(h, "delete_absent_is_idempotent", |h, kind, i, run| {
         let mut p = h.fresh();
         let node = sample(kind, i, 1);
-        let want = Stamp::for_node(node.path());
+        let want = Stamp::for_node(&cell(), node.path());
         run.call(
             "delete of a never-created object",
             p.delete(kind, &PhysicalId::new("kit-never")),
@@ -371,8 +399,8 @@ pub fn read_is_live_not_cached<H: Harness>(h: &H) -> Result<(), Failure> {
         let mut p = h.fresh();
         let before = sample(kind, i, 1);
         let after = sample(kind, i, 2);
-        let scope = OwnerScope::new(before.path().owner());
-        let want = Stamp::for_node(before.path());
+        let scope = OwnerScope::new(cell(), before.path().owner());
+        let want = Stamp::for_node(&cell(), before.path());
         run.absent("observe before create", p.observe(&before, None));
         let Some(created) = run.call("create", p.create(&before, &want)) else {
             return;
@@ -407,7 +435,7 @@ pub fn rename_invariance<H: Harness>(h: &H) -> Result<(), Failure> {
     each_kind(h, "rename_invariance", |h, kind, i, run| {
         let mut p = h.fresh();
         let node = sample(kind, i, 1);
-        let want = Stamp::for_node(node.path());
+        let want = Stamp::for_node(&cell(), node.path());
         let Some(created) = run.call("create", p.create(&node, &want)) else {
             return;
         };
@@ -429,7 +457,7 @@ pub fn rename_invariance<H: Harness>(h: &H) -> Result<(), Failure> {
             live.digest == node.digest(),
             "the rename changed the digest",
         );
-        let scope = OwnerScope::new(node.path().owner());
+        let scope = OwnerScope::new(cell(), node.path().owner());
         let listed = run.call("list_owned", p.list_owned(&scope));
         run.check(
             listed.is_some_and(|l| l.iter().any(|o| o.physical == created.physical)),
@@ -447,14 +475,14 @@ pub fn list_owned_filters_by_owner<H: Harness>(h: &H) -> Result<(), Failure> {
         let theirs = sample_of("kit-other", kind, i, 1);
         let mut ids = Vec::new();
         for node in [&mine, &theirs] {
-            let want = Stamp::for_node(node.path());
+            let want = Stamp::for_node(&cell(), node.path());
             let Some(created) = run.call("create", p.create(node, &want)) else {
                 return;
             };
             ids.push(created.physical);
         }
         for (node, id, other) in [(&mine, &ids[0], &ids[1]), (&theirs, &ids[1], &ids[0])] {
-            let scope = OwnerScope::new(node.path().owner());
+            let scope = OwnerScope::new(cell(), node.path().owner());
             let Some(listed) = run.call("list_owned", p.list_owned(&scope)) else {
                 return;
             };
@@ -472,6 +500,7 @@ pub fn list_owned_filters_by_owner<H: Harness>(h: &H) -> Result<(), Failure> {
             );
         }
         let nobody = OwnerScope::new(
+            cell(),
             NodePath::new("kit-nobody/x")
                 .expect("the literal path is valid")
                 .owner(),
@@ -496,7 +525,7 @@ pub fn delete_removes_only_the_named_object<H: Harness>(h: &H) -> Result<(), Fai
             let other_owner = sample_of("kit-other", kind, i, 1);
             let mut ids = Vec::new();
             for node in [&doomed, &sibling, &other_owner] {
-                let want = Stamp::for_node(node.path());
+                let want = Stamp::for_node(&cell(), node.path());
                 let Some(created) = run.call("create", p.create(node, &want)) else {
                     return;
                 };
@@ -511,13 +540,14 @@ pub fn delete_removes_only_the_named_object<H: Harness>(h: &H) -> Result<(), Fai
             ] {
                 let seen = run.live(what, p.observe(node, Some(id)));
                 run.check(
-                    seen.is_some_and(|l| is_ours(&l.stamp, &Stamp::for_node(node.path()))),
+                    seen.is_some_and(|l| is_ours(&l.stamp, &Stamp::for_node(&cell(), node.path()))),
                     &format!("a delete changed {what}"),
                 );
             }
             let foreign = run.live("the foreign object", p.observe(&doomed, Some(&bystander)));
             run.check(
-                foreign.is_some_and(|l| !is_ours(&l.stamp, &Stamp::for_node(doomed.path()))),
+                foreign
+                    .is_some_and(|l| !is_ours(&l.stamp, &Stamp::for_node(&cell(), doomed.path()))),
                 "a delete changed the foreign object",
             );
         },
@@ -533,7 +563,7 @@ pub fn declarations_hold<H: Harness>(h: &H) -> Result<(), Failure> {
     each_kind(h, "declarations_hold", |h, kind, i, run| {
         let mut p = h.fresh();
         let node = sample(kind, i, 1);
-        let want = Stamp::for_node(node.path());
+        let want = Stamp::for_node(&cell(), node.path());
         let (mode, class) = (p.stamp_mode(kind), p.state_class(kind));
         if run.call("create", p.create(&node, &want)).is_none() {
             return;
@@ -571,11 +601,11 @@ pub fn extra_labels_round_trip_or_are_refused<H: Harness>(h: &H) -> Result<(), F
         |h, kind, i, run| {
             let mut p = h.fresh();
             let node = sample(kind, i, 1);
-            let want = Stamp::for_node(node.path())
+            let want = Stamp::for_node(&cell(), node.path())
                 .with_extra("run", "r1")
                 .with_extra("depth", "2");
             let carries = p.stamp_mode(kind).carries_extra();
-            let scope = OwnerScope::new(node.path().owner());
+            let scope = OwnerScope::new(cell(), node.path().owner());
             match p.create(&node, &want) {
                 Ok(created) => {
                     run.check(
@@ -618,6 +648,183 @@ pub fn extra_labels_round_trip_or_are_refused<H: Harness>(h: &H) -> Result<(), F
     )
 }
 
+/// An object in a failed state is reported as `Failed`, by name and by physical id, even
+/// though its fields still match the node, and an `update` of it converges it: it is no longer
+/// `Failed` afterwards and keeps its stamp.
+pub fn observe_reports_failed_status<H: Harness>(h: &H) -> Result<(), Failure> {
+    each_kind(h, "observe_reports_failed_status", |h, kind, i, run| {
+        let mut p = h.fresh();
+        let node = sample(kind, i, 1);
+        let want = Stamp::for_node(&cell(), node.path());
+        let Some(created) = run.call("create", p.create(&node, &want)) else {
+            return;
+        };
+        h.set_status(&mut p, &created.physical, Status::Failed);
+        let by_name = run.live("observe by name", p.observe(&node, None));
+        run.check(
+            by_name.is_some_and(|l| l.status == Status::Failed),
+            "an object in a failed state is not reported as failed (by name)",
+        );
+        let Some(live) = run.live("observe by id", p.observe(&node, Some(&created.physical)))
+        else {
+            return;
+        };
+        run.check(
+            live.status == Status::Failed,
+            "an object in a failed state is not reported as failed (by id)",
+        );
+        run.check(
+            live.digest == node.digest(),
+            "a failed state changed the reported digest",
+        );
+        if run.call("update", p.update(&node, &live)).is_none() {
+            return;
+        }
+        let now = run.live("observe after update", p.observe(&node, None));
+        run.check(
+            now.as_ref().is_some_and(|l| l.status != Status::Failed),
+            "an update did not converge the failed object",
+        );
+        run.check(
+            now.is_some_and(|l| is_ours(&l.stamp, &want)),
+            "the update of a failed object lost the stamp",
+        );
+    })
+}
+
+/// An object that is still coming up is reported as `Converging`, though its fields already
+/// match the node.
+pub fn observe_reports_converging_status<H: Harness>(h: &H) -> Result<(), Failure> {
+    each_kind(h, "observe_reports_converging_status", |h, kind, i, run| {
+        let mut p = h.fresh();
+        let node = sample(kind, i, 1);
+        let want = Stamp::for_node(&cell(), node.path());
+        let Some(created) = run.call("create", p.create(&node, &want)) else {
+            return;
+        };
+        h.set_status(&mut p, &created.physical, Status::Converging);
+        let seen = run.live("observe", p.observe(&node, Some(&created.physical)));
+        run.check(
+            seen.is_some_and(|l| l.status == Status::Converging),
+            "an object that is still coming up is not reported as converging",
+        );
+    })
+}
+
+/// `list_stamped` returns every object of the cell that carries our scheme, whoever owns it
+/// in the cell, and leaves out an object that carries no stamp of ours.
+pub fn list_stamped_returns_all_owners_skips_foreign<H: Harness>(h: &H) -> Result<(), Failure> {
+    each_kind(
+        h,
+        "list_stamped_returns_all_owners_skips_foreign",
+        |h, kind, i, run| {
+            let mut p = h.fresh();
+            let mut ids = Vec::new();
+            for owner in ["kit", "kit-other"] {
+                let node = sample_of(owner, kind, i, 1);
+                let want = Stamp::for_node(&cell(), node.path());
+                let Some(created) = run.call("create", p.create(&node, &want)) else {
+                    return;
+                };
+                ids.push(created.physical);
+            }
+            let foreign = h.add_foreign(&mut p, kind, "kit-bystander");
+            let Some(listed) = run.call("list_stamped", p.list_stamped(&CellScope::new(cell())))
+            else {
+                return;
+            };
+            for (id, what) in [(&ids[0], "one owner"), (&ids[1], "another owner")] {
+                run.check(
+                    listed.iter().any(|o| &o.physical == id),
+                    &format!("list_stamped omits an object of {what}"),
+                );
+            }
+            run.check(
+                listed.iter().all(|o| o.physical != foreign),
+                "list_stamped lists an object that carries no stamp of ours",
+            );
+            run.check(
+                listed.iter().all(|o| o.stamp.scheme == SCHEME),
+                "list_stamped returns a stamp of another scheme",
+            );
+        },
+    )
+}
+
+/// `list_stamped` and `list_owned` of one cell never return an object of another cell, even
+/// one of the same owner, and each cell lists its own.
+pub fn list_stamped_ignores_other_cell<H: Harness>(h: &H) -> Result<(), Failure> {
+    each_kind(h, "list_stamped_ignores_other_cell", |h, kind, i, run| {
+        let mut p = h.fresh();
+        let mut ids = Vec::new();
+        for (j, which) in [cell(), other_cell()].into_iter().enumerate() {
+            let node = sample_of("kit", kind, i + 10 * j, 1);
+            let Some(created) = run.call(
+                "create",
+                p.create(&node, &Stamp::for_node(&which, node.path())),
+            ) else {
+                return;
+            };
+            ids.push(created.physical);
+        }
+        for (j, which) in [cell(), other_cell()].into_iter().enumerate() {
+            let owner = NodePath::new("kit/x")
+                .expect("the literal path is valid")
+                .owner();
+            let stamped = run.call(
+                "list_stamped",
+                p.list_stamped(&CellScope::new(which.clone())),
+            );
+            let owned = run.call("list_owned", p.list_owned(&OwnerScope::new(which, owner)));
+            for (what, listed) in [("list_stamped", stamped), ("list_owned", owned)] {
+                let Some(listed) = listed else {
+                    return;
+                };
+                run.check(
+                    listed.iter().any(|o| o.physical == ids[j]),
+                    &format!("{what} omits an object of its own cell"),
+                );
+                run.check(
+                    listed.iter().all(|o| o.physical != ids[1 - j]),
+                    &format!("{what} lists an object of another cell"),
+                );
+            }
+        }
+    })
+}
+
+/// A hosted kind never declares [`StampMode::Embedded`] (no run can apply one yet), and a
+/// kind the harness lists as embedded declares it, carries no extra labels, and has a create
+/// refused as `Unsupported` that changes nothing.
+pub fn embedded_kinds_are_declared_and_refused<H: Harness>(h: &H) -> Result<(), Failure> {
+    let mut run = Run::new("embedded_kinds_are_declared_and_refused");
+    for kind in h.kinds() {
+        run.kind = kind.as_str().to_owned();
+        run.check(
+            h.fresh().stamp_mode(&kind) != StampMode::Embedded,
+            "a hosted kind declares Embedded, which no run can apply yet",
+        );
+    }
+    for (i, kind) in h.embedded().iter().enumerate() {
+        run.kind = kind.as_str().to_owned();
+        let mut p = h.fresh();
+        run.check(
+            p.stamp_mode(kind) == StampMode::Embedded,
+            "a kind listed as embedded does not declare Embedded",
+        );
+        let node = sample(kind, i, 1);
+        let want = Stamp::for_node(&cell(), node.path());
+        run.refused("create", p.create(&node, &want), Refusal::Unsupported);
+        run.absent("observe", p.observe(&node, None));
+        let listed = run.call("list_stamped", p.list_stamped(&CellScope::new(cell())));
+        run.check(
+            listed.is_some_and(|l| l.is_empty()),
+            "a refused create left a stamped object",
+        );
+    }
+    run.done()
+}
+
 /// A kind the provider declares it does not host is refused before anything is created.
 pub fn declared_unsupported_kinds_refuse<H: Harness>(h: &H) -> Result<(), Failure> {
     let mut run = Run::new("declared_unsupported_kinds_refuse");
@@ -625,7 +832,7 @@ pub fn declared_unsupported_kinds_refuse<H: Harness>(h: &H) -> Result<(), Failur
         run.kind = kind.as_str().to_owned();
         let mut p = h.fresh();
         let node = sample(kind, i, 1);
-        let want = Stamp::for_node(node.path());
+        let want = Stamp::for_node(&cell(), node.path());
         run.refused("create", p.create(&node, &want), Refusal::Unsupported);
         run.absent("observe", p.observe(&node, None));
     }
@@ -647,6 +854,11 @@ pub fn run_all<H: Harness>(h: &H) -> Vec<Failure> {
         extra_labels_round_trip_or_are_refused(h),
         read_is_live_not_cached(h),
         rename_invariance(h),
+        observe_reports_failed_status(h),
+        observe_reports_converging_status(h),
+        list_stamped_returns_all_owners_skips_foreign(h),
+        list_stamped_ignores_other_cell(h),
+        embedded_kinds_are_declared_and_refused(h),
         declared_unsupported_kinds_refuse(h),
     ]
     .into_iter()

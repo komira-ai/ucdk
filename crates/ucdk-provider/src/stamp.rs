@@ -3,20 +3,24 @@
 
 use std::collections::BTreeMap;
 
+use crate::cell::{CellIdentity, CellName, CellUid};
 use crate::ids::{NodeKey, NodePath, OwnerLabel};
 
-/// The stamp scheme: scheme 1 identifies a node by its [`NodeKey`]. A change of scheme is a
-/// migration, never a second form in use at once.
+/// The stamp scheme: scheme 1 identifies a node by its [`NodeKey`] and its cell by the
+/// machine, the cell name and the cell id. The byte reaches cloud tags, names and the ledger,
+/// so it is a format promise. A change of scheme is a migration, never a second form in use
+/// at once.
 pub const SCHEME: u8 = 1;
 
 const NAME_MARK: &str = "~ucdk";
 
-/// Who owns an object and which node it is. `extra` is an open label map for values added
+/// Which cell owns an object, who owns it within the cell and which node it is. `extra` is an open label map for values added
 /// later (a validation run id, a composite depth) without changing what the stamp means; it
 /// travels only where the kind can carry tags ([`StampMode::carries_extra`]); a create that asks a
 /// kind without tags to carry any is refused, never silently stripped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stamp {
+    pub cell: CellIdentity,
     pub owner: OwnerLabel,
     pub node: NodeKey,
     pub scheme: u8,
@@ -24,9 +28,10 @@ pub struct Stamp {
 }
 
 impl Stamp {
-    /// The stamp of the node at `path`, in the current scheme, with no extra labels.
-    pub fn for_node(path: &NodePath) -> Self {
+    /// The stamp of the node at `path` in `cell`, in the current scheme, with no extra labels.
+    pub fn for_node(cell: &CellIdentity, path: &NodePath) -> Self {
         Self {
+            cell: cell.clone(),
             owner: path.owner(),
             node: path.key(),
             scheme: SCHEME,
@@ -39,32 +44,45 @@ impl Stamp {
         self
     }
 
-    /// Whether two stamps name the same owner and node in the same scheme (extra labels are
-    /// annotations and do not count).
+    /// Whether two stamps name the same cell, owner and node in the same scheme (extra labels
+    /// are annotations and do not count).
     pub fn same_identity(&self, other: &Stamp) -> bool {
-        self.owner == other.owner && self.node == other.node && self.scheme == other.scheme
+        self.cell == other.cell
+            && self.owner == other.owner
+            && self.node == other.node
+            && self.scheme == other.scheme
     }
 
     /// The physical name that carries this stamp for a kind that cannot hold tags: the base
-    /// name, then the mark, the scheme, the owner and the node key.
+    /// name, then the mark, the scheme, the machine, the cell name, the cell id, the owner and
+    /// the node key.
     pub fn encode_name(&self, base: &str) -> String {
         format!(
-            "{base}{NAME_MARK}{}~{}~{}",
-            self.scheme, self.owner, self.node
+            "{base}{NAME_MARK}{}~{}~{}~{}~{}~{}",
+            self.scheme,
+            self.cell.machine(),
+            self.cell.cell(),
+            self.cell.uid(),
+            self.owner,
+            self.node
         )
     }
 
     /// Splits a physical name into its base name and the stamp it carries. A name that does
     /// not carry a well-formed stamp comes back whole, with no stamp.
     pub fn decode_name(name: &str) -> (String, Option<Stamp>) {
-        let mut parts = name.rsplitn(3, '~');
+        let mut parts = name.rsplitn(6, '~');
         let decoded = (|| {
             let key = NodeKey::from_text(parts.next()?)?;
             let owner = OwnerLabel::new(parts.next()?).ok()?;
+            let uid = CellUid::from_text(parts.next()?).ok()?;
+            let cell = CellName::new(parts.next()?).ok()?;
+            let machine = CellName::new(parts.next()?).ok()?;
             let rest = parts.next()?;
             let (base, scheme) = rest.rsplit_once(NAME_MARK)?;
             let scheme = scheme.parse().ok()?;
             let stamp = Stamp {
+                cell: CellIdentity::new(machine, cell, uid),
                 owner,
                 node: key,
                 scheme,
@@ -91,6 +109,11 @@ pub enum StampMode {
     /// `Refused(Unsupported)` and changes nothing. A provider never drops extra labels
     /// silently.
     NameEncoded,
+    /// The object carries no stamp at all: its owner is the ledger record, not a mark on the
+    /// object. It carries no extra labels. Declared now and not yet applied: a run whose file
+    /// holds a node of such a kind is refused ([`StampMode::applicable`]), and a provider
+    /// refuses to create one.
+    Embedded,
 }
 
 impl StampMode {
@@ -98,7 +121,15 @@ impl StampMode {
     pub fn carries_extra(self) -> bool {
         match self {
             Self::Tag => true,
-            Self::NameEncoded => false,
+            Self::NameEncoded | Self::Embedded => false,
+        }
+    }
+
+    /// Whether the engine can apply kinds in this mode today.
+    pub fn applicable(self) -> bool {
+        match self {
+            Self::Tag | Self::NameEncoded => true,
+            Self::Embedded => false,
         }
     }
 }

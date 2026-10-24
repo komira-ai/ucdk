@@ -43,6 +43,12 @@ pub struct Faults {
     /// here and change nothing; once the list is used up reads succeed again. Each failed
     /// read is logged with its error.
     pub fail_reads: Vec<ProviderError>,
+    /// Objects created while this is set are born in a failed state, and stay failed until an
+    /// `update` of them.
+    pub create_failed: bool,
+    /// Objects created while this is non-zero report `Converging` for that many reads (observe
+    /// or list) after the create, and `Ready` from then on.
+    pub converging_reads: u64,
 }
 
 /// The faults a test may arm on a live fake: every one of [`Faults`] except `foreign`, which
@@ -55,6 +61,8 @@ pub struct FaultsMut<'a> {
     pub ambiguous_success: &'a mut bool,
     pub ambiguous_at_call: &'a mut Option<u64>,
     pub fail_reads: &'a mut Vec<ProviderError>,
+    pub create_failed: &'a mut bool,
+    pub converging_reads: &'a mut u64,
 }
 
 /// What the fake hosts. Every kind not listed as unsupported is hosted.
@@ -69,6 +77,9 @@ pub struct FakeConfig {
     pub deletion_forbidden: BTreeSet<Kind>,
     /// Kinds the cloud lacks: a create of one is refused before anything is created.
     pub unsupported: BTreeSet<Kind>,
+    /// Kinds declared [`ucdk_provider::StampMode::Embedded`]: the fake declares the mode and
+    /// refuses to create one, as the behaviour is not there yet.
+    pub embedded: BTreeSet<Kind>,
     pub faults: Faults,
 }
 
@@ -78,6 +89,14 @@ impl FakeConfig {
         Self {
             tagless: BTreeSet::from([Kind::job()]),
             ..Self::default()
+        }
+    }
+
+    /// The standard shapes, and the kind `grant`, which has no stamp of its own.
+    pub fn with_embedded() -> Self {
+        Self {
+            embedded: BTreeSet::from([Kind::new("grant")]),
+            ..Self::standard()
         }
     }
 

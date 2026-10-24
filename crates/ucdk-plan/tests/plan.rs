@@ -12,9 +12,15 @@ use ucdk_proto::v1::resource::Body;
 use ucdk_proto::v1::{
     Access, Image, Output, Ref, Resource, ResourceList, Service, Uses, Value, image, service, value,
 };
+use ucdk_provider::kit;
 use ucdk_provider::{
-    Deletability, Kind, Live, NodePath, PhysicalId, Stamp, StampEvidence, StateClass,
+    CellIdentity, Deletability, Kind, Live, NodePath, PhysicalId, Stamp, StampEvidence, StateClass,
+    Status,
 };
+
+fn cell() -> CellIdentity {
+    kit::cell()
+}
 
 // ---- builders --------------------------------------------------------------------------------
 
@@ -65,7 +71,7 @@ fn physical(p: &str) -> PhysicalId {
 }
 
 fn observed() -> Observed {
-    Observed::new(LedgerToken::new("v1"))
+    Observed::new(LedgerToken::new("v1"), cell())
 }
 
 /// An object that is ours, matches `n`, and is recorded.
@@ -79,12 +85,12 @@ fn ours(n: &PlanNode) -> Seen {
             live: Live {
                 physical: physical(p.as_str()),
                 name: n.node.name().to_owned(),
-                stamp: StampEvidence::Present(Stamp::for_node(p)),
+                stamp: StampEvidence::Present(Stamp::for_node(&cell(), p)),
+                status: Status::Ready,
                 digest: n.node.digest(),
                 unmanaged: Vec::new(),
             },
             deletability: Deletability::Deletable,
-            failed: false,
         }),
         record: Some(Record {
             physical: Some(physical(p.as_str())),
@@ -105,12 +111,12 @@ fn leftover(p: &str, deps: &[&str]) -> Seen {
             live: Live {
                 physical: physical(p),
                 name: p.replace('/', "-"),
-                stamp: StampEvidence::Present(Stamp::for_node(&path(p))),
+                stamp: StampEvidence::Present(Stamp::for_node(&cell(), &path(p))),
+                status: Status::Ready,
                 digest: node_digest(),
                 unmanaged: Vec::new(),
             },
             deletability: Deletability::Deletable,
-            failed: false,
         }),
         record: Some(Record {
             physical: Some(physical(p)),
@@ -236,7 +242,8 @@ fn a_node_that_exists_is_created_updated_or_left_alone() {
 
     // A failed object is updated even when its fields match.
     let mut failed = ours(node(&l, "db/run"));
-    live_mut(&mut failed).failed = true;
+    live_mut(&mut failed).live.status = Status::Failed;
+    assert!(live_mut(&mut failed).failed());
     let p = run(&l, &observed().with(failed));
     assert_eq!(steps(&p)[0], ("db/run", &Action::Update));
 }
@@ -412,11 +419,12 @@ fn each_way_an_object_is_not_ours_refuses_the_run() {
     assert_eq!(one(s), ConflictKind::PhysicalIdMismatch);
 
     let mut s = base();
-    live_mut(&mut s).live.stamp = StampEvidence::Present(Stamp::for_node(&path("app/run")));
+    live_mut(&mut s).live.stamp =
+        StampEvidence::Present(Stamp::for_node(&cell(), &path("app/run")));
     assert_eq!(one(s), ConflictKind::OtherOwner);
 
     let mut s = base();
-    let mut stamp = Stamp::for_node(&path("db/run"));
+    let mut stamp = Stamp::for_node(&cell(), &path("db/run"));
     stamp.scheme = 2;
     live_mut(&mut s).live.stamp = StampEvidence::Present(stamp);
     assert_eq!(one(s), ConflictKind::OtherOwner);
@@ -433,7 +441,7 @@ fn an_extra_label_on_the_stamp_does_not_make_an_object_foreign() {
     let l = app_and_db(80);
     let mut s = ours(node(&l, "db/run"));
     live_mut(&mut s).live.stamp =
-        StampEvidence::Present(Stamp::for_node(&path("db/run")).with_extra("run", "7"));
+        StampEvidence::Present(Stamp::for_node(&cell(), &path("db/run")).with_extra("run", "7"));
     assert_eq!(steps(&run(&l, &observed().with(s)))[0].1, &Action::Noop);
 }
 
@@ -511,7 +519,7 @@ fn each_conflict_reads_as_a_sentence_naming_its_path() {
 fn plan_hash_ignores_ledger_token() {
     let l = app_and_db(80);
     let with_token = |t: &str| {
-        Observed::new(LedgerToken::new(t))
+        Observed::new(LedgerToken::new(t), cell())
             .with(ours(node(&l, "db/run")))
             .with(leftover("app/old", &["app/run"]))
     };
@@ -671,7 +679,7 @@ fn consumer_is_updated_while_its_producer_is_changing() {
     // The recorded output matches the object, but the producer is itself being updated, so
     // the value the consumer will see is not settled.
     let mut db = ours(node(&l, "db/run"));
-    live_mut(&mut db).failed = true;
+    live_mut(&mut db).live.status = Status::Failed;
     let o = observed()
         .with_output("db", "URL", "db-url-1")
         .with(db)
@@ -728,4 +736,78 @@ fn a_wanted_public_role_that_matches_is_a_noop() {
         steps(&p)
     );
     assert!(steps(&p).iter().any(|(path, _)| *path == "db/public"));
+}
+
+// ---- Plan: status and cell -------------------------------------------------------------------
+
+#[test]
+fn failed_object_is_updated_not_noop() {
+    let l = app_and_db(80);
+    let mut failed = ours(node(&l, "db/run"));
+    assert_eq!(
+        live_mut(&mut failed).live.digest,
+        node(&l, "db/run").node.digest()
+    );
+    live_mut(&mut failed).live.status = Status::Failed;
+    let o = observed().with(failed).with(ours(node(&l, "app/run")));
+    let p = run(&l, &o);
+    assert_eq!(
+        steps(&p),
+        [("db/run", &Action::Update), ("app/run", &Action::Noop)]
+    );
+    let healthy = observed()
+        .with(ours(node(&l, "db/run")))
+        .with(ours(node(&l, "app/run")));
+    assert_ne!(
+        p.hash(),
+        run(&l, &healthy).hash(),
+        "the approver sees the update"
+    );
+}
+
+#[test]
+fn converging_object_plans_no_write_whatever_its_fields_say() {
+    let l = app_and_db(80);
+    let mut matching = ours(node(&l, "db/run"));
+    live_mut(&mut matching).live.status = Status::Converging;
+    assert!(live_mut(&mut matching).converging());
+    let mut differing = ours(node(&l, "db/run"));
+    live_mut(&mut differing).live.status = Status::Converging;
+    live_mut(&mut differing).live.digest = node_digest_of_other();
+    for seen in [matching, differing] {
+        let p = run(&l, &observed().with(seen).with(ours(node(&l, "app/run"))));
+        assert_eq!(
+            steps(&p),
+            [("db/run", &Action::Converging), ("app/run", &Action::Noop)]
+        );
+    }
+    let settled = observed()
+        .with(ours(node(&l, "db/run")))
+        .with(ours(node(&l, "app/run")));
+    let mut waiting = ours(node(&l, "db/run"));
+    live_mut(&mut waiting).live.status = Status::Converging;
+    let p = run(
+        &l,
+        &observed().with(waiting).with(ours(node(&l, "app/run"))),
+    );
+    assert_ne!(p.hash(), run(&l, &settled).hash(), "waiting is not a no-op");
+}
+
+#[test]
+fn an_object_stamped_for_another_cell_is_not_ours() {
+    let l = app_and_db(80);
+    let mut s = ours(node(&l, "db/run"));
+    live_mut(&mut s).live.stamp =
+        StampEvidence::Present(Stamp::for_node(&kit::other_cell(), &path("db/run")));
+    assert_eq!(
+        refused(&l, &observed().with(s)),
+        [("db/run".to_owned(), ConflictKind::OtherOwner)]
+    );
+    // The same object is ours when the run is for the cell that stamped it.
+    let mut s = ours(node(&l, "db/run"));
+    live_mut(&mut s).live.stamp =
+        StampEvidence::Present(Stamp::for_node(&kit::other_cell(), &path("db/run")));
+    let there = Observed::new(LedgerToken::new("v1"), kit::other_cell()).with(s);
+    assert_eq!(there.cell(), &kit::other_cell());
+    assert!(plan(&l, &there, None).is_ok());
 }

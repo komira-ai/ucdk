@@ -5,7 +5,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use ucdk_provider::{Deletability, Kind, Live, NodePath, PhysicalId, StateClass};
+use ucdk_provider::{
+    CellIdentity, Deletability, Kind, Live, NodePath, PhysicalId, StateClass, Status,
+};
 
 /// The ledger's version token. A plan is compared against one snapshot, so the token names
 /// that snapshot; it is not part of the plan hash, because another run's ledger writes must
@@ -41,9 +43,20 @@ pub struct LiveState {
     pub live: Live,
     /// The provider's answer for this object (`Provider::deletability`).
     pub deletability: Deletability,
-    /// The object is in a failed state and is updated toward the node even if its modelled
-    /// fields match.
-    pub failed: bool,
+}
+
+impl LiveState {
+    /// The object is in a failed state (`live.status`) and is updated toward the node even if
+    /// its modelled fields match.
+    pub fn failed(&self) -> bool {
+        self.live.status == Status::Failed
+    }
+
+    /// The object is still coming up (`live.status`): no write is planned for it, whatever
+    /// its fields say, until it is ready or failed.
+    pub fn converging(&self) -> bool {
+        self.live.status == Status::Converging
+    }
 }
 
 /// Everything known about one node path: the object (if there is one) and the record (if
@@ -64,14 +77,18 @@ pub struct Seen {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Observed {
     token: LedgerToken,
+    cell: CellIdentity,
     entries: BTreeMap<NodePath, Seen>,
     outputs: BTreeMap<(String, String), String>,
 }
 
 impl Observed {
-    pub fn new(token: LedgerToken) -> Self {
+    /// The observed state of a run in `cell`: an object is ours only if it carries the stamp
+    /// of this cell.
+    pub fn new(token: LedgerToken, cell: CellIdentity) -> Self {
         Self {
             token,
+            cell,
             entries: BTreeMap::new(),
             outputs: BTreeMap::new(),
         }
@@ -101,6 +118,10 @@ impl Observed {
 
     pub fn token(&self) -> &LedgerToken {
         &self.token
+    }
+
+    pub fn cell(&self) -> &CellIdentity {
+        &self.cell
     }
 
     pub(crate) fn output(&self, resource: &str, output: &str) -> Option<&str> {

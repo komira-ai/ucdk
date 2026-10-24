@@ -12,6 +12,7 @@ pub enum Op {
     Delete,
     Observe,
     ListOwned,
+    ListStamped,
 }
 
 impl Op {
@@ -22,6 +23,7 @@ impl Op {
             Self::Delete => "delete",
             Self::Observe => "observe",
             Self::ListOwned => "list_owned",
+            Self::ListStamped => "list_stamped",
         }
     }
 

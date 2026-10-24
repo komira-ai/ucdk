@@ -38,11 +38,15 @@ pub fn plan_text(provider: ProviderName, mode: Mode, plan: &Plan) -> String {
             Action::Create => ("create", String::new()),
             Action::Update => ("update", String::new()),
             Action::Noop => ("ok", String::new()),
+            Action::Converging => ("wait", " (still converging; nothing is written)".to_owned()),
             Action::Delete { .. } => ("delete", String::new()),
             Action::Reap => ("reap", " (already gone; the record is dropped)".to_owned()),
             Action::Retain(r) => ("retain", format!(" ({})", why(r))),
         };
-        if !matches!(step.action, Action::Noop | Action::Retain(_)) {
+        if !matches!(
+            step.action,
+            Action::Noop | Action::Converging | Action::Retain(_)
+        ) {
             changes += 1;
         }
         let _ = writeln!(
@@ -79,6 +83,12 @@ pub fn report_text(report: &Report) -> String {
     }
     for (path, retained) in &report.retained {
         let _ = writeln!(text, "  retained {path} ({})", why(retained));
+    }
+    for path in &report.converging {
+        let _ = writeln!(
+            text,
+            "  waiting  {path} (still converging; its record is not confirmed until it is ready)"
+        );
     }
     text.push_str(&if changes == 0 {
         "no changes\n".to_owned()

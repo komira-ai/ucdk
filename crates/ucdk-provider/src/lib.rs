@@ -15,6 +15,7 @@
 //! ([`StampMode::NameEncoded`]). Ownership is decided from the stamp, never from a name's
 //! spelling alone.
 
+pub mod cell;
 pub mod error;
 pub mod ids;
 pub mod kit;
@@ -23,11 +24,15 @@ pub mod observe;
 pub mod provider;
 pub mod stamp;
 
+pub use cell::{CellIdentity, CellName, CellUid};
 pub use error::{ProviderError, Refusal};
-pub use ids::{Digest, ModelError, NodeKey, NodePath, OwnerLabel, PhysicalId};
+pub use ids::{
+    Digest, ModelError, NODE_KEY_LEN, NodeKey, NodePath, OwnerLabel, PhysicalId, SEGMENT_MAX,
+};
 pub use node::{DesiredField, FieldValue, Kind, Node};
 pub use observe::{
-    Created, Deletability, Live, Observation, OwnedObject, OwnerScope, StateClass, Updated,
+    CellScope, Created, Deletability, Live, Observation, OwnedObject, OwnerScope, StateClass,
+    Status, Updated,
 };
 pub use provider::Provider;
 pub use stamp::{SCHEME, Stamp, StampEvidence, StampMode};

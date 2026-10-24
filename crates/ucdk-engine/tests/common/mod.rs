@@ -12,10 +12,16 @@ use ucdk_plan::{Lowered, Plan, lower};
 use ucdk_proto::v1::resource::Body;
 use ucdk_proto::v1::{Access, Image, Ref, Resource, ResourceList, Service, Uses, image, service};
 use ucdk_provider::{
-    Created, Deletability, Kind, Live, Node, NodePath, Observation, OwnedObject, OwnerScope,
-    PhysicalId, Provider, ProviderError, StampMode, StateClass, Updated,
+    CellIdentity, CellScope, Created, Deletability, Kind, Live, Node, NodePath, Observation,
+    OwnedObject, OwnerScope, PhysicalId, Provider, ProviderError, StampMode, StateClass, Updated,
+    kit,
 };
 use ucdk_provider_fake::Fake;
+
+/// The cell the engine tests run in.
+pub fn cell() -> CellIdentity {
+    kit::cell()
+}
 
 // ---- resource lists --------------------------------------------------------------------------
 
@@ -78,7 +84,7 @@ pub fn paths(list: &[&str]) -> Vec<NodePath> {
 // ---- drivers ---------------------------------------------------------------------------------
 
 pub fn plan_of(provider: &mut dyn Provider, ledger: &dyn Ledger, desired: &Lowered) -> Outcome {
-    Engine::new(provider, ledger).handle(Request::Plan {
+    Engine::new(provider, ledger, cell()).handle(Request::Plan {
         desired: desired.clone(),
         mode: Mode::Apply,
     })
@@ -96,7 +102,7 @@ pub fn apply_with(
         other => return other,
     };
     let plan_hash = plan.hash().clone();
-    Engine::new(provider, ledger).handle(Request::Apply {
+    Engine::new(provider, ledger, cell()).handle(Request::Apply {
         desired: desired.clone(),
         plan,
         plan_hash,
@@ -110,7 +116,7 @@ pub fn apply(provider: &mut dyn Provider, ledger: &dyn Ledger, desired: &Lowered
 
 /// Plans a destroy of `desired`, then runs it under that plan's hash.
 pub fn destroy(provider: &mut dyn Provider, ledger: &dyn Ledger, desired: &Lowered) -> Outcome {
-    let plan = match Engine::new(provider, ledger).handle(Request::Plan {
+    let plan = match Engine::new(provider, ledger, cell()).handle(Request::Plan {
         desired: desired.clone(),
         mode: Mode::Destroy,
     }) {
@@ -118,7 +124,7 @@ pub fn destroy(provider: &mut dyn Provider, ledger: &dyn Ledger, desired: &Lower
         other => return other,
     };
     let plan_hash = plan.hash().clone();
-    Engine::new(provider, ledger).handle(Request::Destroy {
+    Engine::new(provider, ledger, cell()).handle(Request::Destroy {
         desired: desired.clone(),
         plan,
         plan_hash,
@@ -169,7 +175,10 @@ pub fn physical_of(ledger: &MemoryLedger, p: &str) -> PhysicalId {
 pub fn owned_by_fake(fake: &mut Fake, owners: &[&str]) -> Vec<PhysicalId> {
     let mut found = Vec::new();
     for owner in owners {
-        let scope = OwnerScope::new(ucdk_provider::OwnerLabel::new(owner).expect("owner"));
+        let scope = OwnerScope::new(
+            cell(),
+            ucdk_provider::OwnerLabel::new(owner).expect("owner"),
+        );
         found.extend(
             fake.list_owned(&scope)
                 .expect("list")
@@ -262,6 +271,11 @@ impl Provider for Hooked<'_> {
     fn list_owned(&mut self, scope: &OwnerScope) -> Result<Vec<OwnedObject>, ProviderError> {
         self.tick();
         self.fake.list_owned(scope)
+    }
+
+    fn list_stamped(&mut self, scope: &CellScope) -> Result<Vec<OwnedObject>, ProviderError> {
+        self.tick();
+        self.fake.list_stamped(scope)
     }
 }
 

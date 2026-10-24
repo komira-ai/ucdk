@@ -5,8 +5,8 @@
 mod common;
 
 use common::{
-    apply, chain, chain_with, done, lowered, mutations, objects, path, paths, physical_of, plan_of,
-    planned, records, service_of,
+    apply, cell, chain, chain_with, done, lowered, mutations, objects, path, paths, physical_of,
+    plan_of, planned, records, service_of,
 };
 use ucdk_engine::{Engine, Outcome, Refusal, Request};
 use ucdk_ledger::{Ledger as _, MemoryLedger, Origin, OwnerPath, State};
@@ -43,7 +43,7 @@ fn apply_stamps_in_the_create_call() {
         let physical = record.physical.expect("confirmed");
         assert_eq!(
             fake.birth_stamp(&physical),
-            Some(Stamp::for_node(&p)),
+            Some(Stamp::for_node(&cell(), &p)),
             "{p} was born with its stamp"
         );
     }
@@ -162,7 +162,7 @@ fn a_plan_that_does_not_carry_the_pinned_hash_is_refused() {
     let (mut fake, ledger) = world();
     let plan = planned(plan_of(&mut fake, &ledger, &chain()));
     let other = planned(plan_of(&mut fake, &ledger, &chain_with(1, true)));
-    let outcome = Engine::new(&mut fake, &ledger).handle(Request::Apply {
+    let outcome = Engine::new(&mut fake, &ledger, cell()).handle(Request::Apply {
         desired: chain(),
         plan,
         plan_hash: other.hash().clone(),
@@ -188,7 +188,7 @@ fn a_world_that_changed_since_the_approval_is_refused() {
     done(apply(&mut fake, &ledger, &chain()));
     let mutated = mutations(&fake);
     let hash = approved.hash().clone();
-    let outcome = Engine::new(&mut fake, &ledger).handle(Request::Apply {
+    let outcome = Engine::new(&mut fake, &ledger, cell()).handle(Request::Apply {
         desired: chain(),
         plan: approved,
         plan_hash: hash,

@@ -5,7 +5,8 @@ use crate::error::ProviderError;
 use crate::ids::PhysicalId;
 use crate::node::{Kind, Node};
 use crate::observe::{
-    Created, Deletability, Live, Observation, OwnedObject, OwnerScope, StateClass, Updated,
+    CellScope, Created, Deletability, Live, Observation, OwnedObject, OwnerScope, StateClass,
+    Updated,
 };
 use crate::stamp::{Stamp, StampMode};
 
@@ -20,7 +21,13 @@ use crate::stamp::{Stamp, StampMode};
 /// - `delete` of an object that is not there succeeds;
 /// - `observe` and `list_owned` read the cloud as it is now;
 /// - `delete` removes the object it names and no other;
-/// - `list_owned` returns the objects of the scope's owner and no others;
+/// - `list_owned` returns the objects of the scope's owner in the scope's cell and no others;
+/// - `list_stamped` returns every object that carries a stamp of the current scheme for the
+///   scope's cell, whoever in the cell owns it, and no others: an object with no stamp, another
+///   tool's object and an object of another cell are left out;
+/// - `observe` reports the object's status as the cloud has it: `Failed` for an object in a
+///   failed state and `Converging` for one that is still coming up, whatever its fields say;
+/// - `update` of a failed object converges it: it is no longer `Failed` afterwards;
 /// - `observe` reports the human name of the object, never a name with the stamp encoded in it;
 /// - `stamp_mode` and `state_class` of a kind do not change while objects exist, and an
 ///   object holding nothing the catalog does not model (`Live::unmanaged` empty) is `Deletable`;
@@ -58,6 +65,10 @@ pub trait Provider: Send {
     /// Deletes the object; one that is already gone is success.
     fn delete(&mut self, kind: &Kind, physical: &PhysicalId) -> Result<(), ProviderError>;
 
-    /// Every object that carries a stamp of the scope's owner.
+    /// Every object that carries a stamp of the scope's owner in the scope's cell.
     fn list_owned(&mut self, scope: &OwnerScope) -> Result<Vec<OwnedObject>, ProviderError>;
+
+    /// Every object that carries our stamp scheme in the scope's cell, any owner. Objects with
+    /// no stamp, another tool's objects and objects of other cells are not listed.
+    fn list_stamped(&mut self, scope: &CellScope) -> Result<Vec<OwnedObject>, ProviderError>;
 }
