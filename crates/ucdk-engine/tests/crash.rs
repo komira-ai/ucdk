@@ -10,11 +10,12 @@ use std::sync::{Arc, Mutex};
 
 use common::{
     FlakyLedger, Hooked, apply, apply_with, chain, destroy, done, lowered, mutations, objects,
-    owned_by_fake, path, paths, physical_of, records, service_of,
+    owned_by_fake, path, paths, physical_of, records, service_of, service_reading,
 };
 use ucdk_engine::{EngineError, Outcome, Refusal, Report};
 use ucdk_ledger::{Change, Ledger as _, LedgerError, MemoryLedger, Record, State};
 use ucdk_plan::{ConflictKind, Lowered};
+use ucdk_proto::v1::Output;
 use ucdk_provider::{Kind, Provider as _, ProviderError, Refusal as CallRefusal};
 use ucdk_provider_fake::{Fake, Op};
 
@@ -227,6 +228,15 @@ fn scenarios() -> Vec<Scenario> {
             name: "update, create and delete in one run",
             setup: vec![chain()],
             act: Act::Apply(grown),
+        },
+        Scenario {
+            name: "create a chain that reads each other's outputs",
+            setup: vec![],
+            act: Act::Apply(lowered(vec![
+                service_reading("web", 80, "API_URL", "api", Output::Url),
+                service_reading("api", 81, "DB_HOST", "db", Output::Host),
+                service_of("db", 5432, false, &[]),
+            ])),
         },
         Scenario {
             name: "destroy everything",

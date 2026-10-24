@@ -29,17 +29,28 @@ pub use finding::{Finding, FindingKind};
 pub use lower::{Lowered, PlanNode, ROLE_RUN, ValueRef};
 pub use render::{ROLE_PUBLIC, ROLE_SCHEDULE};
 
-use ucdk_proto::v1::ResourceList;
+use ucdk_proto::v1::{Portability, ResourceList};
 
 /// Checks a resource list and returns every finding, not only the first. An empty result
 /// means [`lower`] succeeds. A reference to a resource that is not in the list and a cycle of
 /// references are refused here.
 pub fn validate(list: &ResourceList) -> Vec<Finding> {
-    read::read(list).err().unwrap_or_default()
+    validate_with_portability(list, read::catalog_portability)
+}
+
+/// [`validate`] for a catalog that marks types differently: `portability` says how portable
+/// each type is, by name (`service`, `job`). A reference to a resource of a `CLOUD_BOUND` type
+/// is refused: only the one cloud that hosts it has the value, so no other node may be bound
+/// to it. Both v1 types are `PORTABLE`, so `validate` never reports it.
+pub fn validate_with_portability(
+    list: &ResourceList,
+    portability: impl Fn(&str) -> Portability,
+) -> Vec<Finding> {
+    read::read(list, portability).err().unwrap_or_default()
 }
 
 /// Lowers a resource list to its nodes in dependency order, or returns the findings of
 /// [`validate`].
 pub fn lower(list: &ResourceList) -> Result<Lowered, Vec<Finding>> {
-    read::read(list).map(lower::lower_specs)
+    read::read(list, read::catalog_portability).map(lower::lower_specs)
 }

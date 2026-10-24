@@ -24,6 +24,14 @@ pub enum EngineError {
     /// A read shows no object, but the run that created it never read it back: the read may
     /// only be lagging, so the record stays until the object is seen.
     Unwitnessed(NodePath),
+    /// A node reads an output of a resource whose record is confirmed and holds no such
+    /// output: the provider does not report it (or reports it as a secret), so the value
+    /// does not exist.
+    OutputUnknown {
+        path: NodePath,
+        resource: String,
+        output: String,
+    },
 }
 
 impl From<ProviderError> for EngineError {
@@ -49,6 +57,14 @@ impl fmt::Display for EngineError {
             Self::Unwitnessed(p) => write!(
                 f,
                 "{p}: no object is read, but the record is an intent that no read has confirmed"
+            ),
+            Self::OutputUnknown {
+                path,
+                resource,
+                output,
+            } => write!(
+                f,
+                "{path}: `{resource}` is applied and reports no {output} for it to read"
             ),
         }
     }

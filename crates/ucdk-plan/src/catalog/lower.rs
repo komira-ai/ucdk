@@ -3,6 +3,7 @@
 
 use std::collections::BTreeSet;
 
+use ucdk_proto::v1::Output;
 use ucdk_provider::{DesiredField, FieldValue, Kind, Node, NodePath};
 
 use super::read::Spec;
@@ -19,8 +20,8 @@ pub struct ValueRef {
     pub field: String,
     /// The resource that produces the value.
     pub resource: String,
-    /// The output of that resource, by its name in the proto (`URL`, `HOST`).
-    pub output: &'static str,
+    /// The output of that resource.
+    pub output: Output,
 }
 
 /// One node of the lowered graph.
@@ -88,7 +89,7 @@ impl PlanNode {
         let mut fields = self.node.fields().to_vec();
         let mut pending = Vec::new();
         for r in &self.refs {
-            match output(&r.resource, r.output) {
+            match output(&r.resource, r.output.as_str_name()) {
                 Some(text) => fields.push(DesiredField::new(
                     &r.field,
                     FieldValue::Text(text.to_owned()),

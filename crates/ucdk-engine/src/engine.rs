@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use ucdk_ledger::{Change, Ledger, LedgerError, Record, State};
 use ucdk_plan::{
-    Action, LedgerToken, LiveState, Lowered, Observed, Plan, PlanHash, PlanNode,
+    Action, LedgerToken, LiveState, Lowered, Observed, Plan, PlanHash, PlanNode, ROLE_RUN,
     Record as PlanRecord, Refused, Seen, Step, plan,
 };
 use ucdk_provider::{
@@ -26,6 +26,12 @@ pub struct Engine<'a> {
     pub(crate) provider: &'a mut dyn Provider,
     pub(crate) ledger: &'a dyn Ledger,
     pub(crate) cell: CellIdentity,
+}
+
+/// The resource whose `run` node is at `path`, or none for any other role: a resource's
+/// outputs are those of its `run` object.
+fn run_resource(path: &NodePath) -> Option<&str> {
+    path.as_str().strip_suffix(&format!("/{ROLE_RUN}"))
 }
 
 /// The node an existing record stands for, with no fields: enough to read the object by its
@@ -158,7 +164,11 @@ impl<'a> Engine<'a> {
         report: &mut Report,
     ) -> Result<(), EngineError> {
         match &step.action {
-            Action::Create | Action::Update => self.converge(nodes[&step.path], report),
+            // A node that reads an output is resolved here, in dependency order, after the
+            // producer's step has confirmed its record and written the output.
+            Action::Create | Action::Update | Action::KnownAfterApply => {
+                self.converge(nodes[&step.path], report)
+            }
             Action::Noop => self.settle(nodes[&step.path], report),
             Action::Converging => {
                 report.converging.push(step.path.clone());
@@ -188,6 +198,15 @@ impl<'a> Engine<'a> {
             .collect();
         for n in view.nodes() {
             subjects.insert(n.node.path().clone(), n.node.clone());
+        }
+        for record in snapshot.records.values() {
+            // Only a confirmed record's outputs are current; an intent's are the last known.
+            let current = record.state == State::Confirmed;
+            if let Some(resource) = run_resource(&record.path).filter(|_| current) {
+                for (name, value) in &record.outputs {
+                    observed = observed.with_output(resource, name, value);
+                }
+            }
         }
         for (path, node) in subjects {
             let record = snapshot.records.get(&path);

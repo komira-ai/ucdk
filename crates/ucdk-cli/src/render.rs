@@ -39,6 +39,10 @@ pub fn plan_text(provider: ProviderName, mode: Mode, plan: &Plan) -> String {
             Action::Update => ("update", String::new()),
             Action::Noop => ("ok", String::new()),
             Action::Converging => ("wait", " (still converging; nothing is written)".to_owned()),
+            Action::KnownAfterApply => (
+                "later",
+                " (reads a value that is known only after apply)".to_owned(),
+            ),
             Action::Delete { .. } => ("delete", String::new()),
             Action::Reap => ("reap", " (already gone; the record is dropped)".to_owned()),
             Action::Retain(r) => ("retain", format!(" ({})", why(r))),
@@ -94,6 +98,12 @@ pub fn report_text(report: &Report) -> String {
         let _ = writeln!(
             text,
             "  failed   {path} (still failed after the write; its record is not confirmed, run again to retry)"
+        );
+    }
+    for (path, producer) in &report.blocked_by_failed {
+        let _ = writeln!(
+            text,
+            "  blocked  {path} (its producer {producer} is still failed)"
         );
     }
     text.push_str(&if changes == 0 {

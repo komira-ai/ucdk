@@ -172,6 +172,7 @@ impl Stub {
             } else {
                 Vec::new()
             },
+            outputs: Vec::new(),
         }
     }
 }
@@ -294,6 +295,7 @@ impl Provider for Stub {
                 self.insert(node, None, None);
                 return Ok(Updated {
                     digest: node.digest(),
+                    outputs: Vec::new(),
                 });
             }
             return Err(ProviderError::Refused(Refusal::NotFound));
@@ -309,6 +311,7 @@ impl Provider for Stub {
         }
         Ok(Updated {
             digest: node.digest(),
+            outputs: Vec::new(),
         })
     }
 

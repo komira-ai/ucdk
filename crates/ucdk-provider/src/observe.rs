@@ -19,6 +19,36 @@ pub enum Status {
     Failed,
 }
 
+/// A value an object has once it exists, such as its URL or its host: what another resource
+/// may read. Only the provider knows it, so it is reported with the object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Produced {
+    /// The output's name in the catalog (`URL`, `HOST`).
+    pub name: String,
+    pub value: String,
+    /// A secret value is handed to the run that asks for it and is never written to the
+    /// ledger.
+    pub secret: bool,
+}
+
+impl Produced {
+    pub fn new(name: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            value: value.into(),
+            secret: false,
+        }
+    }
+
+    #[must_use]
+    pub fn secret(self) -> Self {
+        Self {
+            secret: true,
+            ..self
+        }
+    }
+}
+
 /// A live object as the provider reads it, live from the cloud, never from a cache.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Live {
@@ -34,8 +64,13 @@ pub struct Live {
     /// Names of fields the object has that the catalog does not model: reported, never
     /// compared, never converged.
     pub unmanaged: Vec<String>,
+    /// What the object produces, as it is now.
+    pub outputs: Vec<Produced>,
 }
 
+// A present object is the common answer and `Live` is read by value everywhere; boxing it would
+// change every match on an observation for no saving.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Observation {
     Absent,
@@ -51,6 +86,8 @@ pub struct Created {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Updated {
     pub digest: Digest,
+    /// What the object produces after the update.
+    pub outputs: Vec<Produced>,
 }
 
 /// Whether a kind holds data the engine keeps by default.

@@ -89,6 +89,7 @@ fn ours(n: &PlanNode) -> Seen {
                 status: Status::Ready,
                 digest: n.node.digest(),
                 unmanaged: Vec::new(),
+                outputs: Vec::new(),
             },
             deletability: Deletability::Deletable,
         }),
@@ -115,6 +116,7 @@ fn leftover(p: &str, deps: &[&str]) -> Seen {
                 status: Status::Ready,
                 digest: node_digest(),
                 unmanaged: Vec::new(),
+                outputs: Vec::new(),
             },
             deletability: Deletability::Deletable,
         }),
@@ -658,23 +660,99 @@ fn consumer_is_updated_when_the_recorded_output_changed() {
 }
 
 #[test]
-fn consumer_of_an_output_not_yet_known_is_created_or_updated() {
+fn unresolved_ref_plans_known_after_apply() {
     let l = app_with_db_url(false);
     // Nothing recorded: the producer exists but its output was never recorded.
     let o = observed()
         .with(ours(node(&l, "db/run")))
         .with(ours_bound(node(&l, "app/run"), "db-url-1"));
-    assert_eq!(steps(&run(&l, &o))[1], ("app/run", &Action::Update));
-    // Nothing there at all: both are created.
+    assert_eq!(
+        steps(&run(&l, &o))[1],
+        ("app/run", &Action::KnownAfterApply)
+    );
+    // Nothing there at all: the producer is created and the consumer waits for its value.
     let p = run(&l, &observed());
     assert_eq!(
         steps(&p)[..2],
-        [("db/run", &Action::Create), ("app/run", &Action::Create)]
+        [
+            ("db/run", &Action::Create),
+            ("app/run", &Action::KnownAfterApply)
+        ]
     );
 }
 
 #[test]
-fn consumer_is_updated_while_its_producer_is_changing() {
+fn output_enum_hash_bytes_unchanged() {
+    // The hash of a plan that holds a reference was pinned when the output was a name; the
+    // enum hashes as the same name, so the pinned values still hold.
+    let l = app_with_db_url(false);
+    let hash = |live_url: &str| {
+        let o = observed()
+            .with_output("db", "URL", "db-url-1")
+            .with(ours(node(&l, "db/run")))
+            .with(ours_bound(node(&l, "app/run"), live_url));
+        run(&l, &o).hash().to_string()
+    };
+    assert_eq!(
+        hash("db-url-1"),
+        "233aed72e5d22c5526c9a8cf059ae5e69be9793d949ff26789bd7b45a6ded9df"
+    );
+    assert_eq!(
+        hash("db-url-0"),
+        "08a061f5e705168d7911fdd673dd66c71b03726e2d5917e2fff135372130c606"
+    );
+}
+
+#[test]
+fn known_after_apply_in_plan_hash() {
+    let l = app_with_db_url(false);
+    let hash = |recorded: Option<&str>, live_url: &str| {
+        let mut o = observed()
+            .with(ours(node(&l, "db/run")))
+            .with(ours_bound(node(&l, "app/run"), live_url));
+        if let Some(url) = recorded {
+            o = o.with_output("db", "URL", url);
+        }
+        run(&l, &o).hash().clone()
+    };
+    let later = hash(None, "db-url-1");
+    // The same graph and the same other steps, with the consumer a no-op, or an update.
+    assert_ne!(later, hash(Some("db-url-1"), "db-url-1"));
+    assert_ne!(later, hash(Some("db-url-1"), "db-url-0"));
+    // The action is part of the hash and nothing else changed between two such plans.
+    assert_eq!(later, hash(None, "db-url-0"));
+}
+
+#[test]
+fn known_after_apply_hash_tag_is_pinned() {
+    let l = app_with_db_url(false);
+    // The producer is a no-op in both plans; only the consumer's step differs.
+    let hash = |recorded: Option<&str>, live_url: &str| {
+        let mut o = observed()
+            .with(ours(node(&l, "db/run")))
+            .with(ours_bound(node(&l, "app/run"), live_url));
+        if let Some(url) = recorded {
+            o = o.with_output("db", "URL", url);
+        }
+        run(&l, &o)
+    };
+    let later = hash(None, "db-url-1");
+    assert_eq!(
+        steps(&later)[1],
+        ("app/run", &Action::KnownAfterApply),
+        "the plan holds a known-after-apply step"
+    );
+    assert_eq!(
+        later.hash().as_str(),
+        "2c03b5283a6c821c8f89bb887749ecf32fc4782a05948227a5b76926d0a4d556"
+    );
+    let update = hash(Some("db-url-1"), "db-url-0");
+    assert_eq!(steps(&update)[1], ("app/run", &Action::Update));
+    assert_ne!(later.hash(), update.hash());
+}
+
+#[test]
+fn consumer_of_a_producer_that_is_changing_is_known_after_apply() {
     let l = app_with_db_url(false);
     // The recorded output matches the object, but the producer is itself being updated, so
     // the value the consumer will see is not settled.
@@ -686,7 +764,10 @@ fn consumer_is_updated_while_its_producer_is_changing() {
         .with(ours_bound(node(&l, "app/run"), "db-url-1"));
     assert_eq!(
         steps(&run(&l, &o))[..2],
-        [("db/run", &Action::Update), ("app/run", &Action::Update)]
+        [
+            ("db/run", &Action::Update),
+            ("app/run", &Action::KnownAfterApply)
+        ]
     );
 }
 

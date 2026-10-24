@@ -222,3 +222,23 @@ pub fn recorded_paths(world: &World) -> Vec<String> {
         .map(|(path, _)| path.as_str().to_owned())
         .collect()
 }
+
+/// A service `id` that reads the URL of the resource `producer` into its env var `DB_URL`, and
+/// calls it.
+pub fn reading(id: &str, producer: &str) -> Resource {
+    let mut resource = service_of(id, false, &[producer]);
+    if let Some(Body::Service(service)) = &mut resource.body {
+        service.env.insert(
+            "DB_URL".to_owned(),
+            ucdk_proto::v1::Value {
+                v: Some(ucdk_proto::v1::value::V::Ref(Ref {
+                    resource: producer.to_owned(),
+                    output: Some(ucdk_proto::v1::r#ref::Output::Standard(
+                        ucdk_proto::v1::Output::Url as i32,
+                    )),
+                })),
+            },
+        );
+    }
+    resource
+}

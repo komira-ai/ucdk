@@ -6,8 +6,8 @@ mod common;
 use std::collections::BTreeSet;
 
 use common::{
-    approve_and_run, carry_out, cmd, job_of, mutations, objects, pair, plan, recorded_paths,
-    records, scratch, service_of, with_port, write_list, write_text,
+    approve_and_run, carry_out, cmd, job_of, mutations, objects, pair, plan, reading,
+    recorded_paths, records, scratch, service_of, with_port, write_list, write_text,
 };
 use ucdk_cli::World;
 use ucdk_provider::{Kind, Provider as _, ProviderError};
@@ -481,4 +481,52 @@ fn a_new_world_is_empty() {
     );
     assert!(recorded_paths(&world).is_empty());
     assert_eq!((world.out.as_str(), world.err.as_str()), ("", ""));
+}
+
+#[test]
+fn render_known_after_apply() {
+    let dir = scratch("render_known_after_apply");
+    let input = write_list(
+        &dir,
+        "list.pb",
+        vec![
+            reading("example-svc", "example-db"),
+            service_of("example-db", false, &[]),
+        ],
+    );
+    let saved = dir.join("saved.plan").to_string_lossy().into_owned();
+    let mut world = World::new();
+
+    let (ran, _) = plan(&mut world, "fake", "apply", &input, &saved);
+
+    assert_eq!(ran.code, 0, "{ran:?}");
+    let lines: Vec<&str> = ran.out.lines().skip(4).collect();
+    assert_eq!(
+        lines,
+        [
+            "  create  example-db/run [service]",
+            "  later   example-svc/run [service] (reads a value that is known only after apply)",
+            "2 to change",
+        ]
+    );
+}
+
+#[test]
+fn second_apply_of_a_list_with_a_ref_prints_no_changes() {
+    let dir = scratch("second_apply_of_a_list_with_a_ref");
+    let input = write_list(
+        &dir,
+        "list.pb",
+        vec![
+            reading("example-svc", "example-db"),
+            service_of("example-db", false, &[]),
+        ],
+    );
+    let mut world = World::new();
+    let first = approve_and_run(&mut world, "apply", "fake", &input, &dir);
+    assert_eq!(first.code, 0, "{first:?}");
+    let saved = dir.join("again.plan").to_string_lossy().into_owned();
+    let (ran, _) = plan(&mut world, "fake", "apply", &input, &saved);
+    assert!(ran.out.ends_with("no changes\n"), "{}", ran.out);
+    assert!(!ran.out.contains("later"), "{}", ran.out);
 }

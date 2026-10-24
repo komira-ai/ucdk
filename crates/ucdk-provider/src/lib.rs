@@ -31,8 +31,8 @@ pub use ids::{
 };
 pub use node::{DesiredField, FieldValue, Kind, Node};
 pub use observe::{
-    CellScope, Created, Deletability, Live, Observation, OwnedObject, OwnerScope, StateClass,
-    Status, Updated,
+    CellScope, Created, Deletability, Live, Observation, OwnedObject, OwnerScope, Produced,
+    StateClass, Status, Updated,
 };
 pub use provider::Provider;
 pub use stamp::{NAME_SUFFIX_MAX, SCHEME, Stamp, StampEvidence, StampMode};

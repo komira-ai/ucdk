@@ -22,7 +22,10 @@ mod hash;
 pub mod observed;
 mod plan;
 
-pub use catalog::{Finding, FindingKind, Lowered, PlanNode, ValueRef, lower, validate};
+pub use catalog::{
+    Finding, FindingKind, Lowered, PlanNode, ROLE_RUN, ValueRef, lower, validate,
+    validate_with_portability,
+};
 pub use hash::PlanHash;
 pub use observed::{LedgerToken, LiveState, Observed, Record, Seen};
 pub use plan::{Action, Conflict, ConflictKind, Plan, Refused, Retained, Step, plan};

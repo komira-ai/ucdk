@@ -41,6 +41,11 @@ pub enum Action {
     /// The object is there and still coming up: nothing is written and its record is not
     /// confirmed. A later run, when the object is ready, settles it.
     Converging,
+    /// The node reads an output of a resource this run creates or changes, so its value is
+    /// not known yet. It is resolved when the run reaches it, after the producer is confirmed:
+    /// the object is then created, updated or left as it is, as for any other node. It is never
+    /// a no-op, and a plan holding one is a different plan from one that does not.
+    KnownAfterApply,
     Retain(Retained),
 }
 
@@ -161,8 +166,8 @@ fn conflict_of(cell: &CellIdentity, seen: &Seen, wanted: bool) -> Option<Conflic
 
 /// What to do about a wanted node. `settled` says whether the resource that produced a
 /// referenced output is itself left alone by this run: only then is its recorded output
-/// the value the object will see. Otherwise the value is known after apply, and an object
-/// that is there is updated.
+/// the value the object will see. Otherwise (or when nothing is recorded for it) the value
+/// is known after apply, whether or not the object is there.
 fn forward(
     node: &PlanNode,
     seen: Option<&Seen>,
@@ -176,9 +181,9 @@ fn forward(
             .flatten()
     });
     let action = match (seen.and_then(|s| s.live.as_ref()), bound) {
+        (_, Err(_)) => Action::KnownAfterApply,
         (None, _) => Action::Create,
         (Some(state), _) if state.converging() => Action::Converging,
-        (Some(_), Err(_)) => Action::Update,
         (Some(state), Ok(bound)) if state.failed() || state.live.digest != bound.digest() => {
             Action::Update
         }
@@ -220,7 +225,9 @@ fn removal(seen: &Seen, owners: &BTreeSet<OwnerLabel>) -> Step {
 /// - A node the file wants with no object is created; one whose object differs from the node
 ///   in a modelled field, or is failed, is updated in place (a failed object is updated even
 ///   when its fields match); one whose object is still converging is left alone, with no
-///   write, until it is ready or failed; one that matches is a no-op.
+///   write, until it is ready or failed; one that matches is a no-op. A node that reads an
+///   output whose producer is created or changed by this run (or has none recorded) is
+///   planned as known after apply, and is carried out once the producer is confirmed.
 /// - A path the file does not want (a role turned off, a resource removed) with an object
 ///   that is ours is deleted, unless its kind holds data (kept), the provider says it cannot
 ///   be deleted, or the file no longer names its owner at all (retained, never deleted by a

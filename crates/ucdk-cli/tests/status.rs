@@ -4,7 +4,9 @@
 
 mod common;
 
-use common::{approve_and_run, cmd, mutations, pair, plan, records, scratch, write_list};
+use common::{
+    approve_and_run, cmd, mutations, pair, plan, reading, records, scratch, service_of, write_list,
+};
 use ucdk_cli::World;
 use ucdk_provider::{Kind, Status};
 use ucdk_provider_fake::{Fake, FakeConfig};
@@ -121,6 +123,38 @@ fn a_kind_with_no_stamp_of_its_own_exits_three() {
         ran.err
     );
     assert_eq!(world.fake.object_count(), 0);
+}
+
+#[test]
+fn a_consumer_of_a_still_failed_producer_is_reported_blocked() {
+    let dir = scratch("a_consumer_of_a_still_failed_producer_is_reported_blocked");
+    let input = write_list(
+        &dir,
+        "list.pb",
+        vec![
+            reading("example-svc", "example-db"),
+            service_of("example-db", false, &[]),
+        ],
+    );
+    let mut world = World::new();
+    *world.fake.faults_mut().create_failed = true;
+    let ran = approve_and_run(&mut world, "apply", "fake", &input, &dir);
+    assert_eq!(ran.code, 0, "{ran:?}");
+    assert_eq!(ran.err, "");
+    assert!(
+        ran.out.contains(
+            "  failed   example-db/run (still failed after the write; its record is not confirmed, run again to retry)\n"
+        ),
+        "{}",
+        ran.out
+    );
+    assert!(
+        ran.out
+            .contains("  blocked  example-svc/run (its producer example-db/run is still failed)\n"),
+        "{}",
+        ran.out
+    );
+    assert!(!ran.out.contains("waiting"), "{}", ran.out);
 }
 
 #[test]
