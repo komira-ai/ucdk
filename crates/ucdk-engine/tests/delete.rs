@@ -596,3 +596,53 @@ fn a_failed_read_back_after_a_create_keeps_an_intent_that_names_the_object() {
     assert_eq!(records(&ledger)[&path("db/run")].state, State::Confirmed);
     assert_eq!(fake.object_count(), 4);
 }
+
+#[test]
+fn an_object_that_reappears_before_the_reap_keeps_its_record() {
+    let (mut fake, ledger) = world();
+    done(apply(&mut fake, &ledger, &chain()));
+    let record = records(&ledger)[&path("web/public")].clone();
+    let id = physical_of(&ledger, "web/public");
+    ucdk_provider::Provider::delete(&mut fake, &Kind::new("public"), &id).expect("delete");
+    // The record names no object, so the object is found by its name.
+    let token = ledger.read().expect("read").token;
+    let nameless = ucdk_ledger::Record {
+        physical: None,
+        ..record.clone()
+    };
+    ledger.write(&token, Change::Put(nameless)).expect("write");
+    let wanted = chain_with(5432, false);
+    // Both plans find the object gone; another client makes it again just before the reap reads.
+    let at = 2 * wanted.nodes().len() + 1;
+    let again = ucdk_provider::Node::new(
+        path("web/public"),
+        record.kind.clone(),
+        record.name.clone(),
+        Vec::new(),
+    )
+    .expect("a node");
+    let mut hooked = Hooked::new(&mut fake, at, move |fake| {
+        let stamp = ucdk_provider::Stamp::for_node(&path("web/public"));
+        ucdk_provider::Provider::create(fake, &again, &stamp).expect("create");
+    });
+    let f = failure(apply(&mut hooked, &ledger, &wanted));
+    drop(hooked);
+    assert_eq!(f.error, EngineError::StillPresent(path("web/public")));
+    assert!(records(&ledger).contains_key(&path("web/public")));
+}
+
+#[test]
+fn an_intent_that_never_reached_a_create_is_reaped_when_no_object_is_read() {
+    let (mut fake, ledger) = world();
+    let intent = ucdk_ledger::Record::intent(
+        path("web/public"),
+        Kind::new("public"),
+        "web-public",
+        Default::default(),
+    );
+    let token = ledger.read().expect("read").token;
+    ledger.write(&token, Change::Put(intent)).expect("write");
+    let report = done(apply(&mut fake, &ledger, &chain_with(5432, false)));
+    assert_eq!(report.reaped, paths(&["web/public"]));
+    assert!(!records(&ledger).contains_key(&path("web/public")));
+}
