@@ -19,6 +19,16 @@ impl PlanHash {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Reads a hash from its text: 64 lower-case hex digits, as [`PlanHash::as_str`] writes
+    /// it. This is how an approver's pinned hash comes back from a flag or a file.
+    pub fn from_hex(text: &str) -> Option<Self> {
+        let well_formed = text.len() == 64
+            && text
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        well_formed.then(|| Self(text.to_owned()))
+    }
 }
 
 impl fmt::Display for PlanHash {
