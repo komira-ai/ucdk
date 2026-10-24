@@ -554,6 +554,16 @@ name = "ucdk-cli"
 version = "0.0.0"
 
 [[package]]
+name = "ucdk-plan"
+version = "0.0.0"
+dependencies = [
+ "prost-types",
+ "sha2",
+ "ucdk-proto",
+ "ucdk-provider",
+]
+
+[[package]]
 name = "ucdk-proto"
 version = "0.0.0"
 dependencies = [
