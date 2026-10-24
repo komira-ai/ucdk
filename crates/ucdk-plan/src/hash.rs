@@ -54,8 +54,8 @@ fn feed_action(hash: &mut Sha256, action: &Action) {
 /// The hash covers, in order: a domain prefix; the provider-version slot (a tag, then the
 /// version when there is one; reserved so that a provider upgrade can invalidate an approved
 /// plan without changing the encoding); every node of the desired graph (path, kind, name,
-/// wanted, field digest, dependencies); and the ordered steps (path, kind, action, and for a
-/// delete the physical id).
+/// wanted, value references, field digest, dependencies); and the ordered steps (path, kind,
+/// action, and for a delete the physical id).
 ///
 /// It does not cover the ledger token, nor the digest of what is live now: a step already
 /// says what it will do about the difference.
@@ -75,6 +75,12 @@ pub fn compute(desired: &Lowered, steps: &[Step], provider_version: Option<&str>
         feed(&mut hash, n.node.kind().as_str().as_bytes());
         feed(&mut hash, n.node.name().as_bytes());
         hash.update([u8::from(n.wanted)]);
+        hash.update((n.refs.len() as u64).to_be_bytes());
+        for r in &n.refs {
+            feed(&mut hash, r.field.as_bytes());
+            feed(&mut hash, r.resource.as_bytes());
+            feed(&mut hash, r.output.as_bytes());
+        }
         feed(&mut hash, n.node.digest().as_str().as_bytes());
         hash.update((n.deps.len() as u64).to_be_bytes());
         for dep in &n.deps {

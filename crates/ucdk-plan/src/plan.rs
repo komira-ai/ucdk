@@ -9,7 +9,7 @@ use ucdk_provider::{
     Deletability, Kind, Live, NodePath, OwnerLabel, PhysicalId, Stamp, StampEvidence, StateClass,
 };
 
-use crate::catalog::{Lowered, PlanNode};
+use crate::catalog::{Lowered, PlanNode, ROLE_RUN};
 use crate::graph;
 use crate::hash::{self, PlanHash};
 use crate::observed::{Observed, Record, Seen};
@@ -150,11 +150,29 @@ fn conflict_of(seen: &Seen, wanted: bool) -> Option<ConflictKind> {
     }
 }
 
-fn forward(node: &PlanNode, seen: Option<&Seen>) -> Step {
-    let action = match seen.and_then(|s| s.live.as_ref()) {
-        None => Action::Create,
-        Some(state) if state.failed || state.live.digest != node.node.digest() => Action::Update,
-        Some(_) => Action::Noop,
+/// What to do about a wanted node. `settled` says whether the resource that produced a
+/// referenced output is itself left alone by this run: only then is its recorded output
+/// the value the object will see. Otherwise the value is known after apply, and an object
+/// that is there is updated.
+fn forward(
+    node: &PlanNode,
+    seen: Option<&Seen>,
+    observed: &Observed,
+    settled: &BTreeSet<String>,
+) -> Step {
+    let bound = node.bound(|resource, output| {
+        settled
+            .contains(resource)
+            .then(|| observed.output(resource, output))
+            .flatten()
+    });
+    let action = match (seen.and_then(|s| s.live.as_ref()), bound) {
+        (None, _) => Action::Create,
+        (Some(_), Err(_)) => Action::Update,
+        (Some(state), Ok(bound)) if state.failed || state.live.digest != bound.digest() => {
+            Action::Update
+        }
+        (Some(_), Ok(_)) => Action::Noop,
     };
     Step {
         path: node.node.path().clone(),
@@ -234,12 +252,18 @@ pub fn plan(
         return Err(Refused { conflicts });
     }
 
-    let mut steps: Vec<Step> = desired
-        .nodes()
-        .iter()
-        .filter(|n| n.wanted)
-        .map(|n| forward(n, observed.entries().get(n.node.path())))
-        .collect();
+    // Nodes come in dependency order, so a producer's step is known before its consumers'. A
+    // resource is settled when its `run` node is a no-op; its recorded outputs are then current.
+    let mut steps: Vec<Step> = Vec::new();
+    let mut settled: BTreeSet<String> = BTreeSet::new();
+    for n in desired.nodes().iter().filter(|n| n.wanted) {
+        let step = forward(n, observed.entries().get(n.node.path()), observed, &settled);
+        if n.node.path().as_str().ends_with(&format!("/{ROLE_RUN}")) && step.action == Action::Noop
+        {
+            settled.insert(n.node.path().owner().as_str().to_owned());
+        }
+        steps.push(step);
+    }
 
     // Removals: whatever was looked at that the file does not want and that is there or
     // recorded. They are ordered by the edges the ledger recorded, dependents first.

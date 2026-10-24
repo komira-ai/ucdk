@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The plan: what it does with an observed state, what it refuses, and its hash.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ucdk_plan::{
     Action, Conflict, ConflictKind, LedgerToken, LiveState, Lowered, Observed, Plan, PlanNode,
     Record, Refused, Retained, Seen, Step, lower, plan,
 };
+use ucdk_proto::v1::r#ref::Output as Arm;
 use ucdk_proto::v1::resource::Body;
-use ucdk_proto::v1::{Access, Image, Ref, Resource, ResourceList, Service, Uses, image};
+use ucdk_proto::v1::{
+    Access, Image, Output, Ref, Resource, ResourceList, Service, Uses, Value, image, service, value,
+};
 use ucdk_provider::{
     Deletability, Kind, Live, NodePath, PhysicalId, Stamp, StampEvidence, StateClass,
 };
@@ -142,6 +145,34 @@ fn refused(l: &Lowered, o: &Observed) -> Vec<(String, ConflictKind)> {
         .into_iter()
         .map(|c| (c.path.to_string(), c.why))
         .collect()
+}
+
+/// `app` takes `db`'s URL as its `DB` setting: a reference, or the literal `ref:db.URL`.
+fn app_with_db_url(literal: bool) -> Lowered {
+    let mut app = service("app", 80);
+    let v = if literal {
+        value::V::Literal("ref:db.URL".to_owned())
+    } else {
+        value::V::Ref(Ref {
+            resource: "db".to_owned(),
+            output: Some(Arm::Standard(Output::Url as i32)),
+        })
+    };
+    if let Some(Body::Service(s)) = app.body.as_mut() {
+        s.env = BTreeMap::from([("DB".to_owned(), Value { v: Some(v) })]);
+    }
+    lower(&ResourceList {
+        resource: vec![app, service("db", 5432)],
+    })
+    .expect("the list lowers")
+}
+
+/// `n` as it stands live when its referenced values are `url`.
+fn ours_bound(n: &PlanNode, url: &str) -> Seen {
+    let mut seen = ours(n);
+    let bound = n.bound(|_, _| Some(url)).expect("the output is given");
+    live_mut(&mut seen).live.digest = bound.digest();
+    seen
 }
 
 // ---- Plan: what it does ----------------------------------------------------------------------
@@ -585,4 +616,116 @@ fn a_step_names_its_path_and_kind() {
     let first: &Step = &p.steps()[0];
     assert_eq!(first.path, path("db/run"));
     assert_eq!(first.kind, Kind::service());
+}
+
+// ---- Plan: references to another resource's output -------------------------------------------
+
+#[test]
+fn converged_consumer_of_a_reference_is_a_noop() {
+    let l = app_with_db_url(false);
+    let o = observed()
+        .with_output("db", "URL", "db-url-1")
+        .with(ours(node(&l, "db/run")))
+        .with(ours_bound(node(&l, "app/run"), "db-url-1"));
+    let p = run(&l, &o);
+    assert!(
+        p.steps().iter().all(|s| s.action == Action::Noop),
+        "{:?}",
+        steps(&p)
+    );
+}
+
+#[test]
+fn consumer_is_updated_when_the_recorded_output_changed() {
+    let l = app_with_db_url(false);
+    let o = observed()
+        .with_output("db", "URL", "db-url-1")
+        .with(ours(node(&l, "db/run")))
+        .with(ours_bound(node(&l, "app/run"), "db-url-0"));
+    let p = run(&l, &o);
+    assert_eq!(
+        steps(&p)[..2],
+        [("db/run", &Action::Noop), ("app/run", &Action::Update)]
+    );
+}
+
+#[test]
+fn consumer_of_an_output_not_yet_known_is_created_or_updated() {
+    let l = app_with_db_url(false);
+    // Nothing recorded: the producer exists but its output was never recorded.
+    let o = observed()
+        .with(ours(node(&l, "db/run")))
+        .with(ours_bound(node(&l, "app/run"), "db-url-1"));
+    assert_eq!(steps(&run(&l, &o))[1], ("app/run", &Action::Update));
+    // Nothing there at all: both are created.
+    let p = run(&l, &observed());
+    assert_eq!(
+        steps(&p)[..2],
+        [("db/run", &Action::Create), ("app/run", &Action::Create)]
+    );
+}
+
+#[test]
+fn consumer_is_updated_while_its_producer_is_changing() {
+    let l = app_with_db_url(false);
+    // The recorded output matches the object, but the producer is itself being updated, so
+    // the value the consumer will see is not settled.
+    let mut db = ours(node(&l, "db/run"));
+    live_mut(&mut db).failed = true;
+    let o = observed()
+        .with_output("db", "URL", "db-url-1")
+        .with(db)
+        .with(ours_bound(node(&l, "app/run"), "db-url-1"));
+    assert_eq!(
+        steps(&run(&l, &o))[..2],
+        [("db/run", &Action::Update), ("app/run", &Action::Update)]
+    );
+}
+
+#[test]
+fn literal_that_reads_like_a_reference_is_not_resolved_by_a_plan() {
+    let l = app_with_db_url(true);
+    let o = observed()
+        .with_output("db", "URL", "db-url-1")
+        .with(ours(node(&l, "db/run")))
+        .with(ours(node(&l, "app/run")));
+    // The literal is the object's value as it stands: nothing to do.
+    let p = run(&l, &o);
+    assert!(
+        steps(&p).contains(&("app/run", &Action::Noop)),
+        "{:?}",
+        steps(&p)
+    );
+}
+
+#[test]
+fn plan_hash_tells_a_reference_from_a_literal_of_the_same_text() {
+    let o = observed();
+    assert_ne!(
+        run(&app_with_db_url(true), &o).hash(),
+        run(&app_with_db_url(false), &o).hash()
+    );
+}
+
+#[test]
+fn a_wanted_public_role_that_matches_is_a_noop() {
+    let mut db = service("db", 5432);
+    if let Some(Body::Service(s)) = db.body.as_mut() {
+        s.exposure = Some(service::Exposure::Public(service::Public {}));
+    }
+    let l = lower(&ResourceList {
+        resource: vec![db, service("db2", 1)],
+    })
+    .expect("the list lowers");
+    let o = observed()
+        .with(ours(node(&l, "db/run")))
+        .with(ours(node(&l, "db/public")))
+        .with(ours(node(&l, "db2/run")));
+    let p = run(&l, &o);
+    assert!(
+        p.steps().iter().all(|s| s.action == Action::Noop),
+        "{:?}",
+        steps(&p)
+    );
+    assert!(steps(&p).iter().any(|(path, _)| *path == "db/public"));
 }

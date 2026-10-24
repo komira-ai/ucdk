@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use prost_types::Duration;
 use ucdk_plan::catalog::{ROLE_PUBLIC, ROLE_RUN, ROLE_SCHEDULE};
-use ucdk_plan::{Finding, FindingKind, Lowered, lower, validate};
+use ucdk_plan::{Finding, FindingKind, Lowered, ValueRef, lower, validate};
 use ucdk_proto::v1::r#ref::Output as Arm;
 use ucdk_proto::v1::resource::Body;
 use ucdk_proto::v1::{
@@ -318,8 +318,6 @@ fn lowering_carries_what_the_author_wrote() {
         [
             text("arg.0", "--a"),
             text("arg.1", "--b"),
-            text("env.DB", "ref:db.URL"),
-            text("env.DB_HOST", "ref:db.HOST"),
             text("env.LEVEL", "debug"),
             text("health_path", "/healthz"),
             text("image", "sha256:aa@linux/amd64"),
@@ -332,6 +330,67 @@ fn lowering_carries_what_the_author_wrote() {
             text("size", "250m/128MB"),
         ]
     );
+}
+
+#[test]
+fn value_reference_lowers_to_a_ref_and_not_to_a_field() {
+    let l = lowered(vec![
+        service_env("web", "DB", output_of("db", Output::Url)),
+        service_of("db"),
+    ]);
+    let web = l
+        .nodes()
+        .iter()
+        .find(|n| n.node.path().as_str() == "web/run")
+        .expect("the node is there");
+    assert_eq!(
+        web.refs,
+        [ValueRef {
+            field: "env.DB".to_owned(),
+            resource: "db".to_owned(),
+            output: "URL",
+        }]
+    );
+    assert!(web.node.fields().iter().all(|f| f.name != "env.DB"));
+}
+
+#[test]
+fn literal_that_reads_like_a_reference_is_only_a_literal() {
+    let l = lowered(vec![
+        service_env("web", "DB", literal("ref:db.URL")),
+        service_of("db"),
+    ]);
+    let web = l
+        .nodes()
+        .iter()
+        .find(|n| n.node.path().as_str() == "web/run")
+        .expect("the node is there");
+    assert!(web.refs.is_empty());
+    assert_eq!(fields(&l, "web/run")[0], text("env.DB", "ref:db.URL"));
+}
+
+#[test]
+fn bound_node_has_the_referenced_value_as_a_field() {
+    let l = lowered(vec![
+        service_env("web", "DB", output_of("db", Output::Url)),
+        service_of("db"),
+    ]);
+    let web = l
+        .nodes()
+        .iter()
+        .find(|n| n.node.path().as_str() == "web/run")
+        .expect("the node is there");
+    let known = web
+        .bound(|r, o| (r == "db" && o == "URL").then_some("db-url-1"))
+        .expect("every output is known");
+    assert!(
+        known
+            .fields()
+            .iter()
+            .any(|f| f.name == "env.DB" && f.value == FieldValue::Text("db-url-1".to_owned()))
+    );
+    let pending = web.bound(|_, _| None).expect_err("no output is known");
+    assert_eq!(pending, [&web.refs[0]]);
 }
 
 #[test]

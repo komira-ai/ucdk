@@ -15,9 +15,10 @@
 //! `wanted = false`: planning deletes an object left by it, so a role cannot be turned off
 //! and forgotten (closed-world removal). The `public` and `schedule` nodes depend on their
 //! resource's `run`; a `run` depends on the `run` of each resource it references (a `Uses`
-//! target or a value reference). A value reference lowers to the field text
-//! `ref:<resource>.<OUTPUT>`, a stand-in for a value that exists only after the target is
-//! applied.
+//! target or a value reference). A value reference is not a field of the node: it lowers to a
+//! [`ValueRef`] on the node (the field name, the producing resource, the output), because the
+//! value exists only once the target is applied. [`PlanNode::bound`] gives the node with the
+//! values filled in.
 
 mod finding;
 mod lower;
@@ -25,7 +26,7 @@ mod read;
 mod render;
 
 pub use finding::{Finding, FindingKind};
-pub use lower::{Lowered, PlanNode, ROLE_RUN};
+pub use lower::{Lowered, PlanNode, ROLE_RUN, ValueRef};
 pub use render::{ROLE_PUBLIC, ROLE_SCHEDULE};
 
 use ucdk_proto::v1::ResourceList;

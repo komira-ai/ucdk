@@ -12,6 +12,7 @@ use ucdk_proto::v1::{
 use ucdk_provider::{DesiredField, FieldValue, Kind, OwnerLabel};
 
 use super::finding::{Finding, FindingKind};
+use super::lower::ValueRef;
 use super::render;
 use crate::graph;
 
@@ -23,6 +24,8 @@ pub struct Spec {
     pub id: String,
     pub kind: Kind,
     pub run_fields: Vec<DesiredField>,
+    /// The fields of the run node whose value is another resource's output.
+    pub run_refs: Vec<ValueRef>,
     /// The resources whose run node this one's run node needs.
     pub run_deps: BTreeSet<String>,
     pub extra: Extra,
@@ -110,6 +113,16 @@ struct Reader<'a> {
     exposes: &'a BTreeMap<&'a str, &'static [Output]>,
     findings: Vec<Finding>,
     deps: BTreeSet<String>,
+    refs: Vec<ValueRef>,
+}
+
+/// A value as written: text now, or another resource's output later.
+enum Read {
+    Text(String),
+    Ref {
+        resource: String,
+        output: &'static str,
+    },
 }
 
 impl Reader<'_> {
@@ -132,8 +145,8 @@ impl Reader<'_> {
         found
     }
 
-    /// A value reference: the text that stands for the produced value until apply time.
-    fn value_ref(&mut self, field: &str, target: &Ref) -> Option<String> {
+    /// A value reference: the output it names, known once the target is applied.
+    fn value_ref(&mut self, field: &str, target: &Ref) -> Option<Read> {
         let exposed = self.bind(field, target)?;
         let standard = match &target.output {
             Some(Arm::Standard(number)) => Output::try_from(*number).ok(),
@@ -145,7 +158,10 @@ impl Reader<'_> {
         };
         match standard {
             Some(output @ (Output::Url | Output::Host)) if exposed.contains(&output) => {
-                Some(format!("ref:{}.{}", target.resource, output.as_str_name()))
+                Some(Read::Ref {
+                    resource: target.resource.clone(),
+                    output: output.as_str_name(),
+                })
             }
             Some(output @ (Output::Url | Output::Host)) => {
                 let kind = FindingKind::UnexposedOutput {
@@ -162,9 +178,9 @@ impl Reader<'_> {
         }
     }
 
-    fn value(&mut self, field: &str, wire: &Value) -> Option<String> {
+    fn value(&mut self, field: &str, wire: &Value) -> Option<Read> {
         match &wire.v {
-            Some(value::V::Literal(text)) => Some(text.clone()),
+            Some(value::V::Literal(text)) => Some(Read::Text(text.clone())),
             Some(value::V::Ref(target)) => self.value_ref(field, target),
             Some(value::V::Param(_)) => {
                 self.report(field, FindingKind::Unresolved { what: "parameter" });
@@ -240,9 +256,17 @@ impl Reader<'_> {
             }),
         );
         for (key, wire) in body.env() {
-            let text = self.value(&format!("{name}.env.{key}"), wire);
-            fields
-                .extend(text.map(|t| DesiredField::new(format!("env.{key}"), FieldValue::Text(t))));
+            match self.value(&format!("{name}.env.{key}"), wire) {
+                Some(Read::Text(t)) => {
+                    fields.push(DesiredField::new(format!("env.{key}"), FieldValue::Text(t)));
+                }
+                Some(Read::Ref { resource, output }) => self.refs.push(ValueRef {
+                    field: format!("env.{key}"),
+                    resource,
+                    output,
+                }),
+                None => {}
+            }
             if body.secret_env().contains_key(key) {
                 self.report(&format!("{name}.env.{key}"), FindingKind::EnvSecretOverlap);
             }
@@ -294,6 +318,7 @@ pub fn read(list: &ResourceList) -> Result<Vec<Spec>, Vec<Finding>> {
             exposes: &exposes,
             findings: Vec::new(),
             deps: BTreeSet::new(),
+            refs: Vec::new(),
         };
         let mut run_fields = reader.common(body);
         for (index, uses) in resource.uses.iter().enumerate() {
@@ -309,6 +334,7 @@ pub fn read(list: &ResourceList) -> Result<Vec<Spec>, Vec<Finding>> {
             id: resource.id.clone(),
             kind: Kind::new(body.name()),
             run_fields,
+            run_refs: reader.refs,
             run_deps: reader.deps,
             extra,
         });

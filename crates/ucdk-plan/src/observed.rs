@@ -65,6 +65,7 @@ pub struct Seen {
 pub struct Observed {
     token: LedgerToken,
     entries: BTreeMap<NodePath, Seen>,
+    outputs: BTreeMap<(String, String), String>,
 }
 
 impl Observed {
@@ -72,7 +73,23 @@ impl Observed {
         Self {
             token,
             entries: BTreeMap::new(),
+            outputs: BTreeMap::new(),
         }
+    }
+
+    /// Records the value an applied resource produced for `output` (`URL`, `HOST`), as the
+    /// ledger holds it. A node that references it is compared with the value filled in; a
+    /// reference with no recorded value is not yet known.
+    #[must_use]
+    pub fn with_output(
+        mut self,
+        resource: impl Into<String>,
+        output: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.outputs
+            .insert((resource.into(), output.into()), value.into());
+        self
     }
 
     /// Adds what is known about a path, replacing an earlier entry for the same path.
@@ -84,6 +101,12 @@ impl Observed {
 
     pub fn token(&self) -> &LedgerToken {
         &self.token
+    }
+
+    pub(crate) fn output(&self, resource: &str, output: &str) -> Option<&str> {
+        self.outputs
+            .get(&(resource.to_owned(), output.to_owned()))
+            .map(String::as_str)
     }
 
     pub(crate) fn entries(&self) -> &BTreeMap<NodePath, Seen> {
