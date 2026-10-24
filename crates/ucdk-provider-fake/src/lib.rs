@@ -9,7 +9,7 @@
 //! the physical name for a kind that cannot hold tags.
 //!
 //! Faults are constructor data ([`Faults`]): `fail_at_call`, `read_lag`, `foreign`,
-//! `race_next` and `ambiguous_success`. A limited variant ([`FakeConfig::limited`]) refuses
+//! `race_next`, `ambiguous_success`, `ambiguous_at_call` and `fail_reads`. A limited variant ([`FakeConfig::limited`]) refuses
 //! the kind `job`. Limits and names here are this package's own, never a real cloud's.
 //!
 //! [`Provider`]: ucdk_provider::Provider

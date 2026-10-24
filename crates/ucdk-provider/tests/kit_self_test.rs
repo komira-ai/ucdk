@@ -47,6 +47,19 @@ struct Flaws {
     stamp_of_another_node: bool,
     /// The unsupported kind is hosted after all.
     hosts_unsupported: bool,
+    /// A list returns every stamped object whatever its owner.
+    list_ignores_owner: bool,
+    /// A delete removes every object of the kind.
+    delete_removes_kind: bool,
+    /// The stamp mode and the state class change once an object exists.
+    declarations_drift: bool,
+    /// A fresh object is not deletable.
+    fresh_undeletable: bool,
+    /// Observe reports a name with the stamp encoded in it.
+    encoded_name: bool,
+    /// Not a defect: a create over a foreign object of the same name lands beside it (the
+    /// stamp is part of the physical name) instead of being refused.
+    beside_foreign: bool,
     /// The `k`th call (of any kind, counted from 1) fails with a transient error.
     fail_at: Option<u64>,
 }
@@ -104,7 +117,11 @@ impl Stub {
         };
         Live {
             physical: o.id.clone(),
-            name: o.name.clone(),
+            name: if self.flaws.encoded_name {
+                format!("{}~enc", o.name)
+            } else {
+                o.name.clone()
+            },
             stamp,
             digest: digest_of(&o.kind, &o.fields),
             unmanaged: Vec::new(),
@@ -114,15 +131,29 @@ impl Stub {
 
 impl Provider for Stub {
     fn state_class(&self, _: &Kind) -> StateClass {
-        StateClass::Stateless
+        if self.flaws.declarations_drift && !self.objects.is_empty() {
+            StateClass::Stateful
+        } else {
+            StateClass::Stateless
+        }
     }
 
     fn deletability(&self, _: &Kind, _: &Live) -> Deletability {
-        Deletability::Deletable
+        if self.flaws.fresh_undeletable {
+            Deletability::Undeletable {
+                reason: "protected".to_owned(),
+            }
+        } else {
+            Deletability::Deletable
+        }
     }
 
     fn stamp_mode(&self, _: &Kind) -> StampMode {
-        StampMode::Tag
+        if self.flaws.declarations_drift && !self.objects.is_empty() {
+            StampMode::NameEncoded
+        } else {
+            StampMode::Tag
+        }
     }
 
     fn observe(
@@ -156,10 +187,10 @@ impl Provider for Stub {
         if node.kind() == &Kind::job() && !self.flaws.hosts_unsupported {
             return Err(ProviderError::Refused(Refusal::Unsupported));
         }
-        let exists = self
-            .objects
-            .iter()
-            .position(|o| &o.kind == node.kind() && o.name == node.name());
+        let beside = self.flaws.beside_foreign;
+        let exists = self.objects.iter().position(|o| {
+            &o.kind == node.kind() && o.name == node.name() && !(beside && o.foreign)
+        });
         let digest = if self.flaws.wrong_digest {
             digest_of(&Kind::new("other"), node.fields())
         } else {
@@ -216,10 +247,14 @@ impl Provider for Stub {
         })
     }
 
-    fn delete(&mut self, _: &Kind, physical: &PhysicalId) -> Result<(), ProviderError> {
+    fn delete(&mut self, kind: &Kind, physical: &PhysicalId) -> Result<(), ProviderError> {
         self.tick()?;
         let before = self.objects.len();
-        self.objects.retain(|o| &o.id != physical);
+        if self.flaws.delete_removes_kind {
+            self.objects.retain(|o| &o.kind != kind);
+        } else {
+            self.objects.retain(|o| &o.id != physical);
+        }
         if before == self.objects.len() && self.flaws.delete_absent_errors {
             return Err(ProviderError::Permanent("no such object".to_owned()));
         }
@@ -240,7 +275,9 @@ impl Provider for Stub {
             .filter_map(|o| {
                 let stamp = match (&o.stamp, o.foreign && self.flaws.list_includes_foreign) {
                     (_, true) => Some(foreign_stamp.clone()),
-                    (s, false) => s.clone().filter(|s| s.owner == scope.owner),
+                    (s, false) => s
+                        .clone()
+                        .filter(|s| self.flaws.list_ignores_owner || s.owner == scope.owner),
                 };
                 Some(OwnedObject {
                     kind: o.kind.clone(),
@@ -290,10 +327,11 @@ impl Harness for StubHarness {
         vec![Kind::job()]
     }
 
-    fn add_foreign(&self, p: &mut Stub, kind: &Kind, name: &str) {
+    fn add_foreign(&self, p: &mut Stub, kind: &Kind, name: &str) -> PhysicalId {
         p.next += 1;
+        let id = PhysicalId::new(format!("stub-{}", p.next));
         p.objects.push(Obj {
-            id: PhysicalId::new(format!("stub-{}", p.next)),
+            id: id.clone(),
             kind: kind.clone(),
             name: name.to_owned(),
             fields: Vec::new(),
@@ -301,6 +339,7 @@ impl Harness for StubHarness {
             born: None,
             foreign: true,
         });
+        id
     }
 
     fn rename(&self, p: &mut Stub, physical: &PhysicalId, new_name: &str) {
@@ -327,7 +366,7 @@ impl Harness for StubHarness {
 
 type Scenario = fn(&StubHarness) -> Result<(), Failure>;
 
-const SCENARIOS: [(&str, Scenario); 9] = [
+const SCENARIOS: [(&str, Scenario); 12] = [
     (
         "create_stamps_in_create_call",
         kit::create_stamps_in_create_call,
@@ -355,6 +394,15 @@ const SCENARIOS: [(&str, Scenario); 9] = [
     ("read_is_live_not_cached", kit::read_is_live_not_cached),
     ("rename_invariance", kit::rename_invariance),
     (
+        "delete_removes_only_the_named_object",
+        kit::delete_removes_only_the_named_object,
+    ),
+    (
+        "list_owned_filters_by_owner",
+        kit::list_owned_filters_by_owner,
+    ),
+    ("declarations_hold", kit::declarations_hold),
+    (
         "declared_unsupported_kinds_refuse",
         kit::declared_unsupported_kinds_refuse,
     ),
@@ -369,11 +417,17 @@ fn flagged(flaws: Flaws) -> Vec<&'static str> {
 
 #[test]
 fn kit_self_test_flags_nonconforming_stub() {
-    // The stub without a defect conforms.
+    // The stub without a defect conforms, and so does one whose creates land beside a
+    // foreign object of the same name.
     assert_eq!(flagged(Flaws::default()), Vec::<&str>::new());
+    let beside = Flaws {
+        beside_foreign: true,
+        ..Flaws::default()
+    };
+    assert_eq!(flagged(beside), Vec::<&str>::new());
 
     // Each defect is flagged by the scenario that guards that behaviour.
-    let defects: [(&str, Flaws, &str); 15] = [
+    let defects: [(&str, Flaws, &str); 20] = [
         (
             "stamped as another node",
             Flaws {
@@ -485,6 +539,46 @@ fn kit_self_test_flags_nonconforming_stub() {
                 ..Flaws::default()
             },
             "foreign_same_name_untouched",
+        ),
+        (
+            "list ignores owner",
+            Flaws {
+                list_ignores_owner: true,
+                ..Flaws::default()
+            },
+            "list_owned_filters_by_owner",
+        ),
+        (
+            "delete removes the kind",
+            Flaws {
+                delete_removes_kind: true,
+                ..Flaws::default()
+            },
+            "delete_removes_only_the_named_object",
+        ),
+        (
+            "declarations drift",
+            Flaws {
+                declarations_drift: true,
+                ..Flaws::default()
+            },
+            "declarations_hold",
+        ),
+        (
+            "fresh object undeletable",
+            Flaws {
+                fresh_undeletable: true,
+                ..Flaws::default()
+            },
+            "declarations_hold",
+        ),
+        (
+            "encoded name",
+            Flaws {
+                encoded_name: true,
+                ..Flaws::default()
+            },
+            "declarations_hold",
         ),
         (
             "hosts unsupported",

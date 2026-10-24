@@ -13,7 +13,7 @@ use std::fmt;
 use crate::error::{ProviderError, Refusal};
 use crate::ids::{NodePath, PhysicalId};
 use crate::node::{DesiredField, FieldValue, Kind, Node};
-use crate::observe::{Live, Observation, OwnerScope};
+use crate::observe::{Deletability, Live, Observation, OwnerScope};
 use crate::provider::Provider;
 use crate::stamp::{Stamp, StampEvidence};
 
@@ -31,8 +31,10 @@ pub trait Harness {
     fn unsupported(&self) -> Vec<Kind>;
 
     /// Puts an object of `kind` and `name` in the cloud that this cell did not create and
-    /// that carries no stamp of ours.
-    fn add_foreign(&self, provider: &mut Self::Provider, kind: &Kind, name: &str);
+    /// that carries no stamp of ours, and returns its physical id. `name` is the name the
+    /// object has in the cloud as it is: a provider that encodes stamps into physical names
+    /// gives the foreign object exactly this name, not an encoded one.
+    fn add_foreign(&self, provider: &mut Self::Provider, kind: &Kind, name: &str) -> PhysicalId;
 
     /// Renames a live object out of band: its human name changes, and whatever stamp it
     /// carries stays.
@@ -136,14 +138,19 @@ impl Run {
     }
 }
 
-/// The node the scenarios use for the `i`th kind: one owner, a distinct name, two fields.
+/// The node the scenarios use for the `i`th kind: owner `kit`, a distinct name, two fields.
 fn sample(kind: &Kind, i: usize, port: i64) -> Node {
-    let path = NodePath::new(&format!("kit/n{i}")).expect("the literal path is valid");
+    sample_of("kit", kind, i, port)
+}
+
+/// As [`sample`], for the owner named `owner`.
+fn sample_of(owner: &str, kind: &Kind, i: usize, port: i64) -> Node {
+    let path = NodePath::new(&format!("{owner}/n{i}")).expect("the literal path is valid");
     let fields = vec![
         DesiredField::new("port", FieldValue::Int(port)),
         DesiredField::new("label", FieldValue::Text("a".to_owned())),
     ];
-    Node::new(path, kind.clone(), format!("kit-n{i}"), fields).expect("field names differ")
+    Node::new(path, kind.clone(), format!("{owner}-n{i}"), fields).expect("field names differ")
 }
 
 fn is_ours(evidence: &StampEvidence, want: &Stamp) -> bool {
@@ -284,26 +291,46 @@ pub fn update_changes_digest_and_keeps_stamp<H: Harness>(h: &H) -> Result<(), Fa
 }
 
 /// An object this cell did not create, with the node's kind and name, is never overwritten,
-/// never reads as ours and is never listed as owned.
+/// never reads as ours and is never listed as owned. A create over it is either refused as
+/// `AlreadyExists` (the cloud keeps one name per kind) or lands beside it as a different
+/// object (the stamp is part of the physical name); it never changes the foreign object.
 pub fn foreign_same_name_untouched<H: Harness>(h: &H) -> Result<(), Failure> {
     each_kind(h, "foreign_same_name_untouched", |h, kind, i, run| {
         let mut p = h.fresh();
         let node = sample(kind, i, 1);
         let want = Stamp::for_node(node.path());
-        h.add_foreign(&mut p, kind, node.name());
-        let Some(before) = run.live("observe", p.observe(&node, None)) else {
+        let foreign = h.add_foreign(&mut p, kind, node.name());
+        // By name the foreign object is found (and is not ours) or, for a provider that
+        // looks names up with the stamp in them, not found.
+        if let Some(Observation::Present(by_name)) =
+            run.call("observe by name", p.observe(&node, None))
+        {
+            run.check(
+                !is_ours(&by_name.stamp, &want),
+                "a foreign object reads as ours",
+            );
+        }
+        let Some(before) = run.live("observe by id", p.observe(&node, Some(&foreign))) else {
             return;
         };
         run.check(
             !is_ours(&before.stamp, &want),
             "a foreign object reads as ours",
         );
-        run.refused(
-            "create over it",
-            p.create(&node, &want),
-            Refusal::AlreadyExists,
-        );
-        let Some(after) = run.live("observe after create", p.observe(&node, None)) else {
+        match p.create(&node, &want) {
+            Ok(created) => run.check(
+                created.physical != foreign,
+                "create over a foreign object returned the foreign object",
+            ),
+            Err(e) => run.check(
+                e.refusal() == Some(Refusal::AlreadyExists),
+                &format!("create over it failed with `{e}`; it must succeed beside it or be refused (AlreadyExists)"),
+            ),
+        }
+        let Some(after) = run.live(
+            "observe by id after create",
+            p.observe(&node, Some(&foreign)),
+        ) else {
             return;
         };
         run.check(after == before, "the foreign object was changed");
@@ -312,7 +339,7 @@ pub fn foreign_same_name_untouched<H: Harness>(h: &H) -> Result<(), Failure> {
             p.list_owned(&OwnerScope::new(node.path().owner())),
         );
         run.check(
-            owned.is_some_and(|o| o.is_empty()),
+            owned.is_some_and(|o| o.iter().all(|o| o.physical != foreign)),
             "a foreign object is listed as owned",
         );
     })
@@ -411,6 +438,128 @@ pub fn rename_invariance<H: Harness>(h: &H) -> Result<(), Failure> {
     })
 }
 
+/// `list_owned` returns the objects of the scope's owner and nobody else's, and nothing for
+/// an owner with no objects.
+pub fn list_owned_filters_by_owner<H: Harness>(h: &H) -> Result<(), Failure> {
+    each_kind(h, "list_owned_filters_by_owner", |h, kind, i, run| {
+        let mut p = h.fresh();
+        let mine = sample_of("kit", kind, i, 1);
+        let theirs = sample_of("kit-other", kind, i, 1);
+        let mut ids = Vec::new();
+        for node in [&mine, &theirs] {
+            let want = Stamp::for_node(node.path());
+            let Some(created) = run.call("create", p.create(node, &want)) else {
+                return;
+            };
+            ids.push(created.physical);
+        }
+        for (node, id, other) in [(&mine, &ids[0], &ids[1]), (&theirs, &ids[1], &ids[0])] {
+            let scope = OwnerScope::new(node.path().owner());
+            let Some(listed) = run.call("list_owned", p.list_owned(&scope)) else {
+                return;
+            };
+            run.check(
+                listed.iter().any(|o| &o.physical == id),
+                "list_owned omits an object of the owner",
+            );
+            run.check(
+                listed.iter().all(|o| &o.physical != other),
+                "list_owned lists another owner's object",
+            );
+            run.check(
+                listed.iter().all(|o| o.stamp.owner == scope.owner),
+                "list_owned returns a stamp of another owner",
+            );
+        }
+        let nobody = OwnerScope::new(
+            NodePath::new("kit-nobody/x")
+                .expect("the literal path is valid")
+                .owner(),
+        );
+        let none = run.call("list_owned of nobody", p.list_owned(&nobody));
+        run.check(
+            none.is_some_and(|l| l.is_empty()),
+            "list_owned lists objects for an owner that has none",
+        );
+    })
+}
+
+/// A delete removes the object it names and no other, whatever its kind and owner.
+pub fn delete_removes_only_the_named_object<H: Harness>(h: &H) -> Result<(), Failure> {
+    each_kind(
+        h,
+        "delete_removes_only_the_named_object",
+        |h, kind, i, run| {
+            let mut p = h.fresh();
+            let doomed = sample_of("kit", kind, i, 1);
+            let sibling = sample_of("kit", kind, i + 10, 1);
+            let other_owner = sample_of("kit-other", kind, i, 1);
+            let mut ids = Vec::new();
+            for node in [&doomed, &sibling, &other_owner] {
+                let want = Stamp::for_node(node.path());
+                let Some(created) = run.call("create", p.create(node, &want)) else {
+                    return;
+                };
+                ids.push(created.physical);
+            }
+            let bystander = h.add_foreign(&mut p, kind, "kit-bystander");
+            run.call("delete", p.delete(kind, &ids[0]));
+            run.absent("observe the deleted object", p.observe(&doomed, None));
+            for (node, id, what) in [
+                (&sibling, &ids[1], "another object of the owner"),
+                (&other_owner, &ids[2], "an object of another owner"),
+            ] {
+                let seen = run.live(what, p.observe(node, Some(id)));
+                run.check(
+                    seen.is_some_and(|l| is_ours(&l.stamp, &Stamp::for_node(node.path()))),
+                    &format!("a delete changed {what}"),
+                );
+            }
+            let foreign = run.live("the foreign object", p.observe(&doomed, Some(&bystander)));
+            run.check(
+                foreign.is_some_and(|l| !is_ours(&l.stamp, &Stamp::for_node(doomed.path()))),
+                "a delete changed the foreign object",
+            );
+        },
+    )
+}
+
+/// The provider's declarations about a kind hold: its stamp mode and state class do not
+/// change once objects exist, a freshly created object that holds nothing the catalog does
+/// not model may be deleted (or `destroy` could never remove what `apply` made), and
+/// `observe` reports the human name whatever the stamp mode (a stamp encoded in the physical
+/// name stays out of it).
+pub fn declarations_hold<H: Harness>(h: &H) -> Result<(), Failure> {
+    each_kind(h, "declarations_hold", |h, kind, i, run| {
+        let mut p = h.fresh();
+        let node = sample(kind, i, 1);
+        let want = Stamp::for_node(node.path());
+        let (mode, class) = (p.stamp_mode(kind), p.state_class(kind));
+        if run.call("create", p.create(&node, &want)).is_none() {
+            return;
+        }
+        run.check(
+            p.stamp_mode(kind) == mode,
+            "the stamp mode changed once an object existed",
+        );
+        run.check(
+            p.state_class(kind) == class,
+            "the state class changed once an object existed",
+        );
+        let Some(live) = run.live("observe", p.observe(&node, None)) else {
+            return;
+        };
+        run.check(
+            live.name == node.name(),
+            "observe reports a name other than the human one",
+        );
+        run.check(
+            !live.unmanaged.is_empty() || p.deletability(kind, &live) == Deletability::Deletable,
+            "a fresh object holding nothing unmodelled is not deletable",
+        );
+    })
+}
+
 /// A kind the provider declares it does not host is refused before anything is created.
 pub fn declared_unsupported_kinds_refuse<H: Harness>(h: &H) -> Result<(), Failure> {
     let mut run = Run::new("declared_unsupported_kinds_refuse");
@@ -434,6 +583,9 @@ pub fn run_all<H: Harness>(h: &H) -> Vec<Failure> {
         update_changes_digest_and_keeps_stamp(h),
         foreign_same_name_untouched(h),
         delete_absent_is_idempotent(h),
+        delete_removes_only_the_named_object(h),
+        list_owned_filters_by_owner(h),
+        declarations_hold(h),
         read_is_live_not_cached(h),
         rename_invariance(h),
         declared_unsupported_kinds_refuse(h),

@@ -202,3 +202,94 @@ fn foreign_objects_are_there_from_the_start_and_never_ours() {
     );
     assert!(fake.calls().iter().all(|c| c.op != Op::Delete));
 }
+
+#[test]
+fn ambiguous_at_call_times_out_only_the_kth_mutation() {
+    let mut fake = with(Faults {
+        ambiguous_at_call: Some(2),
+        ..Faults::default()
+    });
+    let (a, b, c) = (
+        service("app/a", "a"),
+        service("app/b", "b"),
+        service("app/c", "c"),
+    );
+    assert!(fake.create(&a, &stamp(&a)).is_ok());
+    assert!(present(&mut fake, &a), "reads are not counted");
+    let second = fake.create(&b, &stamp(&b));
+    assert!(
+        matches!(second, Err(ProviderError::Unknown(_))),
+        "{second:?}"
+    );
+    assert!(present(&mut fake, &b), "the second create happened");
+    assert!(fake.create(&c, &stamp(&c)).is_ok(), "the third replies");
+}
+
+#[test]
+fn ambiguous_at_call_does_not_hide_a_refusal() {
+    let mut fake = with(Faults {
+        ambiguous_at_call: Some(1),
+        ..Faults::default()
+    });
+    let a = service("app/a", "a");
+    fake.add_foreign(&Kind::service(), "a", None);
+    assert_eq!(
+        fake.create(&a, &stamp(&a)),
+        Err(ProviderError::Refused(Refusal::AlreadyExists)),
+        "a create that changes nothing is reported as it is"
+    );
+}
+
+#[test]
+fn fail_reads_fails_the_next_reads_in_order_and_changes_nothing() {
+    let transient = ProviderError::Transient("busy".to_owned());
+    let in_flight = ProviderError::InFlight("still creating".to_owned());
+    let mut fake = with(Faults {
+        fail_reads: vec![transient.clone(), in_flight.clone()],
+        ..Faults::default()
+    });
+    let a = service("app/a", "a");
+    let scope = OwnerScope::new(a.path().owner());
+    fake.create(&a, &stamp(&a)).expect("create");
+    assert_eq!(fake.observe(&a, None), Err(transient.clone()));
+    assert_eq!(fake.list_owned(&scope), Err(in_flight.clone()));
+    assert!(present(&mut fake, &a), "reads work again, nothing was lost");
+    assert_eq!(fake.list_owned(&scope).map(|l| l.len()), Ok(1));
+    let failed: Vec<_> = fake
+        .calls()
+        .iter()
+        .filter(|c| c.outcome.is_err())
+        .map(|c| (c.op, c.outcome.clone()))
+        .collect();
+    assert_eq!(
+        failed,
+        [
+            (Op::Observe, Err(transient)),
+            (Op::ListOwned, Err(in_flight))
+        ]
+    );
+}
+
+#[test]
+fn a_failed_read_counts_toward_read_lag() {
+    let mut fake = with(Faults {
+        read_lag: 1,
+        fail_reads: vec![ProviderError::Transient("busy".to_owned())],
+        ..Faults::default()
+    });
+    let a = service("app/a", "a");
+    fake.create(&a, &stamp(&a)).expect("create");
+    assert!(fake.observe(&a, None).is_err(), "read 1 fails");
+    assert!(present(&mut fake, &a), "read 2 is past the lag of 1");
+}
+
+#[test]
+fn a_deleted_object_is_gone_at_the_next_read_even_under_read_lag() {
+    let mut fake = with(Faults::default());
+    let a = service("app/a", "a");
+    let created = fake.create(&a, &stamp(&a)).expect("create");
+    assert!(present(&mut fake, &a));
+    fake.faults_mut().read_lag = 3;
+    fake.delete(a.kind(), &created.physical).expect("delete");
+    assert!(!present(&mut fake, &a), "read lag delays creation only");
+}

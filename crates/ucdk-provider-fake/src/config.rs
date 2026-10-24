@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use ucdk_provider::Kind;
+use ucdk_provider::{Kind, ProviderError};
 
 /// An object that is in the cloud before the fake is used and that this cell did not create.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,7 +22,9 @@ pub struct Faults {
     /// changes nothing. The calls after it proceed.
     pub fail_at_call: Option<u64>,
     /// A created object is hidden from the first `n` reads (observe or list) after the
-    /// create, as with an eventually consistent cloud.
+    /// create, as with an eventually consistent cloud. Only creation lags: a deleted object
+    /// is gone at the next read, and `list_owned` lags exactly as `observe` does (a
+    /// listing is a read like any other). A read that fails by `fail_reads` still counts.
     pub read_lag: u64,
     /// Objects present from the start.
     pub foreign: Vec<ForeignObject>,
@@ -31,6 +33,13 @@ pub struct Faults {
     pub race_next: bool,
     /// The next mutation is applied and then reports a timeout (`Unknown`). Fires once.
     pub ambiguous_success: bool,
+    /// The `k`th mutation (counted from 1, as for `fail_at_call`) is applied if it would
+    /// succeed and then reports a timeout (`Unknown`). Fires once, for that `k` only.
+    pub ambiguous_at_call: Option<u64>,
+    /// The next reads (observe or list_owned), in order, each fail with the next error
+    /// here and change nothing; once the list is used up reads succeed again. Each failed
+    /// read is logged with its error.
+    pub fail_reads: Vec<ProviderError>,
 }
 
 /// What the fake hosts. Every kind not listed as unsupported is hosted.

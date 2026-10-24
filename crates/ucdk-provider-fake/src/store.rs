@@ -18,6 +18,10 @@ pub struct Object {
     pub name: String,
     pub base: String,
     pub labels: BTreeMap<String, String>,
+    /// The name and labels as they were when the object was inserted: what it was born
+    /// with. Later changes (an out-of-band label or rename) never touch these.
+    pub born_name: String,
+    pub born_labels: BTreeMap<String, String>,
     pub fields: Vec<DesiredField>,
     pub unmodelled: BTreeMap<String, String>,
     pub marker: Option<String>,

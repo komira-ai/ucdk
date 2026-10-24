@@ -57,6 +57,11 @@ impl Fake {
         &self.calls
     }
 
+    /// Forgets the calls logged so far. The store, and what each object was born with, stay.
+    pub fn clear_calls(&mut self) {
+        self.calls.clear();
+    }
+
     /// How many live objects the store holds, hidden ones included.
     pub fn object_count(&self) -> usize {
         self.objects.len()
@@ -71,6 +76,8 @@ impl Fake {
             name: name.to_owned(),
             base: name.to_owned(),
             labels: BTreeMap::new(),
+            born_name: String::new(),
+            born_labels: BTreeMap::new(),
             fields: Vec::new(),
             unmodelled: BTreeMap::from([("origin".to_owned(), "external".to_owned())]),
             marker,
@@ -119,17 +126,16 @@ impl Fake {
         true
     }
 
-    /// The stamp the object carried in the call that created it, from the call log.
+    /// The stamp the object was born with: the name and labels it had when it entered the
+    /// store, read from the stored object. A stamp set after that (out of band, or by a
+    /// provider that patches after create) is not a stamp at birth. `None` when there is no
+    /// such object or it was born without one.
     pub fn birth_stamp(&self, physical: &PhysicalId) -> Option<Stamp> {
-        let born = self
-            .calls
-            .iter()
-            .find(|c| c.op == Op::Create && c.physical.as_ref() == Some(physical))?;
-        let tagless = born.kind.as_ref().is_some_and(|k| self.is_tagless(k));
-        if tagless {
-            Stamp::decode_name(&born.name).1
+        let born = self.objects.get(physical)?;
+        if self.is_tagless(&born.kind) {
+            Stamp::decode_name(&born.born_name).1
         } else {
-            crate::store::stamp_of(&born.labels)
+            crate::store::stamp_of(&born.born_labels)
         }
     }
 
@@ -137,7 +143,9 @@ impl Fake {
         self.config.tagless.contains(kind)
     }
 
-    fn insert(&mut self, object: Object) -> PhysicalId {
+    fn insert(&mut self, mut object: Object) -> PhysicalId {
+        object.born_name.clone_from(&object.name);
+        object.born_labels.clone_from(&object.labels);
         self.next_id += 1;
         let id = PhysicalId::new(format!("fake-{:06}", self.next_id));
         self.objects.insert(id.clone(), object);
@@ -158,17 +166,30 @@ impl Fake {
     /// change stays and the caller is told the call timed out.
     fn reply<T>(&mut self, landed: Result<T, ProviderError>) -> Result<T, ProviderError> {
         match landed {
-            Ok(_) if std::mem::take(&mut self.config.faults.ambiguous_success) => {
+            Ok(_) if self.times_out() => {
                 Err(ProviderError::Unknown("the reply timed out".to_owned()))
             }
             other => other,
         }
     }
 
-    /// Counts a read; the number of reads made before this one.
-    fn read(&mut self) -> u64 {
+    /// Whether the mutation just made reports a timeout: the one-shot flag, or the `k`th
+    /// mutation.
+    fn times_out(&mut self) -> bool {
+        let next = std::mem::take(&mut self.config.faults.ambiguous_success);
+        next || self.config.faults.ambiguous_at_call == Some(self.mutations)
+    }
+
+    /// Counts a read; the number of reads made before this one, or the error the next read
+    /// is made to fail with.
+    fn read(&mut self) -> Result<u64, ProviderError> {
         self.reads += 1;
-        self.reads - 1
+        let faults = &mut self.config.faults;
+        if faults.fail_reads.is_empty() {
+            Ok(self.reads - 1)
+        } else {
+            Err(faults.fail_reads.remove(0))
+        }
     }
 
     fn live_of(&self, id: &PhysicalId, object: &Object) -> Live {
@@ -196,6 +217,8 @@ impl Fake {
             name,
             base: node.name().to_owned(),
             labels,
+            born_name: String::new(),
+            born_labels: BTreeMap::new(),
             fields: node.fields().to_vec(),
             unmodelled: BTreeMap::new(),
             marker: None,
@@ -333,7 +356,20 @@ impl Provider for Fake {
         node: &Node,
         hint: Option<&PhysicalId>,
     ) -> Result<Observation, ProviderError> {
-        let read = self.read();
+        let read = match self.read() {
+            Ok(read) => read,
+            Err(e) => {
+                let call = Self::plain_call(
+                    Op::Observe,
+                    Some(node.kind().clone()),
+                    node.name(),
+                    None,
+                    Err(e.clone()),
+                );
+                self.record(call);
+                return Err(e);
+            }
+        };
         let found = match hint {
             Some(id) => self.objects.get_key_value(id),
             None => self
@@ -395,7 +431,20 @@ impl Provider for Fake {
     }
 
     fn list_owned(&mut self, scope: &OwnerScope) -> Result<Vec<OwnedObject>, ProviderError> {
-        let read = self.read();
+        let read = match self.read() {
+            Ok(read) => read,
+            Err(e) => {
+                let call = Self::plain_call(
+                    Op::ListOwned,
+                    None,
+                    scope.owner.as_str(),
+                    None,
+                    Err(e.clone()),
+                );
+                self.record(call);
+                return Err(e);
+            }
+        };
         let owned: Vec<OwnedObject> = self
             .objects
             .iter()

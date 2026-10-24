@@ -58,6 +58,21 @@ fn kit_declared_unsupported_kinds_refuse() {
 }
 
 #[test]
+fn kit_delete_removes_only_the_named_object() {
+    on_fake_and_fake_limited(kit::delete_removes_only_the_named_object);
+}
+
+#[test]
+fn kit_list_owned_filters_by_owner() {
+    on_fake_and_fake_limited(kit::list_owned_filters_by_owner);
+}
+
+#[test]
+fn kit_declarations_hold() {
+    on_fake_and_fake_limited(kit::declarations_hold);
+}
+
+#[test]
 fn kit_runs_every_scenario_on_both_fakes() {
     assert!(kit::run_all(&FakeHarness::standard()).is_empty());
     assert!(kit::run_all(&FakeHarness::limited()).is_empty());

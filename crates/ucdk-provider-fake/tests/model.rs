@@ -344,3 +344,49 @@ fn every_call_kind_has_a_name_and_says_whether_it_mutates() {
         ]
     );
 }
+
+#[test]
+fn birth_stamp_is_read_from_the_stored_object_not_the_call_log() {
+    let mut fake = Fake::standard();
+    let (web, task) = (service("app/web", "web"), job("app/task", "task"));
+    let web_id = fake.create(&web, &stamp(&web)).unwrap().physical;
+    let task_id = fake.create(&task, &stamp(&task)).unwrap().physical;
+    fake.clear_calls();
+    assert!(fake.calls().is_empty());
+    assert!(
+        fake.birth_stamp(&web_id)
+            .unwrap()
+            .same_identity(&stamp(&web))
+    );
+    assert!(
+        fake.birth_stamp(&task_id)
+            .unwrap()
+            .same_identity(&stamp(&task))
+    );
+}
+
+#[test]
+fn a_stamp_set_after_birth_is_not_a_birth_stamp_and_a_changed_one_does_not_rewrite_it() {
+    let mut fake = Fake::standard();
+    let web = service("app/web", "web");
+    let born = fake.create(&web, &stamp(&web)).unwrap().physical;
+    let s = fake.birth_stamp(&born).unwrap();
+    let late = fake.add_foreign(&Kind::service(), "late", None);
+    for (key, value) in [
+        ("ucdk-owner", s.owner.to_string()),
+        ("ucdk-node", s.node.to_string()),
+        ("ucdk-scheme", s.scheme.to_string()),
+    ] {
+        assert!(fake.set_label(&late, key, Some(&value)));
+    }
+    let named = service("app/late", "late");
+    assert!(
+        matches!(observed(&mut fake, &named).stamp, StampEvidence::Present(_)),
+        "the object now carries a stamp"
+    );
+    assert_eq!(fake.birth_stamp(&late), None, "but it was born without one");
+    // Changing the owner label afterwards does not change who it was born as.
+    assert!(fake.set_label(&born, "ucdk-owner", Some("someone-else")));
+    assert!(fake.birth_stamp(&born).unwrap().same_identity(&stamp(&web)));
+    assert_eq!(fake.birth_stamp(&PhysicalId::new("nothing")), None);
+}

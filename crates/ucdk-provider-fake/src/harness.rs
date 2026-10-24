@@ -46,8 +46,8 @@ impl Harness for FakeHarness {
         self.config.unsupported.iter().cloned().collect()
     }
 
-    fn add_foreign(&self, provider: &mut Fake, kind: &Kind, name: &str) {
-        provider.add_foreign(kind, name, None);
+    fn add_foreign(&self, provider: &mut Fake, kind: &Kind, name: &str) -> PhysicalId {
+        provider.add_foreign(kind, name, None)
     }
 
     fn rename(&self, provider: &mut Fake, physical: &PhysicalId, new_name: &str) {

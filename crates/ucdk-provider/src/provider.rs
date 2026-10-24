@@ -19,6 +19,14 @@ use crate::stamp::{Stamp, StampMode};
 /// - `update` of an object that is not there is `Refused(NotFound)`;
 /// - `delete` of an object that is not there succeeds;
 /// - `observe` and `list_owned` read the cloud as it is now;
+/// - `delete` removes the object it names and no other;
+/// - `list_owned` returns the objects of the scope's owner and no others;
+/// - `observe` reports the human name of the object, never a name with the stamp encoded in it;
+/// - `stamp_mode` and `state_class` of a kind do not change while objects exist, and an
+///   object holding nothing the catalog does not model (`Live::unmanaged` empty) is `Deletable`;
+/// - a create over a foreign object of the same name is refused as `AlreadyExists` or lands
+///   beside it (a provider that puts the stamp in the physical name); either way the foreign
+///   object is left as it was;
 /// - `observe` with a hint finds the object by its physical id, whatever it is now called.
 pub trait Provider: Send {
     /// Whether the kind's objects carry data. A stateful kind is kept by default.
