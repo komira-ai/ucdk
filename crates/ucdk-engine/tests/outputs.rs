@@ -6,8 +6,8 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::{
-    Hooked, apply, bound_pair, done, lowered, mutations, objects, path, plan_of, planned, records,
-    service_of, service_reading,
+    Hooked, apply, bound_pair, done, lowered, mutations, objects, path, physical_of, plan_of,
+    planned, records, service_of, service_reading,
 };
 use ucdk_engine::{EngineError, Outcome};
 use ucdk_ledger::{MemoryLedger, State};
@@ -193,5 +193,36 @@ fn an_output_the_producer_does_not_report_stops_the_run() {
     assert!(
         !records(&ledger).contains_key(&path("app/run")),
         "nothing was created for the consumer"
+    );
+}
+
+#[test]
+fn a_consumer_does_not_read_the_outputs_of_an_unconfirmed_update() {
+    let mut fake = Fake::standard();
+    let ledger = MemoryLedger::new();
+    done(apply(&mut fake, &ledger, &bound_pair()));
+    let db = physical_of(&ledger, "db/run");
+    assert!(fake.set_status(&db, ucdk_provider::Status::Failed));
+    let changed = lowered(vec![
+        service_reading("app", 99, "DB_URL", "db", Output::Url),
+        service_of("db", 5433, false, &[]),
+    ]);
+    let written = mutations(&fake);
+    // The update of the producer is made, and the object is not ready when it is read again.
+    let after = db.clone();
+    // Calls 1 to 9 plan the run and read the producer, 10 updates it, 11 reads it again.
+    let mut hooked = Hooked::new(&mut fake, 11, move |f| {
+        f.set_status(&after, ucdk_provider::Status::Failed);
+    });
+    let report = done(apply(&mut hooked, &ledger, &changed));
+    drop(hooked);
+    assert_eq!(report.updated, [path("db/run")], "{report:?}");
+    let held = records(&ledger);
+    assert_eq!(held[&path("db/run")].state, State::Intent);
+    assert_eq!(held[&path("app/run")].state, State::Confirmed);
+    assert_eq!(mutations(&fake), written + 1, "only the producer was written");
+    assert!(
+        objects(&fake).contains("port=80") && !objects(&fake).contains("port=99"),
+        "the consumer was left as it was"
     );
 }

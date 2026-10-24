@@ -54,7 +54,10 @@ impl Engine<'_> {
             records.get(&path)
         };
         let bound = pn.bound(|resource, output| {
+            // Only a confirmed record's outputs are the live object's: an intent written by an
+            // update still carries the previous outputs, which the update is about to change.
             producer(resource)
+                .filter(|record| record.state == State::Confirmed)
                 .and_then(|record| record.outputs.get(output))
                 .map(String::as_str)
         });
