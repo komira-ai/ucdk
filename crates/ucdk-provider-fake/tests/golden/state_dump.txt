@@ -1,0 +1,9 @@
+objects:
+  fake-000002 job name=nightly~ucdk1~app~d2liqk276wgmx3tqp4x4vljqre labels=[] fields=[label="a",port=80,public=false] unmodelled=[]
+  fake-000003 service name=legacy labels=[] fields=[] unmodelled=[origin=external,owner=ops]
+calls:
+  1 create service fake-000001 ok
+  2 create job fake-000002 ok
+  3 create service - refused AlreadyExists
+  4 observe service fake-000001 ok
+  5 delete service fake-000001 ok

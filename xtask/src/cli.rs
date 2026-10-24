@@ -9,7 +9,7 @@ use crate::event::{Event, parse_event};
 use crate::{Finding, check, coverage, fetch, workspace_root};
 
 const USAGE: &str = "usage: cargo xtask <verb>
-  check [--base <sha>]   fmt, clippy, deny, SPDX, run lines, public lint, DCO
+  check [--base <sha>]   fmt, clippy, deny, SPDX, run lines, purity, public lint, DCO
   coverage               tests under llvm-cov; per-crate line and branch floor
   fetch                  install the pinned tools
 ";
