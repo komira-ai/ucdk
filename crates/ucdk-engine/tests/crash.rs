@@ -10,12 +10,12 @@ use std::sync::{Arc, Mutex};
 
 use common::{
     FlakyLedger, Hooked, apply, apply_with, chain, destroy, done, lowered, mutations, objects,
-    owned_by_fake, path, paths, records, service_of,
+    owned_by_fake, path, paths, physical_of, records, service_of,
 };
 use ucdk_engine::{EngineError, Outcome, Refusal, Report};
 use ucdk_ledger::{Change, Ledger as _, LedgerError, MemoryLedger, Record, State};
 use ucdk_plan::{ConflictKind, Lowered};
-use ucdk_provider::{Kind, ProviderError, Refusal as CallRefusal};
+use ucdk_provider::{Kind, Provider as _, ProviderError, Refusal as CallRefusal};
 use ucdk_provider_fake::{Fake, Op};
 
 fn failure(outcome: Outcome) -> ucdk_engine::Failure {
@@ -455,6 +455,134 @@ fn crash_sweep_every_ledger_write_no_duplicates_or_orphans() {
             assert_consistent(&mut fake, &flaky.inner, &context);
         }
     }
+}
+
+// ---- convergence after an out-of-band delete -------------------------------------------------
+
+/// The nodes of the chain, each of which is lost in turn.
+const CHAIN_NODES: [&str; 4] = ["db/run", "api/run", "web/run", "web/public"];
+
+/// A world set up by `scenario`, with the object of `lost` (when given) deleted out of band.
+fn world_with_loss(scenario: &Scenario, lost: Option<&str>) -> (Fake, MemoryLedger) {
+    let (mut fake, ledger) = (Fake::standard(), MemoryLedger::new());
+    for setup in &scenario.setup {
+        done(apply(&mut fake, &ledger, setup));
+    }
+    if let Some(lost) = lost {
+        let record = records(&ledger)[&path(lost)].clone();
+        let physical = record.physical.expect("the record names an object");
+        fake.delete(&record.kind, &physical)
+            .expect("the out-of-band delete");
+    }
+    (fake, ledger)
+}
+
+/// Fault-free runs of the scenario's act, at most three, reach `expected`; then a destroy of
+/// what the act manages completes and leaves no object and no record.
+fn assert_converges(
+    fake: &mut Fake,
+    ledger: &MemoryLedger,
+    act: &Act,
+    expected: &(String, BTreeMap<ucdk_provider::NodePath, Record>),
+    context: &str,
+) {
+    let converged = (0..3).any(|_| {
+        let outcome = run_act(fake, ledger, act);
+        matches!(outcome, Outcome::Done(_)) && state_of(fake, ledger) == *expected
+    });
+    assert!(converged, "{context}: not the clean state in three runs");
+    let (Act::Apply(desired) | Act::Destroy(desired)) = act;
+    let outcome = destroy(fake, ledger, desired);
+    assert!(
+        matches!(outcome, Outcome::Done(_)),
+        "{context}: the destroy did not complete: {outcome:?}"
+    );
+    assert_eq!(fake.object_count(), 0, "{context}: objects left");
+    assert!(records(ledger).is_empty(), "{context}: records left");
+}
+
+#[test]
+fn crash_sweep_converges_after_out_of_band_delete() {
+    // Every scenario of the sweep, then each of them with one object deleted out of band first.
+    let mut cases: Vec<(Scenario, Option<&str>)> = Vec::new();
+    for scenario in scenarios() {
+        cases.push((scenario, None));
+    }
+    for lost in CHAIN_NODES {
+        cases.push((
+            Scenario {
+                name: "re-apply after a delete out of band",
+                setup: vec![chain()],
+                act: Act::Apply(chain()),
+            },
+            Some(lost),
+        ));
+    }
+    for (scenario, lost) in cases {
+        let (mut clean, clean_ledger) = world_with_loss(&scenario, lost);
+        let before = mutations(&clean);
+        done(run_act(&mut clean, &clean_ledger, &scenario.act));
+        let total = mutations(&clean) - before;
+        assert!(total >= 1, "{}: the run mutates", scenario.name);
+        let expected = state_of(&clean, &clean_ledger);
+
+        for ambiguous in [false, true] {
+            for k in 1..=total {
+                let context = format!(
+                    "{} (lost {lost:?}, k={k}, ambiguous={ambiguous})",
+                    scenario.name
+                );
+                let (mut fake, ledger) = world_with_loss(&scenario, lost);
+                let at = (mutations(&fake) + k) as u64;
+                {
+                    let faults = fake.faults_mut();
+                    if ambiguous {
+                        *faults.ambiguous_at_call = Some(at);
+                    } else {
+                        *faults.fail_at_call = Some(at);
+                    }
+                }
+                let crashed = run_act(&mut fake, &ledger, &scenario.act);
+                assert!(
+                    matches!(crashed, Outcome::Failed(_)),
+                    "{context}: {crashed:?}"
+                );
+                {
+                    let faults = fake.faults_mut();
+                    *faults.ambiguous_at_call = None;
+                    *faults.fail_at_call = None;
+                }
+                assert_converges(&mut fake, &ledger, &scenario.act, &expected, &context);
+            }
+        }
+    }
+}
+
+#[test]
+fn a_recreate_after_an_out_of_band_delete_with_a_lost_reply_converges() {
+    let scenario = Scenario {
+        name: "recreate",
+        setup: vec![chain()],
+        act: Act::Apply(chain()),
+    };
+    let (mut clean, clean_ledger) = world_with_loss(&scenario, Some("db/run"));
+    done(apply(&mut clean, &clean_ledger, &chain()));
+    let expected = state_of(&clean, &clean_ledger);
+
+    // The object is deleted out of band; the run that makes it again has its create applied
+    // and the reply lost.
+    let (mut fake, ledger) = world_with_loss(&scenario, Some("db/run"));
+    let old = physical_of(&ledger, "db/run");
+    *fake.faults_mut().ambiguous_at_call = Some((mutations(&fake) + 1) as u64);
+    let f = failure(apply(&mut fake, &ledger, &chain()));
+    assert_eq!(f.at, Some(path("db/run")));
+    // The intent it left does not name the deleted object.
+    let left = &records(&ledger)[&path("db/run")];
+    assert_eq!(left.state, State::Intent);
+    assert_ne!(left.physical, Some(old));
+    *fake.faults_mut().ambiguous_at_call = None;
+
+    assert_converges(&mut fake, &ledger, &scenario.act, &expected, "recreate");
 }
 
 // ---- interleaving ----------------------------------------------------------------------------

@@ -75,7 +75,13 @@ impl Engine<'_> {
         prior: Option<Record>,
         report: &mut Report,
     ) -> Result<(), EngineError> {
-        let intent = intent_for(prior, pn);
+        // A create is made because the object was read as absent, so an id the record held
+        // names an object that is gone. The intent carries none: the new id is written once
+        // the create returns it.
+        let intent = Record {
+            physical: None,
+            ..intent_for(prior, pn)
+        };
         self.commit(&Change::Put(intent.clone()))?;
         match self.provider.create(node, &Stamp::for_node(node.path())) {
             Ok(created) => {
