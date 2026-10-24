@@ -1,0 +1,70 @@
+// SPDX-License-Identifier: Apache-2.0
+//! The public files of the repository.
+
+use std::fs;
+
+fn read(path: &str) -> String {
+    fs::read_to_string(xtask::workspace_root().join(path)).unwrap_or_else(|e| panic!("{path}: {e}"))
+}
+
+#[test]
+fn required_public_files_exist() {
+    for f in [
+        "LICENSE",
+        "NOTICE",
+        "README.md",
+        "SECURITY.md",
+        "CONTRIBUTING.md",
+        ".github/CODEOWNERS",
+        ".github/pull_request_template.md",
+        ".github/workflows/ci.yml",
+        "deny.toml",
+        "rust-toolchain.toml",
+    ] {
+        assert!(xtask::workspace_root().join(f).is_file(), "{f} must exist");
+    }
+}
+
+#[test]
+fn codeowners_names_only_the_team() {
+    let text = read(".github/CODEOWNERS");
+    let mut patterns = Vec::new();
+    for line in text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+    {
+        let mut parts = line.split_whitespace();
+        patterns.push(parts.next().expect("pattern").to_owned());
+        let owners: Vec<_> = parts.collect();
+        assert_eq!(owners, ["@komira-ai/ucdk-maintainers"], "line: {line}");
+    }
+    for p in ["*", "/.github/"] {
+        assert!(patterns.iter().any(|x| x == p), "CODEOWNERS lacks {p}");
+    }
+}
+
+#[test]
+fn security_md_has_no_email_address() {
+    let text = read("SECURITY.md");
+    assert!(
+        !text.contains('@'),
+        "SECURITY.md must not carry an email address"
+    );
+    assert!(text.contains("private vulnerability reporting"));
+}
+
+#[test]
+fn the_workflow_has_two_jobs_each_one_xtask_verb() {
+    let text = read(".github/workflows/ci.yml");
+    let runs: Vec<&str> = text
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("- run: "))
+        .collect();
+    assert_eq!(runs, ["cargo xtask check", "cargo xtask coverage"]);
+    assert!(text.contains("  check:\n") && text.contains("  coverage:\n"));
+    assert!(
+        !text.contains("secrets."),
+        "no secrets in a pull-request workflow"
+    );
+}

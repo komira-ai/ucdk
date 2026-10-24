@@ -1,0 +1,45 @@
+# Pull-request gate: two jobs, each one `cargo xtask` verb. All logic lives in xtask, where it is
+# tested; a test in xtask holds this file to that (every `run:` line is exactly one verb).
+#   check    static gates: fmt, clippy, cargo-deny, SPDX headers, run lines, public lint, DCO
+#   coverage the tests once under llvm-cov; per-crate line and branch floor
+name: ci
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The pull request's own head, not the merge commit the platform builds for the run:
+          # the sign-off and message checks read every commit from the base to here, and the
+          # platform's merge commit carries neither.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          # The whole history: the sign-off check reads every commit of the pull request.
+          fetch-depth: 0
+      - run: cargo xtask check
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: cargo xtask coverage
