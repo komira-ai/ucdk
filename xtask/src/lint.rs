@@ -43,13 +43,14 @@ const MONTHS: [&str; 12] = [
 const HOME_PATHS: [&str; 3] = ["/home/", "/users/", "c:\\users"];
 
 /// Hosts a public file may link to; a subdomain of one is allowed too.
-const ALLOWED_HOSTS: [&str; 10] = [
+const ALLOWED_HOSTS: [&str; 11] = [
     "github.com",
     "crates.io",
     "rust-lang.org",
     "docs.rs",
     "developercertificate.org",
     "apache.org",
+    "claude.com",
     "localhost",
     "example.com",
     "example.org",

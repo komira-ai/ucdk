@@ -414,3 +414,23 @@ fn a_trailer_is_not_a_way_to_carry_text() {
         );
     }
 }
+
+#[test]
+fn pr_body_attribution_link_is_allowed() {
+    let attribution = "🤖 Generated with [Claude Code](https://claude.com/claude-code)";
+    let event = Event {
+        title: "Add storage".to_owned(),
+        body: format!("Adds storage.\n\n{attribution}"),
+        ..Event::default()
+    };
+    assert_eq!(check_pr_text(&event), vec![]);
+
+    let other = join(&["https:", "//tools.vendor", ".invalid/page"]);
+    let event = Event {
+        body: format!("Adds storage.\n\n{attribution}\n{other}"),
+        ..Event::default()
+    };
+    let found = check_pr_text(&event);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].subject, "pull request body:4");
+}
