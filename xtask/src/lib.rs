@@ -13,6 +13,7 @@ pub mod dco;
 pub mod event;
 pub mod fetch;
 pub mod lint;
+pub mod purity;
 pub mod runlines;
 pub mod spdx;
 pub mod tree;
