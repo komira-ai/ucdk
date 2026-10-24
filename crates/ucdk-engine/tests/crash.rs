@@ -409,6 +409,7 @@ fn errors_and_refusals_read_as_sentences() {
         EngineError::LedgerBusy.to_string(),
         EngineError::NotOurs(path("a/run")).to_string(),
         EngineError::StillPresent(path("a/run")).to_string(),
+        EngineError::Unwitnessed(path("a/run")).to_string(),
     ];
     assert_eq!(
         sentences,
@@ -418,6 +419,7 @@ fn errors_and_refusals_read_as_sentences() {
             "the ledger kept changing under the run",
             "a/run: the object is not ours (stamp and record)",
             "a/run: the object is there when it should be gone",
+            "a/run: no object is read, but none was ever read back after its create",
         ]
     );
     let (mut fake, ledger) = (Fake::standard(), MemoryLedger::new());

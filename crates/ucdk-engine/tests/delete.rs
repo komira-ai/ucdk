@@ -549,3 +549,50 @@ fn a_read_that_fails_as_the_run_begins_stops_it_before_any_change() {
     assert_eq!(f.at, None);
     assert_eq!(mutations(&fake), mutated);
 }
+
+#[test]
+fn rollback_leaves_the_record_of_an_object_it_cannot_read() {
+    let (mut fake, ledger) = world();
+    // The creates are not readable; the third is refused, so the rollback looks for the first two.
+    *fake.faults_mut().read_lag = 1000;
+    fake.faults_mut().fail_at_call.replace(3);
+    let f = failure(apply_with(&mut fake, &ledger, &chain(), true));
+    *fake.faults_mut().read_lag = 0;
+    assert!(f.report.rolled_back.is_empty());
+    assert_eq!(
+        f.report.rollback_failed,
+        [
+            (path("api/run"), EngineError::Unwitnessed(path("api/run"))),
+            (path("db/run"), EngineError::Unwitnessed(path("db/run"))),
+        ]
+    );
+    assert_eq!(fake.object_count(), 2);
+    assert!(records(&ledger).contains_key(&path("db/run")));
+}
+
+#[test]
+fn a_failed_read_back_after_a_create_keeps_an_intent_that_names_the_object() {
+    let (mut fake, ledger) = world();
+    // Two plans read the four nodes, then the first step reads, creates and reads back.
+    let at = 2 * chain().nodes().len() + 3;
+    let mut hooked = Hooked::new(&mut fake, at, |fake| {
+        fake.faults_mut()
+            .fail_reads
+            .push(ProviderError::Transient("busy".to_owned()));
+    });
+    let f = failure(apply(&mut hooked, &ledger, &chain()));
+    drop(hooked);
+    assert_eq!(f.at, Some(path("db/run")));
+    assert!(matches!(
+        f.error,
+        EngineError::Provider(ProviderError::Transient(_))
+    ));
+    assert_eq!(f.report.created, paths(&["db/run"]));
+    let record = &records(&ledger)[&path("db/run")];
+    assert_eq!(record.state, State::Intent);
+    assert!(record.physical.is_some());
+    // The next run reads the object, confirms the record, and finishes the rest.
+    done(apply(&mut fake, &ledger, &chain()));
+    assert_eq!(records(&ledger)[&path("db/run")].state, State::Confirmed);
+    assert_eq!(fake.object_count(), 4);
+}
