@@ -57,6 +57,9 @@ struct Flaws {
     fresh_undeletable: bool,
     /// Observe reports a name with the stamp encoded in it.
     encoded_name: bool,
+    /// Not a defect: every object holds data the catalog does not model and so cannot be
+    /// deleted.
+    holds_unmodelled: bool,
     /// Not a defect: a create over a foreign object of the same name lands beside it (the
     /// stamp is part of the physical name) instead of being refused.
     beside_foreign: bool,
@@ -124,7 +127,11 @@ impl Stub {
             },
             stamp,
             digest: digest_of(&o.kind, &o.fields),
-            unmanaged: Vec::new(),
+            unmanaged: if self.flaws.holds_unmodelled {
+                vec!["data".to_owned()]
+            } else {
+                Vec::new()
+            },
         }
     }
 }
@@ -138,8 +145,8 @@ impl Provider for Stub {
         }
     }
 
-    fn deletability(&self, _: &Kind, _: &Live) -> Deletability {
-        if self.flaws.fresh_undeletable {
+    fn deletability(&self, _: &Kind, live: &Live) -> Deletability {
+        if self.flaws.fresh_undeletable || !live.unmanaged.is_empty() {
             Deletability::Undeletable {
                 reason: "protected".to_owned(),
             }
@@ -417,14 +424,20 @@ fn flagged(flaws: Flaws) -> Vec<&'static str> {
 
 #[test]
 fn kit_self_test_flags_nonconforming_stub() {
-    // The stub without a defect conforms, and so does one whose creates land beside a
-    // foreign object of the same name.
+    // The stub without a defect conforms, and so do two that differ from it in ways the
+    // contract allows: creates that land beside a foreign object of the same name, and
+    // objects that hold unmodelled data and so cannot be deleted.
     assert_eq!(flagged(Flaws::default()), Vec::<&str>::new());
     let beside = Flaws {
         beside_foreign: true,
         ..Flaws::default()
     };
     assert_eq!(flagged(beside), Vec::<&str>::new());
+    let holds_data = Flaws {
+        holds_unmodelled: true,
+        ..Flaws::default()
+    };
+    assert_eq!(flagged(holds_data), Vec::<&str>::new());
 
     // Each defect is flagged by the scenario that guards that behaviour.
     let defects: [(&str, Flaws, &str); 20] = [
