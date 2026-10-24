@@ -3,7 +3,7 @@
 
 use ucdk_ledger::{Change, Origin, Record, State};
 use ucdk_plan::Retained;
-use ucdk_provider::{Deletability, NodePath, Observation, StateClass};
+use ucdk_provider::{Deletability, Node, NodePath, Observation, OwnerScope, StateClass};
 
 use crate::engine::{Engine, node_of, ours};
 use crate::error::EngineError;
@@ -17,18 +17,52 @@ enum Removal {
     Kept(Retained),
 }
 
-/// An absent read drops a record only if it is not an intent. An intent is written before a
-/// create or an update, so its call may have landed with the reply lost: an intent that names
-/// an object was never read back, and one that names none may belong to a create that did
-/// land. Either way the absence may be a lagging read. A run of apply settles an intent.
-fn witnessed(record: &Record) -> Result<(), EngineError> {
-    if record.state == State::Intent {
-        return Err(EngineError::Unwitnessed(record.path.clone()));
-    }
-    Ok(())
-}
-
 impl Engine<'_> {
+    /// Whether the read of an absent object may drop its record. Only an intent holds that
+    /// back: it is written before a create or an update, so its call may have landed with the
+    /// reply lost.
+    ///
+    /// - An intent that names an object was never read back: the absence may be a lagging
+    ///   read, and the record stays until a run reads the object.
+    /// - An intent that names none may belong to a create that did land, or to one that did not
+    ///   (a reply lost to a timeout). It is dropped only on a definitive absence: besides the
+    ///   read the caller made, two more passes, each reading the object by name and listing
+    ///   the owner's objects, find nothing. Any read that fails (transient, in flight,
+    ///   unknown) stops the run with the record kept.
+    ///
+    /// The passes cannot see past a lag longer than the reads they make. A reap then leaves an
+    /// object that carries our stamp and has no record, which the next plan reports.
+    fn witnessed(&mut self, record: &Record, node: &Node) -> Result<(), EngineError> {
+        if record.state != State::Intent {
+            return Ok(());
+        }
+        if record.physical.is_some() {
+            return Err(EngineError::Unwitnessed(record.path.clone()));
+        }
+        for _ in 0..2 {
+            if self.seen(record, node)? {
+                return Err(EngineError::StillPresent(record.path.clone()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether either a read by name or a listing of the owner's objects shows the object of
+    /// `record`.
+    fn seen(&mut self, record: &Record, node: &Node) -> Result<bool, EngineError> {
+        let scope = OwnerScope::new(record.path.owner());
+        let listed = self
+            .provider
+            .list_owned(&scope)?
+            .iter()
+            .any(|o| o.kind == record.kind && o.name == record.name);
+        Ok(listed
+            || matches!(
+                self.observe_node(node, Some(record))?,
+                Observation::Present(_)
+            ))
+    }
+
     /// Removes the object of the node at `path` and its record, if the object is ours (stamp and
     /// record), created by this tool, deletable and not data. The record goes only when a read
     /// shows the object gone.
@@ -39,7 +73,7 @@ impl Engine<'_> {
         let node = node_of(&record);
         let live = match self.observe_node(&node, Some(&record))? {
             Observation::Absent => {
-                witnessed(&record)?;
+                self.witnessed(&record, &node)?;
                 self.commit(&Change::Remove(path.clone()))?;
                 return Ok(Removal::Gone);
             }
@@ -94,9 +128,10 @@ impl Engine<'_> {
         let Some(record) = self.record_of(path)? else {
             return Ok(());
         };
-        match self.observe_node(&node_of(&record), Some(&record))? {
+        let node = node_of(&record);
+        match self.observe_node(&node, Some(&record))? {
             Observation::Absent => {
-                witnessed(&record)?;
+                self.witnessed(&record, &node)?;
                 self.commit(&Change::Remove(path.clone()))?;
                 report.reaped.push(path.clone());
                 Ok(())

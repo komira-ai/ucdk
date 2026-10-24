@@ -123,3 +123,90 @@ fn the_repository_follows_the_direction_rules() {
     let names = members(&root).expect("members");
     assert_eq!(check_direction(&root, &names), []);
 }
+
+#[test]
+fn direction_sees_target_specific_dependencies() {
+    // Every plain, development and build section, under a cfg expression (which holds dots and
+    // spaces) and under a bare target triple, in the list form and the table form.
+    let manifest = "[package]\nname = \"p\"\n\n\
+        [target.'cfg(target_os = \"linux\")'.dependencies]\na = \"1\"\nb.workspace = true\n\n\
+        [target.\"cfg(any(unix, windows))\".dev-dependencies]\nc = \"1\"\n\n\
+        [target.x86_64-unknown-linux-gnu.build-dependencies]\nd = \"1\"\n\n\
+        [target.'cfg(unix)'.dependencies.e]\npath = \"../e\"\n\n\
+        [target.'cfg(unix)'.features]\nnot-a-dependency = []\n\n\
+        [target.broken]\nnor-this = \"1\"\n";
+    let found: Vec<String> = dependencies(manifest).into_iter().collect();
+    assert_eq!(found, ["a", "b", "c", "d", "e"]);
+
+    // A lower crate cannot reach a higher one through a target-specific section.
+    for section in [
+        "target.'cfg(unix)'.dependencies",
+        "target.'cfg(windows)'.dev-dependencies",
+        "target.aarch64-apple-darwin.build-dependencies",
+    ] {
+        let plan = with_deps(IMPURE, section, "ucdk-engine.workspace = true");
+        let (root, names) = project(
+            "direction-target",
+            &[("ucdk-plan", &plan), ("ucdk-engine", IMPURE)],
+        );
+        let findings = check_direction(&root, &names);
+        assert_eq!(findings.len(), 1, "{section}: {findings:?}");
+        assert_eq!(findings[0].rule, "dependency-direction", "{section}");
+    }
+
+    // A pure crate cannot reach an impure one through one either.
+    let deps = "ucdk-ledger = { path = \"../ucdk-ledger\" }";
+    let pure = with_deps(PURE, "target.'cfg(unix)'.dependencies", deps);
+    let (root, names) = project(
+        "direction-target-pure",
+        &[("some-pure", &pure), ("ucdk-ledger", IMPURE)],
+    );
+    let findings = check_direction(&root, &names);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_eq!(findings[0].rule, "pure-depends-on-impure");
+}
+
+#[test]
+fn direction_resolves_renamed_dependencies() {
+    // The inline form, the dotted form, the table form, and a key that only looks like one.
+    let manifest = "[package]\nname = \"p\"\n\n[dependencies]\n\
+        engine = { package = \"ucdk-engine\", path = \"../ucdk-engine\" }\n\
+        ledger = { path = \"../ucdk-ledger\", package = 'ucdk-ledger' }\n\
+        dotted.package = \"ucdk-plan\"\n\
+        dotted.workspace = true\n\
+        plain = { version = \"1\", features = [\"package-like\"] }\n\
+        text = { description = \"not a package = \\\"x\\\"\" }\n\
+        spaced = {package=\"spaced-real\"}\n\
+        odd = { package = 5 }\n\n\
+        [dev-dependencies.alias]\npackage = \"ucdk-provider\"\npath = \"../x\"\n\n\
+        [dev-dependencies.unrenamed]\npath = \"../y\"\n";
+    let found: Vec<String> = dependencies(manifest).into_iter().collect();
+    assert_eq!(
+        found,
+        [
+            "odd",
+            "plain",
+            "spaced-real",
+            "text",
+            "ucdk-engine",
+            "ucdk-ledger",
+            "ucdk-plan",
+            "ucdk-provider",
+            "unrenamed"
+        ]
+    );
+
+    // A lower crate cannot hide a dependency behind a rename.
+    let plan = with_deps(
+        IMPURE,
+        "dependencies",
+        "up = { package = \"ucdk-engine\", path = \"../ucdk-engine\" }",
+    );
+    let (root, names) = project(
+        "direction-renamed",
+        &[("ucdk-plan", &plan), ("ucdk-engine", IMPURE)],
+    );
+    let findings = check_direction(&root, &names);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(findings[0].detail.contains("ucdk-engine"));
+}

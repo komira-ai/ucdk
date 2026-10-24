@@ -12,9 +12,9 @@ use common::{
     FlakyLedger, Hooked, apply, apply_with, chain, destroy, done, lowered, mutations, objects,
     owned_by_fake, path, paths, records, service_of,
 };
-use ucdk_engine::{EngineError, Outcome, Report};
-use ucdk_ledger::{LedgerError, MemoryLedger, Record, State};
-use ucdk_plan::Lowered;
+use ucdk_engine::{EngineError, Outcome, Refusal, Report};
+use ucdk_ledger::{Change, Ledger as _, LedgerError, MemoryLedger, Record, State};
+use ucdk_plan::{ConflictKind, Lowered};
 use ucdk_provider::{Kind, ProviderError, Refusal as CallRefusal};
 use ucdk_provider_fake::{Fake, Op};
 
@@ -83,6 +83,82 @@ fn a_create_over_an_object_that_is_not_ours_stops_the_run() {
     assert_eq!(f.at, Some(path("db/run")));
     assert_eq!(f.error, EngineError::NotOurs(path("db/run")));
     assert_eq!(fake.object_count(), 1, "only the foreign object");
+}
+
+#[test]
+fn a_foreign_object_found_at_the_re_read_stops_the_run() {
+    let mut fake = Fake::standard();
+    let ledger = MemoryLedger::new();
+    // After both plans, an object with the node's name appears with no stamp, just before the
+    // step reads the node again: the step stops before any intent or create.
+    let at = 2 * chain().nodes().len() + 1;
+    let mut hooked = Hooked::new(&mut fake, at, |fake| {
+        fake.add_foreign(&Kind::service(), "db-run", None);
+    });
+    let f = failure(apply(&mut hooked, &ledger, &chain()));
+    drop(hooked);
+    assert_eq!(f.at, Some(path("db/run")));
+    assert_eq!(f.error, EngineError::NotOurs(path("db/run")));
+    assert!(records(&ledger).is_empty());
+    assert_eq!(mutations(&fake), 0, "the run changed nothing");
+    assert_eq!(fake.object_count(), 1, "only the foreign object");
+}
+
+/// What a later run's plan refuses: the conflicts it names, by path.
+fn refused_as(fake: &mut Fake, ledger: &MemoryLedger) -> Vec<(String, ConflictKind)> {
+    let Outcome::Refused(Refusal::Conflicts(list)) = apply(fake, ledger, &chain()) else {
+        panic!("the run should have been refused for conflicts");
+    };
+    list.into_iter()
+        .map(|c| (c.path.to_string(), c.why))
+        .collect()
+}
+
+#[test]
+fn a_create_refused_over_a_foreign_object_leaves_no_intent() {
+    let mut fake = Fake::standard();
+    let ledger = MemoryLedger::new();
+    // After the plan and the re-read, an object with the node's name appears with no stamp.
+    let at = 2 * chain().nodes().len() + 2;
+    let mut hooked = Hooked::new(&mut fake, at, |fake| {
+        fake.add_foreign(&Kind::service(), "db-run", None);
+    });
+    let f = failure(apply(&mut hooked, &ledger, &chain()));
+    drop(hooked);
+    assert_eq!(f.error, EngineError::NotOurs(path("db/run")));
+    // This run created nothing, so it keeps no record of the node.
+    assert!(!records(&ledger).contains_key(&path("db/run")));
+    // The next run sees a plain foreign object, not one whose stamp was stripped, and changes
+    // nothing.
+    let before = mutations(&fake);
+    assert_eq!(
+        refused_as(&mut fake, &ledger),
+        [("db/run".to_owned(), ConflictKind::Foreign)]
+    );
+    assert_eq!(mutations(&fake), before);
+    assert_eq!(fake.object_count(), 1, "only the foreign object");
+}
+
+#[test]
+fn a_create_refused_over_a_foreign_object_keeps_a_record_another_writer_changed() {
+    let mut fake = Fake::standard();
+    let ledger = MemoryLedger::new();
+    // Between this run's intent and its read of the object that refused the create, another
+    // writer puts a different record at the path: it is theirs, so it stays.
+    let at = 2 * chain().nodes().len() + 2;
+    let theirs = &ledger;
+    let mut hooked = Hooked::new(&mut fake, at, move |fake| {
+        fake.add_foreign(&Kind::service(), "db-run", None);
+        let snapshot = theirs.read().expect("read");
+        let mine = snapshot.records[&path("db/run")].clone();
+        theirs
+            .write(&snapshot.token, Change::Put(mine.in_state(State::Reaping)))
+            .expect("write");
+    });
+    let f = failure(apply(&mut hooked, &ledger, &chain()));
+    drop(hooked);
+    assert_eq!(f.error, EngineError::NotOurs(path("db/run")));
+    assert_eq!(records(&ledger)[&path("db/run")].state, State::Reaping);
 }
 
 #[test]

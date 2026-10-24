@@ -102,6 +102,13 @@ impl Engine<'_> {
             // (our stamp), it is this node's object.
             Err(ProviderError::Refused(CallRefusal::AlreadyExists)) => {
                 match self.observe_node(node, Some(&intent))? {
+                    Observation::Present(live) if !ours(&live, node.path(), None) => {
+                        // Not ours: this run created nothing, so the intent it wrote says
+                        // nothing true. Left in the ledger, it would turn the foreign object
+                        // into a stripped stamp on every later run.
+                        self.withdraw(&intent)?;
+                        Err(EngineError::NotOurs(node.path().clone()))
+                    }
                     Observation::Present(live) => {
                         self.accept(pn, node, Some(intent), &live, report)
                     }
@@ -118,6 +125,15 @@ impl Engine<'_> {
             // Anything else may have changed something: the intent stays for the next run.
             Err(error) => Err(error.into()),
         }
+    }
+
+    /// Removes the record of `intent`, the intent this run wrote, if the record is still
+    /// exactly that: a record another writer has changed since is theirs and stays.
+    fn withdraw(&self, intent: &Record) -> Result<(), EngineError> {
+        if self.record_of(&intent.path)?.as_ref() == Some(intent) {
+            self.commit(&Change::Remove(intent.path.clone()))?;
+        }
+        Ok(())
     }
 
     /// The object is there. If it is ours, bring it to the node and confirm the record;

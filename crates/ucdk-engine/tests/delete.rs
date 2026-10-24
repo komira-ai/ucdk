@@ -631,36 +631,138 @@ fn an_object_that_reappears_before_the_reap_keeps_its_record() {
     assert!(records(&ledger).contains_key(&path("web/public")));
 }
 
-#[test]
-fn an_intent_with_no_object_id_is_not_reaped_when_no_object_is_read() {
+/// An unwanted `web/public` whose record is an intent that names no object (a create whose
+/// reply was lost), with no object of that name left in the world.
+fn dangling_intent() -> (Fake, MemoryLedger) {
     let (mut fake, ledger) = world();
-    let intent = ucdk_ledger::Record::intent(
-        path("web/public"),
-        Kind::new("public"),
-        "web-public",
-        Default::default(),
-    );
+    done(apply(&mut fake, &ledger, &chain()));
+    let record = records(&ledger)[&path("web/public")].clone();
+    let id = physical_of(&ledger, "web/public");
+    ucdk_provider::Provider::delete(&mut fake, &Kind::new("public"), &id).expect("delete");
     let token = ledger.read().expect("read").token;
-    ledger.write(&token, Change::Put(intent)).expect("write");
-    let f = failure(apply(&mut fake, &ledger, &chain_with(5432, false)));
-    assert_eq!(f.error, EngineError::Unwitnessed(path("web/public")));
-    assert_eq!(records(&ledger)[&path("web/public")].state, State::Intent);
+    let nameless = ucdk_ledger::Record {
+        state: State::Intent,
+        physical: None,
+        ..record
+    };
+    ledger.write(&token, Change::Put(nameless)).expect("write");
+    (fake, ledger)
+}
+
+/// The reads of one run that plans twice before it acts: each plan reads the six nodes the
+/// records and the file name, so the step's own first read is the next one.
+const READS_BEFORE_THE_STEP: usize = 12;
+
+fn reads_of(fake: &Fake, op: Op) -> usize {
+    fake.calls().iter().filter(|c| c.op == op).count()
+}
+
+#[test]
+fn an_unwanted_intent_whose_object_is_definitively_gone_is_reaped() {
+    let (mut fake, ledger) = dangling_intent();
+    let before = mutations(&fake);
+    let report = done(apply(&mut fake, &ledger, &chain_with(5432, false)));
+    assert_eq!(report.reaped, paths(&["web/public"]));
+    assert!(!records(&ledger).contains_key(&path("web/public")));
+    assert_eq!(
+        mutations(&fake),
+        before,
+        "no provider call changed anything"
+    );
+    // The record went only after the owner's objects were listed, and the object read by name,
+    // more than once.
+    assert!(reads_of(&fake, Op::ListOwned) >= 2);
+    // Every other record is untouched, and a destroy then takes the rest.
+    assert_eq!(fake.object_count(), 3);
+    done(destroy(&mut fake, &ledger, &chain()));
+    assert_eq!(fake.object_count(), 0);
+    assert!(records(&ledger).is_empty());
+}
+
+#[test]
+fn an_unwanted_intent_is_not_reaped_on_a_lagging_read() {
+    // The object the lost reply made becomes readable only after `lag` reads. Whichever of the
+    // step's reads is the first to show it, the record stays and the run stops.
+    for lag in 1..=4 {
+        let (mut fake, ledger) = dangling_intent();
+        let before = mutations(&fake);
+        let again = ucdk_provider::Node::new(
+            path("web/public"),
+            Kind::new("public"),
+            "web-public",
+            Vec::new(),
+        )
+        .expect("a node");
+        let mut hooked = Hooked::new(&mut fake, READS_BEFORE_THE_STEP + 1, move |fake| {
+            let stamp = ucdk_provider::Stamp::for_node(&path("web/public"));
+            *fake.faults_mut().read_lag = lag;
+            ucdk_provider::Provider::create(fake, &again, &stamp).expect("create");
+            *fake.faults_mut().read_lag = 0;
+        });
+        let f = failure(apply(&mut hooked, &ledger, &chain_with(5432, false)));
+        drop(hooked);
+        assert_eq!(
+            f.error,
+            EngineError::StillPresent(path("web/public")),
+            "lag {lag}"
+        );
+        let record = &records(&ledger)[&path("web/public")];
+        assert_eq!(record.state, State::Intent, "lag {lag}");
+        assert_eq!(record.physical, None, "lag {lag}");
+        // Only the hook's create changed the world.
+        assert_eq!(mutations(&fake), before + 1, "lag {lag}");
+        // Once the object reads, the next run takes it for the record and a destroy removes it.
+        done(apply(&mut fake, &ledger, &chain_with(5432, false)));
+        done(destroy(&mut fake, &ledger, &chain()));
+        assert_eq!(fake.object_count(), 0, "lag {lag}");
+    }
+}
+
+#[test]
+fn an_unwanted_intent_is_not_reaped_on_a_transient_read() {
+    // Each read of the step in turn fails in each way that is not an answer.
+    let errors = [
+        ProviderError::Transient("busy".to_owned()),
+        ProviderError::InFlight("working".to_owned()),
+        ProviderError::Unknown("timed out".to_owned()),
+    ];
+    for error in errors {
+        for read in 1..=5 {
+            let (mut fake, ledger) = dangling_intent();
+            let before = mutations(&fake);
+            let injected = error.clone();
+            let mut hooked = Hooked::new(&mut fake, READS_BEFORE_THE_STEP + read, move |fake| {
+                fake.faults_mut().fail_reads.push(injected);
+            });
+            let f = failure(apply(&mut hooked, &ledger, &chain_with(5432, false)));
+            drop(hooked);
+            assert_eq!(
+                f.error,
+                EngineError::Provider(error.clone()),
+                "{error:?} {read}"
+            );
+            assert_eq!(f.at, Some(path("web/public")), "{error:?} {read}");
+            assert_eq!(records(&ledger)[&path("web/public")].state, State::Intent);
+            assert_eq!(mutations(&fake), before, "{error:?} {read}");
+        }
+    }
 }
 
 #[test]
 fn a_lost_create_reply_and_a_lagging_read_do_not_let_destroy_orphan_the_object() {
     let (mut fake, ledger) = world();
     // The create lands and its reply is lost: the intent names no object. Reads then lag, so
-    // the object reads as absent.
+    // the object reads as absent through the destroy's two plans (six reads each) and the
+    // step's first read, and shows on its second.
     fake.faults_mut().ambiguous_at_call.replace(1);
-    *fake.faults_mut().read_lag = 20;
+    *fake.faults_mut().read_lag = 13;
     let f = failure(apply(&mut fake, &ledger, &chain()));
     assert_eq!(f.at, Some(path("db/run")));
     assert_eq!(fake.object_count(), 1);
 
     // A destroy does not drop the record on that read: the object stays recorded.
     let f = failure(destroy(&mut fake, &ledger, &chain()));
-    assert_eq!(f.error, EngineError::Unwitnessed(path("db/run")));
+    assert_eq!(f.error, EngineError::StillPresent(path("db/run")));
     assert_eq!(fake.object_count(), 1);
     assert_eq!(records(&ledger)[&path("db/run")].state, State::Intent);
 
