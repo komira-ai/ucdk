@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-//! The reconciler engine: it carries a [`ucdk_plan::Plan`] out against a [`Provider`] and a
-//! [`Ledger`], one trait object each.
+//! The reconciler engine: it carries a [`ucdk_plan::Plan`] out against a [`ucdk_provider::Provider`] and a
+//! [`ucdk_ledger::Ledger`], one trait object each.
 //!
 //! The whole surface is one pair of plain enums, [`Request`] and [`Outcome`], handled by
 //! [`Engine::handle`]. They are not a wire format: a later shared library wraps exactly this

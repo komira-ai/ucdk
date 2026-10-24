@@ -819,3 +819,16 @@ fn each_finding_reads_as_a_sentence_naming_its_resource() {
         assert!(seen.insert(whole), "two findings read the same");
     }
 }
+
+#[test]
+fn unwanted_view_keeps_every_node_and_wants_none() {
+    let l = lowered(vec![service_of("a"), service_of("b")]);
+    assert!(l.nodes().iter().any(|n| n.wanted));
+    let view = l.unwanted();
+    assert_eq!(paths(&view), paths(&l));
+    assert!(view.nodes().iter().all(|n| !n.wanted));
+    assert!(
+        l.nodes().iter().any(|n| n.wanted),
+        "the original is unchanged"
+    );
+}

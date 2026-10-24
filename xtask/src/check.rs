@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::cmd::{Cmd, Runner};
 use crate::event::{Event, commit_base};
-use crate::{Finding, coverage, dco, fetch, lint, purity, runlines, spdx, tree};
+use crate::{Finding, coverage, dco, direction, fetch, lint, purity, runlines, spdx, tree};
 
 /// One gate's name, what it found, and what it examined (printed with the result).
 pub type Gate = (&'static str, Vec<Finding>, String);
@@ -128,6 +128,11 @@ pub fn run(root: &Path, runner: &dyn Runner, event: &Event, flag: Option<&str>) 
         (
             "purity",
             purity::check_purity(root, &members),
+            plural(members.len(), "crate", "crates"),
+        ),
+        (
+            "direction",
+            direction::check_direction(root, &members),
             plural(members.len(), "crate", "crates"),
         ),
         (

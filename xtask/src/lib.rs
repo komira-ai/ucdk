@@ -10,6 +10,7 @@ pub mod cli;
 pub mod cmd;
 pub mod coverage;
 pub mod dco;
+pub mod direction;
 pub mod event;
 pub mod fetch;
 pub mod lint;

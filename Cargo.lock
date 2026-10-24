@@ -554,6 +554,24 @@ name = "ucdk-cli"
 version = "0.0.0"
 
 [[package]]
+name = "ucdk-engine"
+version = "0.0.0"
+dependencies = [
+ "ucdk-ledger",
+ "ucdk-plan",
+ "ucdk-proto",
+ "ucdk-provider",
+ "ucdk-provider-fake",
+]
+
+[[package]]
+name = "ucdk-ledger"
+version = "0.0.0"
+dependencies = [
+ "ucdk-provider",
+]
+
+[[package]]
 name = "ucdk-plan"
 version = "0.0.0"
 dependencies = [

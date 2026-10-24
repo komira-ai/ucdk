@@ -48,6 +48,21 @@ impl Lowered {
     pub fn nodes(&self) -> &[PlanNode] {
         &self.nodes
     }
+
+    /// The same nodes with none of them wanted: the desired state of a destroy. Planning
+    /// against it removes what the file names and leaves everything else alone.
+    #[must_use]
+    pub fn unwanted(&self) -> Self {
+        let nodes = self
+            .nodes
+            .iter()
+            .map(|n| PlanNode {
+                wanted: false,
+                ..n.clone()
+            })
+            .collect();
+        Self { nodes }
+    }
 }
 
 fn path(id: &str, role: &str) -> NodePath {
