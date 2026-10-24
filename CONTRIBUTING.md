@@ -18,7 +18,7 @@ Everything is plain cargo. The checks are the Rust crate `xtask`; the pull-reque
 one verb per job, and you can run the same verbs locally.
 
 - `cargo xtask check`: `cargo fmt --check`, clippy with warnings denied, cargo-deny
-  (licences, bans, sources), SPDX headers, the workflow run-line rule, the public-repository lint
+  (licences, bans, sources), SPDX headers, the workflow run-line rule, the dependency-direction rule (the planning and provider crates never depend on the ledger or engine, and a pure crate never depends on an impure one), the public-repository lint
   and the sign-off check. Each gate prints what it examined (for example `dco: ok (3 commits
   checked)`). In a pull-request run it reads the base commit, title and body from the
   event file the platform provides; locally, `--base <commit-or-ref>` checks the commits since it.

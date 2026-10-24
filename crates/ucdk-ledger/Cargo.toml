@@ -1,0 +1,15 @@
+[package]
+name = "ucdk-ledger"
+description = "The ledger: what a run records about the objects it owns, behind a compare-and-swap trait, with an in-memory implementation."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+ucdk-provider = { path = "../ucdk-provider" }
+
+[lints]
+workspace = true

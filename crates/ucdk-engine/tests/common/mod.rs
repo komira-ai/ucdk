@@ -1,0 +1,322 @@
+// SPDX-License-Identifier: Apache-2.0
+#![allow(dead_code)]
+//! Helpers shared by the engine's tests: resource lists, a driver that plans and then applies,
+//! a provider that runs code before a chosen call, and a ledger that can be made to fail.
+
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+use ucdk_engine::{Engine, Mode, Outcome, Report, Request};
+use ucdk_ledger::{Change, Ledger, LedgerError, MemoryLedger, Record, Snapshot, Token};
+use ucdk_plan::{Lowered, Plan, lower};
+use ucdk_proto::v1::resource::Body;
+use ucdk_proto::v1::{Access, Image, Ref, Resource, ResourceList, Service, Uses, image, service};
+use ucdk_provider::{
+    Created, Deletability, Kind, Live, Node, NodePath, Observation, OwnedObject, OwnerScope,
+    PhysicalId, Provider, ProviderError, StampMode, StateClass, Updated,
+};
+use ucdk_provider_fake::Fake;
+
+// ---- resource lists --------------------------------------------------------------------------
+
+/// A service with the given port; `public` turns its public role on.
+pub fn service_of(id: &str, port: u32, public: bool, uses: &[&str]) -> Resource {
+    let exposure = public.then_some(service::Exposure::Public(service::Public {}));
+    Resource {
+        id: id.to_owned(),
+        body: Some(Body::Service(Service {
+            image: Some(Image {
+                source: Some(image::Source::Digest("sha256:aa".to_owned())),
+                platform: String::new(),
+            }),
+            port,
+            exposure,
+            ..Service::default()
+        })),
+        uses: uses
+            .iter()
+            .map(|target| Uses {
+                target: Some(Ref {
+                    resource: (*target).to_owned(),
+                    output: None,
+                }),
+                access: Access::Call as i32,
+            })
+            .collect(),
+    }
+}
+
+pub fn lowered(resources: Vec<Resource>) -> Lowered {
+    lower(&ResourceList {
+        resource: resources,
+    })
+    .expect("the list lowers")
+}
+
+/// `web` (public) calls `api`, which calls `db`: four wanted nodes, `db/run`, `api/run`,
+/// `web/run` and `web/public`.
+pub fn chain() -> Lowered {
+    chain_with(5432, true)
+}
+
+pub fn chain_with(db_port: u32, web_public: bool) -> Lowered {
+    lowered(vec![
+        service_of("web", 80, web_public, &["api"]),
+        service_of("api", 81, false, &["db"]),
+        service_of("db", db_port, false, &[]),
+    ])
+}
+
+pub fn path(text: &str) -> NodePath {
+    NodePath::new(text).expect("a valid path")
+}
+
+pub fn paths(list: &[&str]) -> Vec<NodePath> {
+    list.iter().map(|p| path(p)).collect()
+}
+
+// ---- drivers ---------------------------------------------------------------------------------
+
+pub fn plan_of(provider: &mut dyn Provider, ledger: &dyn Ledger, desired: &Lowered) -> Outcome {
+    Engine::new(provider, ledger).handle(Request::Plan {
+        desired: desired.clone(),
+        mode: Mode::Apply,
+    })
+}
+
+/// Plans, then applies the plan under its own hash, as an approver would.
+pub fn apply_with(
+    provider: &mut dyn Provider,
+    ledger: &dyn Ledger,
+    desired: &Lowered,
+    rollback: bool,
+) -> Outcome {
+    let plan = match plan_of(provider, ledger, desired) {
+        Outcome::Planned(plan) => plan,
+        other => return other,
+    };
+    let plan_hash = plan.hash().clone();
+    Engine::new(provider, ledger).handle(Request::Apply {
+        desired: desired.clone(),
+        plan,
+        plan_hash,
+        rollback,
+    })
+}
+
+pub fn apply(provider: &mut dyn Provider, ledger: &dyn Ledger, desired: &Lowered) -> Outcome {
+    apply_with(provider, ledger, desired, false)
+}
+
+/// Plans a destroy of `desired`, then runs it under that plan's hash.
+pub fn destroy(provider: &mut dyn Provider, ledger: &dyn Ledger, desired: &Lowered) -> Outcome {
+    let plan = match Engine::new(provider, ledger).handle(Request::Plan {
+        desired: desired.clone(),
+        mode: Mode::Destroy,
+    }) {
+        Outcome::Planned(plan) => plan,
+        other => return other,
+    };
+    let plan_hash = plan.hash().clone();
+    Engine::new(provider, ledger).handle(Request::Destroy {
+        desired: desired.clone(),
+        plan,
+        plan_hash,
+    })
+}
+
+/// The report of a run that finished.
+pub fn done(outcome: Outcome) -> Report {
+    match outcome {
+        Outcome::Done(report) => report,
+        other => panic!("the run did not finish: {other:?}"),
+    }
+}
+
+pub fn planned(outcome: Outcome) -> Plan {
+    match outcome {
+        Outcome::Planned(plan) => plan,
+        other => panic!("not a plan: {other:?}"),
+    }
+}
+
+// ---- looking at the world --------------------------------------------------------------------
+
+/// The mutating calls the fake has logged so far.
+pub fn mutations(fake: &Fake) -> usize {
+    fake.calls().iter().filter(|c| c.op.mutates()).count()
+}
+
+/// The objects of the fake, one per line (ids, names, labels, fields), without the call log.
+pub fn objects(fake: &Fake) -> String {
+    let dump = fake.dump();
+    let end = dump.find("calls:").expect("the dump has a call section");
+    dump[..end].to_owned()
+}
+
+pub fn records(ledger: &MemoryLedger) -> BTreeMap<NodePath, Record> {
+    ledger.read().expect("read").records
+}
+
+pub fn physical_of(ledger: &MemoryLedger, p: &str) -> PhysicalId {
+    records(ledger)[&path(p)]
+        .physical
+        .clone()
+        .expect("the record names an object")
+}
+
+/// Every object of every owner the ledger records, by physical id.
+pub fn owned_by_fake(fake: &mut Fake, owners: &[&str]) -> Vec<PhysicalId> {
+    let mut found = Vec::new();
+    for owner in owners {
+        let scope = OwnerScope::new(ucdk_provider::OwnerLabel::new(owner).expect("owner"));
+        found.extend(
+            fake.list_owned(&scope)
+                .expect("list")
+                .into_iter()
+                .map(|o: OwnedObject| o.physical),
+        );
+    }
+    found.sort();
+    found
+}
+
+// ---- a provider that runs code before a chosen call ------------------------------------------
+
+type Hook<'f> = Box<dyn FnOnce(&mut Fake) + Send + 'f>;
+
+/// The fake, with code run just before the `at`th call that reads or mutates (counted from 1).
+pub struct Hooked<'f> {
+    fake: &'f mut Fake,
+    calls: usize,
+    at: usize,
+    hook: Option<Hook<'f>>,
+}
+
+impl<'f> Hooked<'f> {
+    pub fn new(fake: &'f mut Fake, at: usize, hook: impl FnOnce(&mut Fake) + Send + 'f) -> Self {
+        Self {
+            fake,
+            calls: 0,
+            at,
+            hook: Some(Box::new(hook)),
+        }
+    }
+
+    /// How many reading and mutating calls have been made.
+    pub fn calls(&self) -> usize {
+        self.calls
+    }
+
+    fn tick(&mut self) {
+        self.calls += 1;
+        if self.calls == self.at
+            && let Some(hook) = self.hook.take()
+        {
+            hook(self.fake);
+        }
+    }
+}
+
+impl Provider for Hooked<'_> {
+    fn state_class(&self, kind: &Kind) -> StateClass {
+        self.fake.state_class(kind)
+    }
+
+    fn deletability(&self, kind: &Kind, live: &Live) -> Deletability {
+        self.fake.deletability(kind, live)
+    }
+
+    fn stamp_mode(&self, kind: &Kind) -> StampMode {
+        self.fake.stamp_mode(kind)
+    }
+
+    fn observe(
+        &mut self,
+        node: &Node,
+        hint: Option<&PhysicalId>,
+    ) -> Result<Observation, ProviderError> {
+        self.tick();
+        self.fake.observe(node, hint)
+    }
+
+    fn create(
+        &mut self,
+        node: &Node,
+        stamp: &ucdk_provider::Stamp,
+    ) -> Result<Created, ProviderError> {
+        self.tick();
+        self.fake.create(node, stamp)
+    }
+
+    fn update(&mut self, node: &Node, live: &Live) -> Result<Updated, ProviderError> {
+        self.tick();
+        self.fake.update(node, live)
+    }
+
+    fn delete(&mut self, kind: &Kind, physical: &PhysicalId) -> Result<(), ProviderError> {
+        self.tick();
+        self.fake.delete(kind, physical)
+    }
+
+    fn list_owned(&mut self, scope: &OwnerScope) -> Result<Vec<OwnedObject>, ProviderError> {
+        self.tick();
+        self.fake.list_owned(scope)
+    }
+}
+
+// ---- a ledger that can be made to fail -------------------------------------------------------
+
+/// A memory ledger that counts writes and can fail the `n`th write, fail every read, or report
+/// every write as stale.
+#[derive(Debug, Default)]
+pub struct FlakyLedger {
+    pub inner: MemoryLedger,
+    writes: AtomicU64,
+    fail_write_at: AtomicU64,
+    fail_reads: AtomicBool,
+    always_stale: AtomicBool,
+}
+
+impl FlakyLedger {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn writes(&self) -> u64 {
+        self.writes.load(Ordering::SeqCst)
+    }
+
+    /// Fails the `n`th write from the start (1-based); 0 clears it.
+    pub fn fail_write_at(&self, n: u64) {
+        self.fail_write_at.store(n, Ordering::SeqCst);
+    }
+
+    pub fn fail_reads(&self, on: bool) {
+        self.fail_reads.store(on, Ordering::SeqCst);
+    }
+
+    pub fn always_stale(&self, on: bool) {
+        self.always_stale.store(on, Ordering::SeqCst);
+    }
+}
+
+impl Ledger for FlakyLedger {
+    fn read(&self) -> Result<Snapshot, LedgerError> {
+        if self.fail_reads.load(Ordering::SeqCst) {
+            return Err(LedgerError::Unavailable("reads are down".to_owned()));
+        }
+        self.inner.read()
+    }
+
+    fn write(&self, expected: &Token, change: Change) -> Result<Token, LedgerError> {
+        let n = self.writes.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.fail_write_at.load(Ordering::SeqCst) == n {
+            return Err(LedgerError::Unavailable("the write was lost".to_owned()));
+        }
+        if self.always_stale.load(Ordering::SeqCst) {
+            return Err(LedgerError::Stale);
+        }
+        self.inner.write(expected, change)
+    }
+}
