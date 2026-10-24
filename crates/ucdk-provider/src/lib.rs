@@ -35,4 +35,4 @@ pub use observe::{
     Status, Updated,
 };
 pub use provider::Provider;
-pub use stamp::{SCHEME, Stamp, StampEvidence, StampMode};
+pub use stamp::{NAME_SUFFIX_MAX, SCHEME, Stamp, StampEvidence, StampMode};

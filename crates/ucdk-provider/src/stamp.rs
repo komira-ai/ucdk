@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use crate::cell::{CellIdentity, CellName, CellUid};
-use crate::ids::{NodeKey, NodePath, OwnerLabel};
+use crate::ids::{NODE_KEY_LEN, NodeKey, NodePath, OwnerLabel, SEGMENT_MAX};
 
 /// The stamp scheme: scheme 1 identifies a node by its [`NodeKey`] and its cell by the
 /// machine, the cell name and the cell id. The byte reaches cloud tags, names and the ledger,
@@ -13,6 +13,14 @@ use crate::ids::{NodeKey, NodePath, OwnerLabel};
 pub const SCHEME: u8 = 1;
 
 const NAME_MARK: &str = "~ucdk";
+
+/// The most bytes [`Stamp::encode_name`] adds to a base name: the mark, a one-digit scheme and
+/// five separators, then the machine, the cell name, the owner (each at most [`SEGMENT_MAX`]),
+/// the cell id and the node key ([`NODE_KEY_LEN`] each). The suffix is fixed by the stamp and
+/// not by the base name, so a provider checks `base.len() + NAME_SUFFIX_MAX` against its own
+/// name limit; a create whose encoded name would not fit is `Refused(Rejected)` and changes
+/// nothing. Like the other lengths it reaches physical names, so it is a format promise.
+pub const NAME_SUFFIX_MAX: usize = NAME_MARK.len() + 1 + 5 + 3 * SEGMENT_MAX + 2 * NODE_KEY_LEN;
 
 /// Which cell owns an object, who owns it within the cell and which node it is. `extra` is an open label map for values added
 /// later (a validation run id, a composite depth) without changing what the stamp means; it
@@ -66,6 +74,12 @@ impl Stamp {
             self.owner,
             self.node
         )
+    }
+
+    /// How many bytes [`Stamp::encode_name`] adds to a base name for this stamp; never more
+    /// than [`NAME_SUFFIX_MAX`].
+    pub fn name_suffix_len(&self) -> usize {
+        self.encode_name("").len()
     }
 
     /// Splits a physical name into its base name and the stamp it carries. A name that does

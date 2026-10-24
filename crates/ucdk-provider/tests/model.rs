@@ -3,9 +3,9 @@
 
 use ucdk_provider::kit;
 use ucdk_provider::{
-    CellName, CellScope, CellUid, DesiredField, FieldValue, Kind, ModelError, NODE_KEY_LEN, Node,
-    NodeKey, NodePath, OwnerLabel, OwnerScope, PhysicalId, ProviderError, Refusal, SCHEME,
-    SEGMENT_MAX, Stamp, StampEvidence, StampMode,
+    CellName, CellScope, CellUid, DesiredField, FieldValue, Kind, ModelError, NAME_SUFFIX_MAX,
+    NODE_KEY_LEN, Node, NodeKey, NodePath, OwnerLabel, OwnerScope, PhysicalId, ProviderError,
+    Refusal, SCHEME, SEGMENT_MAX, Stamp, StampEvidence, StampMode,
 };
 
 /// The id of `kit::cell()`.
@@ -175,6 +175,28 @@ fn a_stamp_survives_being_encoded_in_a_name() {
         Stamp::decode_name(&name),
         ("my~job".to_owned(), Some(stamp))
     );
+}
+
+#[test]
+fn the_name_suffix_budget_covers_the_longest_stamp() {
+    // The longest stamp: every segment at its limit.
+    let long = "a".repeat(SEGMENT_MAX);
+    let cell = ucdk_provider::CellIdentity::new(
+        CellName::new(&long).unwrap(),
+        CellName::new(&long).unwrap(),
+        CellUid::from_text(CELL_UID).unwrap(),
+    );
+    let path = NodePath::new(&format!("{long}/{long}")).unwrap();
+    let stamp = Stamp::for_node(&cell, &path);
+    let name = stamp.encode_name("base");
+    assert_eq!(NAME_SUFFIX_MAX, 159);
+    assert_eq!(stamp.name_suffix_len(), NAME_SUFFIX_MAX);
+    assert_eq!(name.len(), "base".len() + NAME_SUFFIX_MAX);
+    assert_eq!(Stamp::decode_name(&name), ("base".to_owned(), Some(stamp)));
+
+    // A short stamp adds less, never more.
+    let short = Stamp::for_node(&kit::cell(), &NodePath::new("a/b").unwrap());
+    assert!(short.name_suffix_len() < NAME_SUFFIX_MAX);
 }
 
 #[test]
