@@ -3,9 +3,9 @@
 
 mod common;
 
-use common::{job, service, stamp};
+use common::{job, node, service, stamp};
 use ucdk_provider::{
-    Kind, Observation, OwnerScope, Provider, ProviderError, Refusal, StampEvidence,
+    Kind, Observation, OwnerScope, PhysicalId, Provider, ProviderError, Refusal, StampEvidence,
 };
 use ucdk_provider_fake::{Fake, FakeConfig, Faults, ForeignObject, Op};
 
@@ -284,12 +284,60 @@ fn a_failed_read_counts_toward_read_lag() {
 }
 
 #[test]
-fn a_deleted_object_is_gone_at_the_next_read_even_under_read_lag() {
+fn a_deleted_object_is_still_observed_for_n_reads_under_read_lag() {
     let mut fake = with(Faults::default());
     let a = service("app/a", "a");
+    let scope = OwnerScope::new(a.path().owner());
     let created = fake.create(&a, &stamp(&a)).expect("create");
     assert!(present(&mut fake, &a));
     fake.faults_mut().read_lag = 3;
     fake.delete(a.kind(), &created.physical).expect("delete");
-    assert!(!present(&mut fake, &a), "read lag delays creation only");
+    assert_eq!(fake.object_count(), 0);
+    assert!(
+        present(&mut fake, &a),
+        "stale read 1 sees the deleted object"
+    );
+    assert_eq!(
+        fake.list_owned(&scope),
+        Ok(vec![]),
+        "read 2: a list tells the truth"
+    );
+    let hinted = fake.observe(&a, Some(&created.physical));
+    assert!(
+        matches!(hinted, Ok(Observation::Present(_))),
+        "stale read 3, by hint"
+    );
+    assert!(!present(&mut fake, &a), "read 4 is past the lag of 3");
+}
+
+#[test]
+fn a_stale_read_matches_the_deleted_object_by_kind_name_and_hint_only() {
+    let mut fake = with(Faults {
+        read_lag: 9,
+        ..Faults::default()
+    });
+    let a = service("app/a", "a");
+    let created = fake.create(&a, &stamp(&a)).expect("create");
+    fake.delete(a.kind(), &created.physical).expect("delete");
+    let other_name = service("app/b", "b");
+    let other_kind = node("app/a", Kind::job(), "a", 80);
+    assert!(!present(&mut fake, &other_name), "another name");
+    assert!(!present(&mut fake, &other_kind), "another kind");
+    let elsewhere = PhysicalId::new("fake-000042");
+    assert_eq!(
+        fake.observe(&a, Some(&elsewhere)),
+        Ok(Observation::Absent),
+        "another id"
+    );
+    assert!(present(&mut fake, &a), "the same kind and name");
+}
+
+#[test]
+fn a_deleted_object_is_gone_at_the_next_read_without_read_lag() {
+    let mut fake = with(Faults::default());
+    let a = service("app/a", "a");
+    let created = fake.create(&a, &stamp(&a)).expect("create");
+    assert!(present(&mut fake, &a));
+    fake.delete(a.kind(), &created.physical).expect("delete");
+    assert!(!present(&mut fake, &a));
 }

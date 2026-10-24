@@ -19,6 +19,9 @@ use crate::store::{Object, labels_of};
 pub struct Fake {
     pub(crate) config: FakeConfig,
     pub(crate) objects: BTreeMap<PhysicalId, Object>,
+    /// Deleted objects that `observe` still reports (read lag), with the read count from
+    /// which they are gone. `list_owned` never shows them.
+    gone: BTreeMap<PhysicalId, (Object, u64)>,
     pub(crate) calls: Vec<Call>,
     next_id: u64,
     mutations: u64,
@@ -30,6 +33,7 @@ impl Fake {
         let mut fake = Self {
             config,
             objects: BTreeMap::new(),
+            gone: BTreeMap::new(),
             calls: Vec::new(),
             next_id: 0,
             mutations: 0,
@@ -226,6 +230,23 @@ impl Fake {
         }
     }
 
+    /// A deleted object that a read still reports: the one `hint` names, or the one with the
+    /// node's kind and name, while the reads made since its delete are within the read lag.
+    fn stale(&self, node: &Node, hint: Option<&PhysicalId>, read: u64) -> Option<Live> {
+        self.gone
+            .iter()
+            .filter(|(id, (o, until))| {
+                read < *until
+                    && &o.kind == node.kind()
+                    && match hint {
+                        Some(h) => *id == h,
+                        None => o.base == node.name(),
+                    }
+            })
+            .map(|(id, (o, _))| self.live_of(id, o))
+            .next()
+    }
+
     fn taken(&self, kind: &Kind, base: &str) -> bool {
         self.objects
             .values()
@@ -319,7 +340,13 @@ impl Fake {
         if self.config.deletion_forbidden.contains(kind) && !object.unmodelled.is_empty() {
             return Err(ProviderError::Refused(Refusal::Rejected));
         }
+        let stale = object.clone();
         self.objects.remove(physical);
+        let lag = self.config.faults.read_lag;
+        if lag > 0 {
+            self.gone
+                .insert(physical.clone(), (stale, self.reads + lag));
+        }
         Ok(())
     }
 }
@@ -377,9 +404,12 @@ impl Provider for Fake {
                 .iter()
                 .find(|(_, o)| &o.kind == node.kind() && o.base == node.name()),
         };
-        let seen = found
-            .filter(|(_, o)| o.visible_at <= read && &o.kind == node.kind())
-            .map(|(id, o)| self.live_of(id, o));
+        let seen = match found {
+            Some((id, o)) => {
+                (o.visible_at <= read && &o.kind == node.kind()).then(|| self.live_of(id, o))
+            }
+            None => self.stale(node, hint, read),
+        };
         let call = Self::plain_call(
             Op::Observe,
             Some(node.kind().clone()),

@@ -21,10 +21,11 @@ pub struct Faults {
     /// The `k`th mutation (create, update or delete, counted from 1) is refused once, and
     /// changes nothing. The calls after it proceed.
     pub fail_at_call: Option<u64>,
-    /// A created object is hidden from the first `n` reads (observe or list) after the
-    /// create, as with an eventually consistent cloud. Only creation lags: a deleted object
-    /// is gone at the next read, and `list_owned` lags exactly as `observe` does (a
-    /// listing is a read like any other). A read that fails by `fail_reads` still counts.
+    /// Reads are eventually consistent, for `n` reads after the change. A created object is
+    /// hidden from the next `n` reads (observe or list); a deleted object is still reported
+    /// by the next `n` `observe` reads, which see it as present with its old state.
+    /// `list_owned` lags for a create exactly as `observe` does, but after a delete it
+    /// tells the truth at once. A read that fails by `fail_reads` still counts.
     pub read_lag: u64,
     /// Objects present from the start.
     pub foreign: Vec<ForeignObject>,
