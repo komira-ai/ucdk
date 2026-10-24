@@ -312,36 +312,54 @@ fn a_delete_whose_object_is_still_read_is_not_reaped() {
 }
 
 #[test]
-fn a_reap_against_a_lagging_read_never_drops_a_record_it_can_still_see() {
-    // An object whose creation is not yet visible looks gone to the plan. Whatever the lag, a
-    // run either reaps (the object really was not there) or stops with the record kept.
-    let mut stopped = 0;
-    for lag in 1..=14 {
+fn a_reap_against_a_lagging_read_never_orphans_an_object() {
+    // The create is not readable for `lag` reads. Whatever the lag, a run either stops with the
+    // record kept or finishes with no object left that has no record.
+    for lag in (0..=14).chain([1000]) {
         let (mut fake, ledger) = world();
         *fake.faults_mut().read_lag = lag;
         done(apply(&mut fake, &ledger, &chain()));
         *fake.faults_mut().read_lag = 0;
         match apply(&mut fake, &ledger, &chain_with(5432, false)) {
-            Outcome::Failed(f) => {
-                assert_eq!(
-                    f.error,
-                    EngineError::StillPresent(path("web/public")),
-                    "lag {lag}"
-                );
-                assert!(
-                    records(&ledger).contains_key(&path("web/public")),
-                    "lag {lag}"
-                );
-                stopped += 1;
-            }
-            Outcome::Done(_) | Outcome::Refused(_) => {}
+            Outcome::Done(_) | Outcome::Failed(_) | Outcome::Refused(_) => {}
             other => panic!("lag {lag}: {other:?}"),
         }
+        assert!(
+            fake.object_count() <= records(&ledger).len(),
+            "lag {lag}: an object has no record"
+        );
     }
-    assert!(
-        stopped > 0,
-        "some lag makes the object appear between the plan and the reap"
+}
+
+#[test]
+fn an_object_never_read_back_after_its_create_is_not_reaped_when_a_read_shows_none() {
+    let (mut fake, ledger) = world();
+    done(apply(&mut fake, &ledger, &chain_with(5432, false)));
+    // web/public is created now, but nothing reads it for a long while.
+    *fake.faults_mut().read_lag = 1000;
+    done(apply(&mut fake, &ledger, &chain()));
+    *fake.faults_mut().read_lag = 0;
+    let objects_before = fake.object_count();
+
+    let f = failure(apply(&mut fake, &ledger, &chain_with(5432, false)));
+    assert_eq!(f.error, EngineError::Unwitnessed(path("web/public")));
+    assert!(records(&ledger).contains_key(&path("web/public")));
+    assert_eq!(fake.object_count(), objects_before);
+}
+
+#[test]
+fn an_object_read_back_after_its_create_is_reaped_when_it_is_gone() {
+    let (mut fake, ledger) = world();
+    done(apply(&mut fake, &ledger, &chain()));
+    assert_eq!(
+        records(&ledger)[&path("web/public")].state,
+        State::Confirmed
     );
+    let id = physical_of(&ledger, "web/public");
+    ucdk_provider::Provider::delete(&mut fake, &Kind::new("public"), &id).expect("delete");
+    let report = done(apply(&mut fake, &ledger, &chain_with(5432, false)));
+    assert_eq!(report.reaped, paths(&["web/public"]));
+    assert!(!records(&ledger).contains_key(&path("web/public")));
 }
 
 #[test]

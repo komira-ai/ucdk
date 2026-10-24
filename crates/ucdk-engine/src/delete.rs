@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The removing steps: delete, reap, and rollback.
 
-use ucdk_ledger::{Change, Origin, State};
+use ucdk_ledger::{Change, Origin, Record, State};
 use ucdk_plan::Retained;
 use ucdk_provider::{Deletability, NodePath, Observation, StateClass};
 
@@ -17,6 +17,15 @@ enum Removal {
     Kept(Retained),
 }
 
+/// An absent read drops a record only if the object was read after it was created. An intent
+/// that names an object was created but never read back, so its absence may be a lagging read.
+fn witnessed(record: &Record) -> Result<(), EngineError> {
+    if record.state == State::Intent && record.physical.is_some() {
+        return Err(EngineError::Unwitnessed(record.path.clone()));
+    }
+    Ok(())
+}
+
 impl Engine<'_> {
     /// Removes the object of the node at `path` and its record, if the object is ours (stamp and
     /// record), created by this tool, deletable and not data. The record goes only when a read
@@ -28,6 +37,7 @@ impl Engine<'_> {
         let node = node_of(&record);
         let live = match self.observe_node(&node, Some(&record))? {
             Observation::Absent => {
+                witnessed(&record)?;
                 self.commit(&Change::Remove(path.clone()))?;
                 return Ok(Removal::Gone);
             }
@@ -84,6 +94,7 @@ impl Engine<'_> {
         };
         match self.observe_node(&node_of(&record), Some(&record))? {
             Observation::Absent => {
+                witnessed(&record)?;
                 self.commit(&Change::Remove(path.clone()))?;
                 report.reaped.push(path.clone());
                 Ok(())

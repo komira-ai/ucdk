@@ -21,6 +21,9 @@ pub enum EngineError {
     NotOurs(NodePath),
     /// An object that was expected to be gone is there.
     StillPresent(NodePath),
+    /// A read shows no object, but the run that created it never read it back: the read may
+    /// only be lagging, so the record stays until the object is seen.
+    Unwitnessed(NodePath),
 }
 
 impl From<ProviderError> for EngineError {
@@ -43,6 +46,10 @@ impl fmt::Display for EngineError {
             Self::LedgerBusy => f.write_str("the ledger kept changing under the run"),
             Self::NotOurs(p) => write!(f, "{p}: the object is not ours (stamp and record)"),
             Self::StillPresent(p) => write!(f, "{p}: the object is there when it should be gone"),
+            Self::Unwitnessed(p) => write!(
+                f,
+                "{p}: no object is read, but none was ever read back after its create"
+            ),
         }
     }
 }

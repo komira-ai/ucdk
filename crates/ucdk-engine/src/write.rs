@@ -79,9 +79,24 @@ impl Engine<'_> {
         self.commit(&Change::Put(intent.clone()))?;
         match self.provider.create(node, &Stamp::for_node(node.path())) {
             Ok(created) => {
-                self.commit(&Change::Put(intent.confirmed(created.physical)))?;
                 report.created.push(node.path().clone());
-                Ok(())
+                // The record is confirmed only once a read shows the object. A read that
+                // does not (it may lag behind the create) leaves the intent, now naming the
+                // object, so that a later read of "gone" is never taken for proof.
+                let named = Record {
+                    physical: Some(created.physical.clone()),
+                    ..intent.clone()
+                };
+                match self.observe_node(node, Some(&named)) {
+                    Ok(Observation::Present(_)) => {
+                        self.commit(&Change::Put(intent.confirmed(created.physical)))
+                    }
+                    Ok(Observation::Absent) => self.commit(&Change::Put(named)),
+                    Err(error) => {
+                        self.commit(&Change::Put(named))?;
+                        Err(error)
+                    }
+                }
             }
             // Another client made the object between the read and the create. If it is ours
             // (our stamp), it is this node's object.
