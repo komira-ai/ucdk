@@ -80,8 +80,14 @@ fn package_and_reserved_names_are_as_declared() {
         .map(|r| (r.start, r.end))
         .collect();
     assert_eq!(ranges, [(4, 5)]);
+    let outside: Vec<String> = pool
+        .all_messages()
+        .filter(|m| m.parent_file().name().starts_with("ucdk/"))
+        .map(|m| m.full_name().to_owned())
+        .filter(|name| !name.starts_with("ucdk.resource.v1."))
+        .collect();
     assert!(
-        pool.get_message_by_name("kci.resource.v1.Resource")
-            .is_none()
+        outside.is_empty(),
+        "messages outside the package: {outside:?}"
     );
 }
