@@ -1,6 +1,6 @@
 objects:
-  fake-000002 job name=nightly~ucdk1~app~d2liqk276wgmx3tqp4x4vljqre labels=[] fields=[label="a",port=80,public=false] unmodelled=[]
-  fake-000003 service name=legacy labels=[] fields=[] unmodelled=[origin=external,owner=ops]
+  fake-000002 job name=nightly~ucdk1~kit-machine~kit-cell~aaaaaaaaaaaaaaaaaaaaaaaaaa~app~d2liqk276wgmx3tqp4x4vljqre status=ready labels=[] fields=[label="a",port=80,public=false] unmodelled=[]
+  fake-000003 service name=legacy status=ready labels=[] fields=[] unmodelled=[origin=external,owner=ops]
 calls:
   1 create service fake-000001 ok
   2 create job fake-000002 ok

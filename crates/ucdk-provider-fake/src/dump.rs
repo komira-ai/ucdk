@@ -3,7 +3,7 @@
 
 use std::fmt::Write as _;
 
-use ucdk_provider::{FieldValue, ProviderError};
+use ucdk_provider::{FieldValue, ProviderError, Status};
 
 use crate::fake::Fake;
 
@@ -12,6 +12,14 @@ fn value(v: &FieldValue) -> String {
         FieldValue::Text(t) => format!("{t:?}"),
         FieldValue::Int(i) => i.to_string(),
         FieldValue::Bool(b) => b.to_string(),
+    }
+}
+
+fn status(s: Status) -> &'static str {
+    match s {
+        Status::Ready => "ready",
+        Status::Converging => "converging",
+        Status::Failed => "failed",
     }
 }
 
@@ -34,9 +42,10 @@ impl Fake {
                 .collect();
             let _ = writeln!(
                 out,
-                "  {id} {} name={} labels=[{}] fields=[{}] unmodelled=[{}]",
+                "  {id} {} name={} status={} labels=[{}] fields=[{}] unmodelled=[{}]",
                 o.kind.as_str(),
                 o.name,
+                status(o.status),
                 map(&o.labels),
                 fields.join(","),
                 map(&o.unmodelled)

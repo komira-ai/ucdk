@@ -5,8 +5,8 @@
 mod common;
 
 use common::{
-    Hooked, apply, apply_with, chain, chain_with, destroy, done, lowered, mutations, objects, path,
-    paths, physical_of, plan_of, planned, records, service_of,
+    Hooked, apply, apply_with, cell, chain, chain_with, destroy, done, lowered, mutations, objects,
+    path, paths, physical_of, plan_of, planned, records, service_of,
 };
 use ucdk_engine::{Engine, EngineError, Mode, Outcome, Refusal, Request};
 use ucdk_ledger::{Change, Ledger as _, MemoryLedger, Origin, State};
@@ -89,7 +89,7 @@ fn destroy_with_ledger_lost_deletes_nothing() {
     let (mut fake, ledger) = world();
     done(apply(&mut fake, &ledger, &chain()));
     let approved = planned(
-        match Engine::new(&mut fake, &ledger).handle(Request::Plan {
+        match Engine::new(&mut fake, &ledger, cell()).handle(Request::Plan {
             desired: chain(),
             mode: Mode::Destroy,
         }) {
@@ -100,7 +100,7 @@ fn destroy_with_ledger_lost_deletes_nothing() {
     let hash = approved.hash().clone();
     // The ledger is lost: the objects carry our stamp and nothing records them.
     let lost = MemoryLedger::new();
-    let outcome = Engine::new(&mut fake, &lost).handle(Request::Destroy {
+    let outcome = Engine::new(&mut fake, &lost, cell()).handle(Request::Destroy {
         desired: chain(),
         plan: approved,
         plan_hash: hash,
@@ -162,7 +162,7 @@ fn destroy_of_a_file_that_names_nothing_is_refused() {
     let hash = approved.hash().clone();
     for outcome in [
         destroy(&mut fake, &ledger, &none),
-        Engine::new(&mut fake, &ledger).handle(Request::Destroy {
+        Engine::new(&mut fake, &ledger, cell()).handle(Request::Destroy {
             desired: none.clone(),
             plan: approved,
             plan_hash: hash,
@@ -622,7 +622,7 @@ fn an_object_that_reappears_before_the_reap_keeps_its_record() {
     )
     .expect("a node");
     let mut hooked = Hooked::new(&mut fake, at, move |fake| {
-        let stamp = ucdk_provider::Stamp::for_node(&path("web/public"));
+        let stamp = ucdk_provider::Stamp::for_node(&cell(), &path("web/public"));
         ucdk_provider::Provider::create(fake, &again, &stamp).expect("create");
     });
     let f = failure(apply(&mut hooked, &ledger, &wanted));
@@ -694,7 +694,7 @@ fn an_unwanted_intent_is_not_reaped_on_a_lagging_read() {
         )
         .expect("a node");
         let mut hooked = Hooked::new(&mut fake, READS_BEFORE_THE_STEP + 1, move |fake| {
-            let stamp = ucdk_provider::Stamp::for_node(&path("web/public"));
+            let stamp = ucdk_provider::Stamp::for_node(&cell(), &path("web/public"));
             *fake.faults_mut().read_lag = lag;
             ucdk_provider::Provider::create(fake, &again, &stamp).expect("create");
             *fake.faults_mut().read_lag = 0;

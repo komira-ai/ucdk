@@ -10,9 +10,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use ucdk_provider::kit::{self, Failure, Harness};
 use ucdk_provider::node::digest_of;
 use ucdk_provider::{
-    Created, Deletability, DesiredField, Kind, Live, Node, NodeKey, NodePath, Observation,
-    OwnedObject, OwnerScope, PhysicalId, Provider, ProviderError, Refusal, Stamp, StampEvidence,
-    StampMode, StateClass, Updated,
+    CellScope, Created, Deletability, DesiredField, Kind, Live, Node, NodeKey, NodePath,
+    Observation, OwnedObject, OwnerScope, PhysicalId, Provider, ProviderError, Refusal, Stamp,
+    StampEvidence, StampMode, StateClass, Status, Updated,
 };
 
 #[derive(Clone, Copy, Default)]
@@ -65,6 +65,32 @@ struct Flaws {
     beside_foreign: bool,
     /// The stamp is stored without its extra labels, and the create still succeeds.
     drops_extra: bool,
+    /// A failed object is reported as ready.
+    ready_for_failed: bool,
+    /// A converging object is reported as ready.
+    ready_for_converging: bool,
+    /// An update leaves a failed object failed.
+    update_keeps_failed: bool,
+    /// `list_stamped` lists the objects of every cell.
+    list_stamped_ignores_cell: bool,
+    /// `list_stamped` lists only the objects of one owner.
+    list_stamped_one_owner: bool,
+    /// `list_stamped` lists a foreign object.
+    list_stamped_includes_foreign: bool,
+    /// `list_stamped` returns stamps of another scheme.
+    list_stamped_other_scheme: bool,
+    /// `list_owned` lists the owner's objects of every cell.
+    list_owned_ignores_cell: bool,
+    /// `list_stamped` tells cells apart by their id alone.
+    list_stamped_matches_uid_only: bool,
+    /// `list_owned` tells cells apart by their id alone.
+    list_owned_matches_uid_only: bool,
+    /// A hosted kind declares `Embedded`.
+    hosted_declares_embedded: bool,
+    /// The embedded kind does not declare `Embedded`.
+    embedded_undeclared: bool,
+    /// A create of the embedded kind lands.
+    embedded_creates: bool,
     /// The `k`th call (of any kind, counted from 1) fails with a transient error.
     fail_at: Option<u64>,
 }
@@ -77,6 +103,11 @@ struct Obj {
     stamp: Option<Stamp>,
     born: Option<Stamp>,
     foreign: bool,
+    status: Status,
+}
+
+fn embedded_kind() -> Kind {
+    Kind::new("grant")
 }
 
 struct Stub {
@@ -109,12 +140,18 @@ impl Stub {
             stamp,
             born,
             foreign: false,
+            status: Status::Ready,
         });
         id
     }
 
     fn live_of(&self, o: &Obj, node: &Node) -> Live {
-        let ours = Stamp::for_node(node.path());
+        let ours = Stamp::for_node(&kit::cell(), node.path());
+        let status = match o.status {
+            Status::Failed if self.flaws.ready_for_failed => Status::Ready,
+            Status::Converging if self.flaws.ready_for_converging => Status::Ready,
+            other => other,
+        };
         let stamp = match (&o.stamp, o.foreign && self.flaws.foreign_looks_ours) {
             (_, true) => StampEvidence::Present(ours),
             (Some(s), false) => StampEvidence::Present(s.clone()),
@@ -128,6 +165,7 @@ impl Stub {
                 o.name.clone()
             },
             stamp,
+            status,
             digest: digest_of(&o.kind, &o.fields),
             unmanaged: if self.flaws.holds_unmodelled {
                 vec!["data".to_owned()]
@@ -157,8 +195,11 @@ impl Provider for Stub {
         }
     }
 
-    fn stamp_mode(&self, _: &Kind) -> StampMode {
-        if self.flaws.declarations_drift && !self.objects.is_empty() {
+    fn stamp_mode(&self, kind: &Kind) -> StampMode {
+        let embedded = *kind == embedded_kind() && !self.flaws.embedded_undeclared;
+        if embedded || self.flaws.hosted_declares_embedded {
+            StampMode::Embedded
+        } else if self.flaws.declarations_drift && !self.objects.is_empty() {
             StampMode::NameEncoded
         } else {
             StampMode::Tag
@@ -196,6 +237,9 @@ impl Provider for Stub {
         if node.kind() == &Kind::job() && !self.flaws.hosts_unsupported {
             return Err(ProviderError::Refused(Refusal::Unsupported));
         }
+        if node.kind() == &embedded_kind() && !self.flaws.embedded_creates {
+            return Err(ProviderError::Refused(Refusal::Unsupported));
+        }
         let beside = self.flaws.beside_foreign;
         let exists = self.objects.iter().position(|o| {
             &o.kind == node.kind() && o.name == node.name() && !(beside && o.foreign)
@@ -227,7 +271,7 @@ impl Provider for Stub {
         } else {
             stamp
         };
-        let other = Stamp::for_node(&NodePath::new("other/node").unwrap());
+        let other = Stamp::for_node(&kit::cell(), &NodePath::new("other/node").unwrap());
         let stamp = if self.flaws.stamp_of_another_node {
             &other
         } else {
@@ -260,6 +304,9 @@ impl Provider for Stub {
         if flaws.update_drops_stamp {
             o.stamp = None;
         }
+        if !flaws.update_keeps_failed {
+            o.status = Status::Ready;
+        }
         Ok(Updated {
             digest: node.digest(),
         })
@@ -282,26 +329,67 @@ impl Provider for Stub {
     fn list_owned(&mut self, scope: &OwnerScope) -> Result<Vec<OwnedObject>, ProviderError> {
         self.tick()?;
         let foreign_stamp = Stamp {
+            cell: scope.cell.clone(),
             owner: scope.owner.clone(),
             node: NodeKey::of(&NodePath::new("x").unwrap()),
             scheme: 1,
             extra: Default::default(),
         };
+        let flaws = self.flaws;
         Ok(self
             .objects
             .iter()
             .filter_map(|o| {
-                let stamp = match (&o.stamp, o.foreign && self.flaws.list_includes_foreign) {
+                let stamp = match (&o.stamp, o.foreign && flaws.list_includes_foreign) {
                     (_, true) => Some(foreign_stamp.clone()),
-                    (s, false) => s
-                        .clone()
-                        .filter(|s| self.flaws.list_ignores_owner || s.owner == scope.owner),
+                    (s, false) => s.clone().filter(|s| {
+                        (flaws.list_ignores_owner || s.owner == scope.owner)
+                            && (flaws.list_owned_ignores_cell
+                                || if flaws.list_owned_matches_uid_only {
+                                    s.cell.uid() == scope.cell.uid()
+                                } else {
+                                    s.cell == scope.cell
+                                })
+                    }),
                 };
                 Some(OwnedObject {
                     kind: o.kind.clone(),
                     physical: o.id.clone(),
                     name: o.name.clone(),
                     stamp: stamp?,
+                })
+            })
+            .collect())
+    }
+
+    fn list_stamped(&mut self, scope: &CellScope) -> Result<Vec<OwnedObject>, ProviderError> {
+        self.tick()?;
+        let flaws = self.flaws;
+        Ok(self
+            .objects
+            .iter()
+            .filter_map(|o| {
+                let stamp = match (&o.stamp, o.foreign && flaws.list_stamped_includes_foreign) {
+                    (_, true) => Some(Stamp::for_node(&scope.cell, &NodePath::new("x/y").unwrap())),
+                    (s, false) => s.clone().filter(|s| {
+                        (flaws.list_stamped_ignores_cell
+                            || if flaws.list_stamped_matches_uid_only {
+                                s.cell.uid() == scope.cell.uid()
+                            } else {
+                                s.cell == scope.cell
+                            })
+                            && (!flaws.list_stamped_one_owner || s.owner.as_str() == "kit")
+                    }),
+                };
+                let mut stamp = stamp?;
+                if flaws.list_stamped_other_scheme {
+                    stamp.scheme = 2;
+                }
+                Some(OwnedObject {
+                    kind: o.kind.clone(),
+                    physical: o.id.clone(),
+                    name: o.name.clone(),
+                    stamp,
                 })
             })
             .collect())
@@ -356,8 +444,19 @@ impl Harness for StubHarness {
             stamp: None,
             born: None,
             foreign: true,
+            status: Status::Ready,
         });
         id
+    }
+
+    fn set_status(&self, p: &mut Stub, physical: &PhysicalId, status: Status) {
+        if let Some(o) = p.objects.iter_mut().find(|o| &o.id == physical) {
+            o.status = status;
+        }
+    }
+
+    fn embedded(&self) -> Vec<Kind> {
+        vec![embedded_kind()]
     }
 
     fn rename(&self, p: &mut Stub, physical: &PhysicalId, new_name: &str) {
@@ -384,7 +483,27 @@ impl Harness for StubHarness {
 
 type Scenario = fn(&StubHarness) -> Result<(), Failure>;
 
-const SCENARIOS: [(&str, Scenario); 13] = [
+const SCENARIOS: [(&str, Scenario); 18] = [
+    (
+        "observe_reports_failed_status",
+        kit::observe_reports_failed_status,
+    ),
+    (
+        "observe_reports_converging_status",
+        kit::observe_reports_converging_status,
+    ),
+    (
+        "list_stamped_returns_all_owners_skips_foreign",
+        kit::list_stamped_returns_all_owners_skips_foreign,
+    ),
+    (
+        "list_stamped_ignores_other_cell",
+        kit::list_stamped_ignores_other_cell,
+    ),
+    (
+        "embedded_kinds_are_declared_and_refused",
+        kit::embedded_kinds_are_declared_and_refused,
+    ),
     (
         "extra_labels_round_trip_or_are_refused",
         kit::extra_labels_round_trip_or_are_refused,
@@ -455,7 +574,111 @@ fn kit_self_test_flags_nonconforming_stub() {
     assert_eq!(flagged(holds_data), Vec::<&str>::new());
 
     // Each defect is flagged by the scenario that guards that behaviour.
-    let defects: [(&str, Flaws, &str); 21] = [
+    let defects: [(&str, Flaws, &str); 34] = [
+        (
+            "a failed object reported as ready",
+            Flaws {
+                ready_for_failed: true,
+                ..Flaws::default()
+            },
+            "observe_reports_failed_status",
+        ),
+        (
+            "an update that leaves the object failed",
+            Flaws {
+                update_keeps_failed: true,
+                ..Flaws::default()
+            },
+            "observe_reports_failed_status",
+        ),
+        (
+            "a converging object reported as ready",
+            Flaws {
+                ready_for_converging: true,
+                ..Flaws::default()
+            },
+            "observe_reports_converging_status",
+        ),
+        (
+            "list_stamped across cells",
+            Flaws {
+                list_stamped_ignores_cell: true,
+                ..Flaws::default()
+            },
+            "list_stamped_ignores_other_cell",
+        ),
+        (
+            "list_owned across cells",
+            Flaws {
+                list_owned_ignores_cell: true,
+                ..Flaws::default()
+            },
+            "list_stamped_ignores_other_cell",
+        ),
+        (
+            "list_stamped matching a cell by its id alone",
+            Flaws {
+                list_stamped_matches_uid_only: true,
+                ..Flaws::default()
+            },
+            "list_stamped_ignores_other_cell",
+        ),
+        (
+            "list_owned matching a cell by its id alone",
+            Flaws {
+                list_owned_matches_uid_only: true,
+                ..Flaws::default()
+            },
+            "list_stamped_ignores_other_cell",
+        ),
+        (
+            "list_stamped of one owner only",
+            Flaws {
+                list_stamped_one_owner: true,
+                ..Flaws::default()
+            },
+            "list_stamped_returns_all_owners_skips_foreign",
+        ),
+        (
+            "list_stamped lists a foreign object",
+            Flaws {
+                list_stamped_includes_foreign: true,
+                ..Flaws::default()
+            },
+            "list_stamped_returns_all_owners_skips_foreign",
+        ),
+        (
+            "list_stamped returns another scheme",
+            Flaws {
+                list_stamped_other_scheme: true,
+                ..Flaws::default()
+            },
+            "list_stamped_returns_all_owners_skips_foreign",
+        ),
+        (
+            "a hosted kind declares embedded",
+            Flaws {
+                hosted_declares_embedded: true,
+                ..Flaws::default()
+            },
+            "embedded_kinds_are_declared_and_refused",
+        ),
+        (
+            "an embedded kind that does not declare it",
+            Flaws {
+                embedded_undeclared: true,
+                ..Flaws::default()
+            },
+            "embedded_kinds_are_declared_and_refused",
+        ),
+        (
+            "an embedded kind that is created",
+            Flaws {
+                embedded_creates: true,
+                ..Flaws::default()
+            },
+            "embedded_kinds_are_declared_and_refused",
+        ),
         (
             "extra labels dropped silently",
             Flaws {

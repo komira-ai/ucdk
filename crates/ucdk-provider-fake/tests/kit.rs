@@ -78,9 +78,42 @@ fn kit_extra_labels_round_trip_or_are_refused() {
 }
 
 #[test]
+fn kit_observe_reports_failed_status() {
+    on_fake_and_fake_limited(kit::observe_reports_failed_status);
+}
+
+#[test]
+fn kit_observe_reports_converging_status() {
+    on_fake_and_fake_limited(kit::observe_reports_converging_status);
+}
+
+#[test]
+fn kit_list_stamped_returns_all_owners_skips_foreign() {
+    on_fake_and_fake_limited(kit::list_stamped_returns_all_owners_skips_foreign);
+}
+
+#[test]
+fn kit_list_stamped_ignores_other_cell() {
+    on_fake_and_fake_limited(kit::list_stamped_ignores_other_cell);
+}
+
+#[test]
+fn kit_embedded_kinds_are_declared_and_refused() {
+    on_fake_and_fake_limited(kit::embedded_kinds_are_declared_and_refused);
+    // The variant that declares an embedded kind passes too, and its kind is the one listed.
+    let embedded = FakeHarness::embedded();
+    assert_eq!(embedded.embedded(), [Kind::new("grant")]);
+    assert_eq!(
+        kit::embedded_kinds_are_declared_and_refused(&embedded),
+        Ok(())
+    );
+}
+
+#[test]
 fn kit_runs_every_scenario_on_both_fakes() {
     assert!(kit::run_all(&FakeHarness::standard()).is_empty());
     assert!(kit::run_all(&FakeHarness::limited()).is_empty());
+    assert!(kit::run_all(&FakeHarness::embedded()).is_empty());
 }
 
 #[test]

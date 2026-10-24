@@ -3,9 +3,11 @@
 
 use ucdk_ledger::{Change, Record, State};
 use ucdk_plan::PlanNode;
-use ucdk_provider::{Live, Node, Observation, ProviderError, Refusal as CallRefusal, Stamp};
+use ucdk_provider::{
+    Live, Node, Observation, ProviderError, Refusal as CallRefusal, Stamp, Status,
+};
 
-use crate::engine::{Engine, ours};
+use crate::engine::Engine;
 use crate::error::EngineError;
 use crate::seam::Report;
 
@@ -83,19 +85,25 @@ impl Engine<'_> {
             ..intent_for(prior, pn)
         };
         self.commit(&Change::Put(intent.clone()))?;
-        match self.provider.create(node, &Stamp::for_node(node.path())) {
+        let stamp = Stamp::for_node(&self.cell, node.path());
+        match self.provider.create(node, &stamp) {
             Ok(created) => {
                 report.created.push(node.path().clone());
-                // The record is confirmed only once a read shows the object. A read that
-                // does not (it may lag behind the create) leaves the intent, now naming the
-                // object, so that a later read of "gone" is never taken for proof.
+                // The record is confirmed only once a read shows the object, and shows it
+                // ready. A read that does not (it may lag behind the create, or the object may
+                // still be coming up) leaves the intent, now naming the object, so that a
+                // later read of "gone" is never taken for proof.
                 let named = Record {
                     physical: Some(created.physical.clone()),
                     ..intent.clone()
                 };
                 match self.observe_node(node, Some(&named)) {
-                    Ok(Observation::Present(_)) => {
+                    Ok(Observation::Present(live)) if live.status == Status::Ready => {
                         self.commit(&Change::Put(intent.confirmed(created.physical)))
+                    }
+                    Ok(Observation::Present(live)) => {
+                        note_not_ready(report, node, live.status);
+                        self.commit(&Change::Put(named))
                     }
                     Ok(Observation::Absent) => self.commit(&Change::Put(named)),
                     Err(error) => {
@@ -108,7 +116,7 @@ impl Engine<'_> {
             // (our stamp), it is this node's object.
             Err(ProviderError::Refused(CallRefusal::AlreadyExists)) => {
                 match self.observe_node(node, Some(&intent))? {
-                    Observation::Present(live) if !ours(&live, node.path(), None) => {
+                    Observation::Present(live) if !self.ours(&live, node.path(), None) => {
                         // Not ours: this run created nothing, so the intent it wrote says
                         // nothing true. Left in the ledger, it would turn the foreign object
                         // into a stripped stamp on every later run.
@@ -143,7 +151,8 @@ impl Engine<'_> {
     }
 
     /// The object is there. If it is ours, bring it to the node and confirm the record;
-    /// if it is not, the run stops.
+    /// if it is not, the run stops. An object that is still converging is left as it is, with
+    /// its record unconfirmed; a failed one is updated even when its fields match.
     fn accept(
         &mut self,
         pn: &PlanNode,
@@ -152,11 +161,15 @@ impl Engine<'_> {
         live: &Live,
         report: &mut Report,
     ) -> Result<(), EngineError> {
-        if !ours(live, node.path(), record.as_ref()) {
+        if !self.ours(live, node.path(), record.as_ref()) {
             return Err(EngineError::NotOurs(node.path().clone()));
         }
+        if live.status == Status::Converging {
+            report.converging.push(node.path().clone());
+            return Ok(());
+        }
         let was_confirmed = record.as_ref().is_some_and(|r| r.state == State::Confirmed);
-        let base = if live.digest == node.digest() {
+        let base = if live.digest == node.digest() && live.status == Status::Ready {
             if was_confirmed {
                 return Ok(());
             }
@@ -172,8 +185,41 @@ impl Engine<'_> {
             self.commit(&Change::Put(intent.clone()))?;
             self.provider.update(node, live)?;
             report.updated.push(node.path().clone());
+            if live.status == Status::Failed {
+                return self.confirm_when_ready(node, intent, report);
+            }
             intent
         };
         self.commit(&Change::Put(base.confirmed(live.physical.clone())))
+    }
+
+    /// After the update of a failed object: read it again and confirm the record only if the
+    /// object is ready. One that is still coming up, or failed again, or not yet visible
+    /// leaves the intent, which names the object, for the next run.
+    fn confirm_when_ready(
+        &mut self,
+        node: &Node,
+        intent: Record,
+        report: &mut Report,
+    ) -> Result<(), EngineError> {
+        match self.observe_node(node, Some(&intent))? {
+            Observation::Present(now) if now.status == Status::Ready => {
+                self.commit(&Change::Put(intent.confirmed(now.physical)))
+            }
+            Observation::Present(now) => {
+                note_not_ready(report, node, now.status);
+                Ok(())
+            }
+            Observation::Absent => Ok(()),
+        }
+    }
+}
+
+/// Records, in the report, an object that read as not ready after this run wrote to it.
+fn note_not_ready(report: &mut Report, node: &Node, status: Status) {
+    match status {
+        Status::Ready => {}
+        Status::Converging => report.converging.push(node.path().clone()),
+        Status::Failed => report.failed.push(node.path().clone()),
     }
 }

@@ -121,7 +121,8 @@ fn execute(invocation: &Invocation, world: &mut World) -> Result<u8, Exit> {
     }
 
     let ledger = world.ledger.clone();
-    let mut engine = Engine::new(world.cloud(invocation.provider), &ledger);
+    let cell = world.cell.clone();
+    let mut engine = Engine::new(world.cloud(invocation.provider), &ledger, cell);
     let mode = match invocation.mode {
         Mode::Apply => EngineMode::Apply,
         Mode::Destroy => EngineMode::Destroy,

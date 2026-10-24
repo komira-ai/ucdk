@@ -1,0 +1,8 @@
+objects:
+  fake-000001 service name=a status=ready labels=[ucdk-cell=kit-cell,ucdk-cell-uid=aaaaaaaaaaaaaaaaaaaaaaaaaa,ucdk-machine=kit-machine,ucdk-node=7ozuuqkubnbqic2xkg53ty25ke,ucdk-owner=app,ucdk-scheme=1] fields=[label="a",port=80,public=false] unmodelled=[]
+  fake-000002 service name=b status=converging labels=[ucdk-cell=kit-cell,ucdk-cell-uid=aaaaaaaaaaaaaaaaaaaaaaaaaa,ucdk-machine=kit-machine,ucdk-node=b5aqw3yeyl5xlhq6w6p5teblle,ucdk-owner=app,ucdk-scheme=1] fields=[label="a",port=80,public=false] unmodelled=[]
+  fake-000003 service name=c status=failed labels=[ucdk-cell=kit-cell,ucdk-cell-uid=aaaaaaaaaaaaaaaaaaaaaaaaaa,ucdk-machine=kit-machine,ucdk-node=gdj2vdtniqb4swgl3wksbgb7se,ucdk-owner=app,ucdk-scheme=1] fields=[label="a",port=80,public=false] unmodelled=[]
+calls:
+  1 create service fake-000001 ok
+  2 create service fake-000002 ok
+  3 create service fake-000003 ok

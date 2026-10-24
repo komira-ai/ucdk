@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The node model: paths, keys, digests, stamps and errors.
 
+use ucdk_provider::kit;
 use ucdk_provider::{
-    DesiredField, FieldValue, Kind, ModelError, Node, NodeKey, NodePath, OwnerLabel, OwnerScope,
-    PhysicalId, ProviderError, Refusal, Stamp, StampEvidence,
+    CellName, CellScope, CellUid, DesiredField, FieldValue, Kind, ModelError, NAME_SUFFIX_MAX,
+    NODE_KEY_LEN, Node, NodeKey, NodePath, OwnerLabel, OwnerScope, PhysicalId, ProviderError,
+    Refusal, SCHEME, SEGMENT_MAX, Stamp, StampEvidence, StampMode,
 };
+
+/// The id of `kit::cell()`.
+const CELL_UID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 #[test]
 fn a_path_is_one_or_more_valid_segments() {
@@ -135,17 +140,21 @@ fn field_boundaries_are_part_of_the_digest() {
 }
 
 #[test]
-fn a_stamp_names_owner_node_and_scheme_and_ignores_extra_labels_when_compared() {
+fn a_stamp_names_cell_owner_node_and_scheme_and_ignores_extra_labels_when_compared() {
     let path = NodePath::new("app/web").unwrap();
-    let plain = Stamp::for_node(&path);
+    let cell = kit::cell();
+    let plain = Stamp::for_node(&cell, &path);
     assert_eq!(plain.scheme, 1);
+    assert_eq!(plain.cell, cell);
     assert_eq!(plain.owner.as_str(), "app");
     assert_eq!(plain.node, path.key());
-    let annotated = Stamp::for_node(&path).with_extra("run", "r1");
+    let annotated = Stamp::for_node(&cell, &path).with_extra("run", "r1");
     assert!(plain.same_identity(&annotated));
     assert_ne!(plain, annotated);
-    assert!(!plain.same_identity(&Stamp::for_node(&NodePath::new("app/api").unwrap())));
-    assert!(!plain.same_identity(&Stamp::for_node(&NodePath::new("lib/web").unwrap())));
+    let of = |p: &str| Stamp::for_node(&cell, &NodePath::new(p).unwrap());
+    assert!(!plain.same_identity(&of("app/api")));
+    assert!(!plain.same_identity(&of("lib/web")));
+    assert!(!plain.same_identity(&Stamp::for_node(&kit::other_cell(), &path)));
     let other_scheme = Stamp {
         scheme: 2,
         ..plain.clone()
@@ -155,10 +164,11 @@ fn a_stamp_names_owner_node_and_scheme_and_ignores_extra_labels_when_compared() 
 
 #[test]
 fn a_stamp_survives_being_encoded_in_a_name() {
-    let stamp = Stamp::for_node(&NodePath::new("app/web").unwrap());
+    let stamp = Stamp::for_node(&kit::cell(), &NodePath::new("app/web").unwrap());
     let name = stamp.encode_name("my~job");
     assert_eq!(
-        name, "my~job~ucdk1~app~5sxo3w6l42g34qiap3fg3dioqu",
+        name,
+        format!("my~job~ucdk1~kit-machine~kit-cell~{CELL_UID}~app~5sxo3w6l42g34qiap3fg3dioqu"),
         "a base name may itself hold the separator"
     );
     assert_eq!(
@@ -168,17 +178,44 @@ fn a_stamp_survives_being_encoded_in_a_name() {
 }
 
 #[test]
+fn the_name_suffix_budget_covers_the_longest_stamp() {
+    // The longest stamp: every segment at its limit.
+    let long = "a".repeat(SEGMENT_MAX);
+    let cell = ucdk_provider::CellIdentity::new(
+        CellName::new(&long).unwrap(),
+        CellName::new(&long).unwrap(),
+        CellUid::from_text(CELL_UID).unwrap(),
+    );
+    let path = NodePath::new(&format!("{long}/{long}")).unwrap();
+    let stamp = Stamp::for_node(&cell, &path);
+    let name = stamp.encode_name("base");
+    assert_eq!(NAME_SUFFIX_MAX, 159);
+    assert_eq!(stamp.name_suffix_len(), NAME_SUFFIX_MAX);
+    assert_eq!(name.len(), "base".len() + NAME_SUFFIX_MAX);
+    assert_eq!(Stamp::decode_name(&name), ("base".to_owned(), Some(stamp)));
+
+    // A short stamp adds less, never more.
+    let short = Stamp::for_node(&kit::cell(), &NodePath::new("a/b").unwrap());
+    assert!(short.name_suffix_len() < NAME_SUFFIX_MAX);
+}
+
+#[test]
 fn a_name_without_a_whole_stamp_decodes_to_itself() {
     let key = NodePath::new("app/web").unwrap().key();
+    let cell = format!("kit-machine~kit-cell~{CELL_UID}");
     for name in [
         "plain".to_owned(),
         "a~b".to_owned(),
-        format!("x~ucdk1~app~{}", "short"),
-        format!("x~ucdk1~App~{key}"),
-        format!("x~ucdk1~app~{}", key.as_str().to_uppercase()),
-        format!("x~ucdk~app~{key}"),
-        format!("x~ucdkone~app~{key}"),
-        format!("x~app~{key}"),
+        format!("x~ucdk1~{cell}~app~{}", "short"),
+        format!("x~ucdk1~{cell}~App~{key}"),
+        format!("x~ucdk1~{cell}~app~{}", key.as_str().to_uppercase()),
+        format!("x~ucdk~{cell}~app~{key}"),
+        format!("x~ucdkone~{cell}~app~{key}"),
+        format!("x~{cell}~app~{key}"),
+        format!("x~ucdk1~Kit-machine~kit-cell~{CELL_UID}~app~{key}"),
+        format!("x~ucdk1~kit-machine~Kit-cell~{CELL_UID}~app~{key}"),
+        format!("x~ucdk1~kit-machine~kit-cell~short~app~{key}"),
+        format!("x~ucdk1~kit-cell~{CELL_UID}~app~{key}"),
         format!("app~{key}"),
     ] {
         assert_eq!(Stamp::decode_name(&name), (name.clone(), None), "{name}");
@@ -223,6 +260,7 @@ fn errors_say_what_they_are_and_which_refusal() {
         ModelError::EmptyPath,
         ModelError::BadSegment("X".into()),
         ModelError::DuplicateField("f".into()),
+        ModelError::BadCellUid("u".into()),
     ]
     .iter()
     .map(ToString::to_string)
@@ -232,20 +270,89 @@ fn errors_say_what_they_are_and_which_refusal() {
         [
             "a node path is empty",
             "`X` is not a valid path segment",
-            "field `f` is given twice"
+            "field `f` is given twice",
+            "`u` is not a valid cell id"
         ]
     );
 }
 
 #[test]
-fn an_owner_scope_names_one_owner() {
+fn an_owner_scope_names_one_owner_in_one_cell() {
     let owner = OwnerLabel::new("app").unwrap();
-    assert_eq!(OwnerScope::new(owner.clone()).owner, owner);
+    let scope = OwnerScope::new(kit::cell(), owner.clone());
+    assert_eq!((scope.owner, scope.cell), (owner, kit::cell()));
     assert_eq!(StampEvidence::Absent, StampEvidence::Absent);
 }
 
 #[test]
+fn a_cell_scope_names_one_cell() {
+    assert_eq!(CellScope::new(kit::cell()).cell, kit::cell());
+    assert_ne!(
+        CellScope::new(kit::cell()),
+        CellScope::new(kit::other_cell())
+    );
+}
+
+#[test]
 fn only_a_tag_carries_extra_labels() {
-    assert!(ucdk_provider::StampMode::Tag.carries_extra());
-    assert!(!ucdk_provider::StampMode::NameEncoded.carries_extra());
+    assert!(StampMode::Tag.carries_extra());
+    assert!(!StampMode::NameEncoded.carries_extra());
+    assert!(!StampMode::Embedded.carries_extra());
+}
+
+#[test]
+fn only_stamped_modes_are_applicable_today() {
+    assert!(StampMode::Tag.applicable());
+    assert!(StampMode::NameEncoded.applicable());
+    assert!(!StampMode::Embedded.applicable());
+}
+
+#[test]
+fn a_cell_is_a_machine_a_name_and_a_26_character_id() {
+    let cell = kit::cell();
+    assert_eq!(cell.machine(), &CellName::new("kit-machine").unwrap());
+    assert_eq!(cell.cell().as_str(), "kit-cell");
+    assert_eq!(cell.uid().as_str(), CELL_UID);
+    assert_eq!(cell.uid().to_string(), CELL_UID);
+    assert_eq!(cell.to_string(), format!("kit-machine/kit-cell/{CELL_UID}"));
+    assert_ne!(cell, kit::other_cell());
+    assert_eq!(
+        CellName::new("Cell"),
+        Err(ModelError::BadSegment("Cell".to_owned()))
+    );
+    assert!(CellName::new(&"a".repeat(33)).is_err());
+    for bad in [
+        "",
+        "short",
+        &"a".repeat(27),
+        &"A".repeat(26),
+        &"1".repeat(26),
+    ] {
+        assert_eq!(
+            CellUid::from_text(bad),
+            Err(ModelError::BadCellUid(bad.to_owned())),
+            "{bad}"
+        );
+    }
+}
+
+#[test]
+fn the_format_constants_are_pinned() {
+    // These values reach cloud tags, physical names and the ledger: changing one is a format
+    // break for every object already stamped.
+    assert_eq!(SEGMENT_MAX, 32);
+    assert_eq!(NODE_KEY_LEN, 26);
+    assert_eq!(SCHEME, 1);
+    assert_eq!(
+        Stamp::for_node(&kit::cell(), &NodePath::new("a/b").unwrap()).scheme,
+        SCHEME
+    );
+    assert!(NodePath::new(&"a".repeat(SEGMENT_MAX)).is_ok());
+    assert!(NodePath::new(&"a".repeat(SEGMENT_MAX + 1)).is_err());
+    assert!(CellName::new(&"a".repeat(SEGMENT_MAX)).is_ok());
+    assert!(CellName::new(&"a".repeat(SEGMENT_MAX + 1)).is_err());
+    assert!(OwnerLabel::new(&"a".repeat(SEGMENT_MAX)).is_ok());
+    assert!(OwnerLabel::new(&"a".repeat(SEGMENT_MAX + 1)).is_err());
+    let path = NodePath::new("app/web").unwrap();
+    assert_eq!(path.key().as_str().len(), NODE_KEY_LEN);
 }

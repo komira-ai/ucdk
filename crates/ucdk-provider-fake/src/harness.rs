@@ -2,7 +2,7 @@
 //! The fake as a subject of the contract kit.
 
 use ucdk_provider::kit::Harness;
-use ucdk_provider::{Kind, PhysicalId, Stamp};
+use ucdk_provider::{Kind, PhysicalId, Stamp, Status};
 
 use crate::config::FakeConfig;
 use crate::fake::Fake;
@@ -24,6 +24,13 @@ impl FakeHarness {
     pub fn limited() -> Self {
         Self {
             config: FakeConfig::limited(),
+        }
+    }
+
+    /// As `standard()`, and the kind `grant` declares `StampMode::Embedded`.
+    pub fn embedded() -> Self {
+        Self {
+            config: FakeConfig::with_embedded(),
         }
     }
 }
@@ -56,5 +63,13 @@ impl Harness for FakeHarness {
 
     fn stamp_at_birth(&self, provider: &Fake, physical: &PhysicalId) -> Option<Stamp> {
         provider.birth_stamp(physical)
+    }
+
+    fn set_status(&self, provider: &mut Fake, physical: &PhysicalId, status: Status) {
+        provider.set_status(physical, status);
+    }
+
+    fn embedded(&self) -> Vec<Kind> {
+        self.config.embedded.iter().cloned().collect()
     }
 }

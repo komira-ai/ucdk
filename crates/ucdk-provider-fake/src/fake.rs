@@ -5,8 +5,9 @@ use std::collections::BTreeMap;
 
 use ucdk_provider::node::digest_of;
 use ucdk_provider::{
-    Created, Deletability, Kind, Live, Node, Observation, OwnedObject, OwnerScope, PhysicalId,
-    Provider, ProviderError, Refusal, StampEvidence, StampMode, StateClass, Updated,
+    CellScope, Created, Deletability, Kind, Live, Node, Observation, OwnedObject, OwnerScope,
+    PhysicalId, Provider, ProviderError, Refusal, SCHEME, StampEvidence, StampMode, StateClass,
+    Status, Updated,
 };
 use ucdk_provider::{Digest, Stamp};
 
@@ -61,6 +62,8 @@ impl Fake {
             ambiguous_success: &mut faults.ambiguous_success,
             ambiguous_at_call: &mut faults.ambiguous_at_call,
             fail_reads: &mut faults.fail_reads,
+            create_failed: &mut faults.create_failed,
+            converging_reads: &mut faults.converging_reads,
         }
     }
 
@@ -99,7 +102,20 @@ impl Fake {
             unmodelled: BTreeMap::from([("origin".to_owned(), "external".to_owned())]),
             marker,
             visible_at: 0,
+            status: Status::Ready,
+            ready_at: 0,
         })
+    }
+
+    /// Puts an object in `status` out of band. `Converging` holds until the next `update` of
+    /// the object. False when there is no such object.
+    pub fn set_status(&mut self, physical: &PhysicalId, status: Status) -> bool {
+        let Some(object) = self.objects.get_mut(physical) else {
+            return false;
+        };
+        object.status = status;
+        object.ready_at = u64::MAX;
+        true
     }
 
     /// Sets a field the catalog does not model, out of band. False when there is no such
@@ -209,11 +225,12 @@ impl Fake {
         }
     }
 
-    fn live_of(&self, id: &PhysicalId, object: &Object) -> Live {
+    fn live_of(&self, id: &PhysicalId, object: &Object, read: u64) -> Live {
         Live {
             physical: id.clone(),
             name: object.base.clone(),
             stamp: object.evidence(self.is_tagless(&object.kind)),
+            status: object.status_at(read),
             digest: digest_of(&object.kind, &object.fields),
             unmanaged: object.unmodelled.keys().cloned().collect(),
         }
@@ -229,7 +246,17 @@ impl Fake {
 
     fn make_object(&self, node: &Node, stamp: &Stamp, visible_at: u64) -> Object {
         let (name, labels) = self.written(node, stamp);
+        let faults = &self.config.faults;
+        let status = if faults.create_failed {
+            Status::Failed
+        } else if faults.converging_reads > 0 {
+            Status::Converging
+        } else {
+            Status::Ready
+        };
         Object {
+            status,
+            ready_at: visible_at + faults.converging_reads,
             kind: node.kind().clone(),
             name,
             base: node.name().to_owned(),
@@ -256,7 +283,7 @@ impl Fake {
                         None => o.base == node.name(),
                     }
             })
-            .map(|(id, (o, _))| self.live_of(id, o))
+            .map(|(id, (o, _))| self.live_of(id, o, read))
             .next()
     }
 
@@ -270,7 +297,8 @@ impl Fake {
         if self.fail_now() {
             return Err(ProviderError::Refused(Refusal::Rejected));
         }
-        if !self.hosts(node.kind()) {
+        // A kind with no stamp of its own cannot be created yet: its behaviour is not there.
+        if !self.hosts(node.kind()) || self.stamp_mode(node.kind()) == StampMode::Embedded {
             return Err(ProviderError::Refused(Refusal::Unsupported));
         }
         // A kind that cannot carry extra labels refuses them; it never stores the stamp without.
@@ -341,6 +369,8 @@ impl Fake {
             ));
         }
         object.fields = node.fields().to_vec();
+        // An update converges the object: a failed or converging one is working afterwards.
+        object.status = Status::Ready;
         Ok(node.digest())
     }
 
@@ -390,7 +420,9 @@ impl Provider for Fake {
     }
 
     fn stamp_mode(&self, kind: &Kind) -> StampMode {
-        if self.is_tagless(kind) {
+        if self.config.embedded.contains(kind) {
+            StampMode::Embedded
+        } else if self.is_tagless(kind) {
             StampMode::NameEncoded
         } else {
             StampMode::Tag
@@ -425,7 +457,7 @@ impl Provider for Fake {
         };
         let seen = match found {
             Some((id, o)) => {
-                (o.visible_at <= read && &o.kind == node.kind()).then(|| self.live_of(id, o))
+                (o.visible_at <= read && &o.kind == node.kind()).then(|| self.live_of(id, o, read))
             }
             None => self.stale(node, hint, read),
         };
@@ -480,16 +512,31 @@ impl Provider for Fake {
     }
 
     fn list_owned(&mut self, scope: &OwnerScope) -> Result<Vec<OwnedObject>, ProviderError> {
+        self.listed(Op::ListOwned, scope.owner.as_str(), |stamp| {
+            stamp.owner == scope.owner && stamp.cell == scope.cell
+        })
+    }
+
+    fn list_stamped(&mut self, scope: &CellScope) -> Result<Vec<OwnedObject>, ProviderError> {
+        self.listed(Op::ListStamped, &scope.cell.to_string(), |stamp| {
+            stamp.cell == scope.cell && stamp.scheme == SCHEME
+        })
+    }
+}
+
+impl Fake {
+    /// One list call: the visible objects whose stamp `keep` accepts, logged under `op` and
+    /// `what`.
+    fn listed(
+        &mut self,
+        op: Op,
+        what: &str,
+        keep: impl Fn(&Stamp) -> bool,
+    ) -> Result<Vec<OwnedObject>, ProviderError> {
         let read = match self.read() {
             Ok(read) => read,
             Err(e) => {
-                let call = Self::plain_call(
-                    Op::ListOwned,
-                    None,
-                    scope.owner.as_str(),
-                    None,
-                    Err(e.clone()),
-                );
+                let call = Self::plain_call(op, None, what, None, Err(e.clone()));
                 self.record(call);
                 return Err(e);
             }
@@ -499,7 +546,7 @@ impl Provider for Fake {
             .iter()
             .filter(|(_, o)| o.visible_at <= read)
             .filter_map(|(id, o)| match o.evidence(self.is_tagless(&o.kind)) {
-                StampEvidence::Present(stamp) if stamp.owner == scope.owner => Some(OwnedObject {
+                StampEvidence::Present(stamp) if keep(&stamp) => Some(OwnedObject {
                     kind: o.kind.clone(),
                     physical: id.clone(),
                     name: o.base.clone(),
@@ -508,7 +555,7 @@ impl Provider for Fake {
                 _ => None,
             })
             .collect();
-        let call = Self::plain_call(Op::ListOwned, None, scope.owner.as_str(), None, Ok(()));
+        let call = Self::plain_call(op, None, what, None, Ok(()));
         self.record(call);
         Ok(owned)
     }

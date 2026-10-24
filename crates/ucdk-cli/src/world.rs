@@ -2,7 +2,17 @@
 //! The world a command runs in: the cloud, the ledger and the two output buffers.
 
 use ucdk_ledger::MemoryLedger;
+use ucdk_provider::{CellIdentity, CellName, CellUid};
 use ucdk_provider_fake::{Fake, FakeConfig};
+
+/// The cell of the in-memory world: every stamp a command writes carries this identity.
+fn local_cell() -> CellIdentity {
+    CellIdentity::new(
+        CellName::new("local").expect("the literal name is valid"),
+        CellName::new("default").expect("the literal name is valid"),
+        CellUid::from_text("lllllllllllllllllllllllllm").expect("the literal id is valid"),
+    )
+}
 
 /// The providers `--provider` names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +54,8 @@ pub struct World {
     pub fake_limited: Fake,
     /// The ledger both clouds share.
     pub ledger: MemoryLedger,
+    /// The cell both clouds and the ledger belong to.
+    pub cell: CellIdentity,
     /// What the command printed to standard output.
     pub out: String,
     /// What the command printed to standard error.
@@ -57,6 +69,7 @@ impl World {
             fake: Fake::new(FakeConfig::standard()),
             fake_limited: Fake::new(FakeConfig::limited()),
             ledger: MemoryLedger::new(),
+            cell: local_cell(),
             out: String::new(),
             err: String::new(),
         }

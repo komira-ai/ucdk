@@ -2,7 +2,12 @@
 #![allow(dead_code)]
 //! Helpers shared by the fake's tests.
 
-use ucdk_provider::{DesiredField, FieldValue, Kind, Node, NodePath, Stamp};
+use ucdk_provider::{CellIdentity, DesiredField, FieldValue, Kind, Node, NodePath, Stamp, kit};
+
+/// The cell the tests work in.
+pub fn cell() -> CellIdentity {
+    kit::cell()
+}
 
 pub fn node(path: &str, kind: Kind, name: &str, port: i64) -> Node {
     Node::new(
@@ -27,5 +32,5 @@ pub fn job(path: &str, name: &str) -> Node {
 }
 
 pub fn stamp(node: &Node) -> Stamp {
-    Stamp::for_node(node.path())
+    Stamp::for_node(&cell(), node.path())
 }

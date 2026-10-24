@@ -5,7 +5,7 @@ use ucdk_ledger::{Change, Origin, Record, State};
 use ucdk_plan::Retained;
 use ucdk_provider::{Deletability, Node, NodePath, Observation, OwnerScope, StateClass};
 
-use crate::engine::{Engine, node_of, ours};
+use crate::engine::{Engine, node_of};
 use crate::error::EngineError;
 use crate::seam::Report;
 
@@ -50,7 +50,7 @@ impl Engine<'_> {
     /// Whether either a read by name or a listing of the owner's objects shows the object of
     /// `record`.
     fn seen(&mut self, record: &Record, node: &Node) -> Result<bool, EngineError> {
-        let scope = OwnerScope::new(record.path.owner());
+        let scope = OwnerScope::new(self.cell.clone(), record.path.owner());
         let listed = self
             .provider
             .list_owned(&scope)?
@@ -79,7 +79,7 @@ impl Engine<'_> {
             }
             Observation::Present(live) => live,
         };
-        if !ours(&live, path, Some(&record)) {
+        if !self.ours(&live, path, Some(&record)) {
             return Err(EngineError::NotOurs(path.clone()));
         }
         if record.origin != Origin::Created {

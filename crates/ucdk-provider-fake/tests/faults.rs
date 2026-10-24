@@ -3,9 +3,10 @@
 
 mod common;
 
-use common::{job, node, service, stamp};
+use common::{cell, job, node, service, stamp};
 use ucdk_provider::{
     Kind, Observation, OwnerScope, PhysicalId, Provider, ProviderError, Refusal, StampEvidence,
+    Status,
 };
 use ucdk_provider_fake::{Fake, FakeConfig, Faults, ForeignObject, Op};
 
@@ -71,7 +72,7 @@ fn fake_read_lag_hides_new_node_until_n_reads() {
         ..Faults::default()
     });
     let a = service("app/a", "a");
-    let scope = OwnerScope::new(a.path().owner());
+    let scope = OwnerScope::new(cell(), a.path().owner());
     let created = fake.create(&a, &stamp(&a)).expect("create");
     assert!(!present(&mut fake, &a), "read 1 is hidden");
     assert_eq!(fake.list_owned(&scope), Ok(vec![]), "read 2 is hidden");
@@ -249,7 +250,7 @@ fn fail_reads_fails_the_next_reads_in_order_and_changes_nothing() {
         ..Faults::default()
     });
     let a = service("app/a", "a");
-    let scope = OwnerScope::new(a.path().owner());
+    let scope = OwnerScope::new(cell(), a.path().owner());
     fake.create(&a, &stamp(&a)).expect("create");
     assert_eq!(fake.observe(&a, None), Err(transient.clone()));
     assert_eq!(fake.list_owned(&scope), Err(in_flight.clone()));
@@ -287,7 +288,7 @@ fn a_failed_read_counts_toward_read_lag() {
 fn a_deleted_object_is_still_observed_for_n_reads_under_read_lag() {
     let mut fake = with(Faults::default());
     let a = service("app/a", "a");
-    let scope = OwnerScope::new(a.path().owner());
+    let scope = OwnerScope::new(cell(), a.path().owner());
     let created = fake.create(&a, &stamp(&a)).expect("create");
     assert!(present(&mut fake, &a));
     *fake.faults_mut().read_lag = 3;
@@ -382,4 +383,67 @@ fn faults_armed_on_a_built_fake_fire_like_constructor_faults() {
         fake.create(&b, &stamp(&b)),
         Err(ProviderError::Refused(Refusal::Rejected))
     );
+}
+
+#[test]
+fn create_failed_fault_births_failed_objects_until_an_update() {
+    let mut fake = with(Faults {
+        create_failed: true,
+        ..Faults::default()
+    });
+    let a = service("app/a", "a");
+    fake.create(&a, &stamp(&a)).expect("create");
+    let Ok(Observation::Present(live)) = fake.observe(&a, None) else {
+        panic!("not found");
+    };
+    assert_eq!(live.status, Status::Failed);
+    fake.update(&a, &live).expect("update");
+    let Ok(Observation::Present(now)) = fake.observe(&a, None) else {
+        panic!("not found");
+    };
+    assert_eq!(now.status, Status::Ready);
+    // Disarmed on the built fake, the next object is born ready.
+    *fake.faults_mut().create_failed = false;
+    let b = service("app/b", "b");
+    fake.create(&b, &stamp(&b)).expect("create");
+    assert!(matches!(
+        fake.observe(&b, None),
+        Ok(Observation::Present(l)) if l.status == Status::Ready
+    ));
+}
+
+#[test]
+fn converging_reads_fault_settles_after_that_many_reads() {
+    let mut fake = Fake::standard();
+    *fake.faults_mut().converging_reads = 2;
+    let a = service("app/a", "a");
+    fake.create(&a, &stamp(&a)).expect("create");
+    let status = |fake: &mut Fake| match fake.observe(&a, None) {
+        Ok(Observation::Present(l)) => l.status,
+        other => panic!("expected the object, got {other:?}"),
+    };
+    assert_eq!(status(&mut fake), Status::Converging, "read 1");
+    assert_eq!(status(&mut fake), Status::Converging, "read 2");
+    assert_eq!(status(&mut fake), Status::Ready, "read 3");
+    assert_eq!(status(&mut fake), Status::Ready, "read 4");
+}
+
+#[test]
+fn converging_counts_from_the_first_visible_read_when_reads_lag() {
+    let mut fake = with(Faults {
+        read_lag: 1,
+        converging_reads: 1,
+        ..Faults::default()
+    });
+    let a = service("app/a", "a");
+    fake.create(&a, &stamp(&a)).expect("create");
+    assert_eq!(fake.observe(&a, None), Ok(Observation::Absent), "hidden");
+    let Ok(Observation::Present(first)) = fake.observe(&a, None) else {
+        panic!("visible by the second read");
+    };
+    assert_eq!(first.status, Status::Converging);
+    let Ok(Observation::Present(next)) = fake.observe(&a, None) else {
+        panic!("visible");
+    };
+    assert_eq!(next.status, Status::Ready);
 }

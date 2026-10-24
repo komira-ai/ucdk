@@ -9,7 +9,8 @@ use ucdk_plan::{
     Record as PlanRecord, Refused, Seen, Step, plan,
 };
 use ucdk_provider::{
-    Kind, Live, Node, NodePath, Observation, Provider, Stamp, StampEvidence, StateClass,
+    CellIdentity, Kind, Live, Node, NodePath, Observation, Provider, Stamp, StampEvidence,
+    StateClass,
 };
 
 use crate::error::EngineError;
@@ -19,9 +20,12 @@ use crate::seam::{Failure, Mode, Outcome, Refusal, Report, Request};
 const WRITE_ATTEMPTS: usize = 5;
 
 /// The reconciler. It borrows the provider and the ledger it works on: one trait object each.
+/// It works in one cell: every stamp it writes carries the cell's identity, and an object
+/// that carries another cell's is not ours.
 pub struct Engine<'a> {
     pub(crate) provider: &'a mut dyn Provider,
     pub(crate) ledger: &'a dyn Ledger,
+    pub(crate) cell: CellIdentity,
 }
 
 /// The node an existing record stands for, with no fields: enough to read the object by its
@@ -36,22 +40,38 @@ pub(crate) fn node_of(record: &Record) -> Node {
     .expect("a node with no fields has no repeated field")
 }
 
-/// Whether the object carries the stamp of the node at `path`, and is the object the record
-/// names (when the record names one).
-pub(crate) fn ours(live: &Live, path: &NodePath, record: Option<&Record>) -> bool {
-    let stamped = match &live.stamp {
-        StampEvidence::Present(stamp) => stamp.same_identity(&Stamp::for_node(path)),
-        _ => false,
-    };
-    let same = record
-        .and_then(|r| r.physical.as_ref())
-        .is_none_or(|physical| *physical == live.physical);
-    stamped && same
-}
-
 impl<'a> Engine<'a> {
-    pub fn new(provider: &'a mut dyn Provider, ledger: &'a dyn Ledger) -> Self {
-        Self { provider, ledger }
+    pub fn new(provider: &'a mut dyn Provider, ledger: &'a dyn Ledger, cell: CellIdentity) -> Self {
+        Self {
+            provider,
+            ledger,
+            cell,
+        }
+    }
+
+    /// Whether the object carries the stamp of the node at `path` in this cell, and is the
+    /// object the record names (when the record names one).
+    pub(crate) fn ours(&self, live: &Live, path: &NodePath, record: Option<&Record>) -> bool {
+        let stamped = match &live.stamp {
+            StampEvidence::Present(stamp) => {
+                stamp.same_identity(&Stamp::for_node(&self.cell, path))
+            }
+            _ => false,
+        };
+        let same = record
+            .and_then(|r| r.physical.as_ref())
+            .is_none_or(|physical| *physical == live.physical);
+        stamped && same
+    }
+
+    /// The nodes of `view` whose kind the engine cannot apply yet (a stamp mode with no
+    /// behaviour behind it).
+    fn unapplicable(&self, view: &Lowered) -> Vec<NodePath> {
+        view.nodes()
+            .iter()
+            .filter(|n| !self.provider.stamp_mode(n.node.kind()).applicable())
+            .map(|n| n.node.path().clone())
+            .collect()
     }
 
     /// Handles one request.
@@ -79,6 +99,10 @@ impl<'a> Engine<'a> {
     }
 
     fn plan_of(&mut self, view: &Lowered) -> Outcome {
+        let embedded = self.unapplicable(view);
+        if !embedded.is_empty() {
+            return Outcome::Refused(Refusal::UnsupportedStampMode(embedded));
+        }
         match self.observe_all(view) {
             Err(error) => failed(Report::default(), None, error),
             Ok(observed) => match plan(view, &observed, None) {
@@ -94,6 +118,10 @@ impl<'a> Engine<'a> {
                 approved: hash.clone(),
                 plan: approved.hash().clone(),
             });
+        }
+        let embedded = self.unapplicable(view);
+        if !embedded.is_empty() {
+            return Outcome::Refused(Refusal::UnsupportedStampMode(embedded));
         }
         let observed = match self.observe_all(view) {
             Ok(observed) => observed,
@@ -132,6 +160,10 @@ impl<'a> Engine<'a> {
         match &step.action {
             Action::Create | Action::Update => self.converge(nodes[&step.path], report),
             Action::Noop => self.settle(nodes[&step.path], report),
+            Action::Converging => {
+                report.converging.push(step.path.clone());
+                Ok(())
+            }
             Action::Delete { .. } => self.delete_step(&step.path, report),
             Action::Reap => self.reap_step(&step.path, report),
             Action::Retain(why) => {
@@ -145,7 +177,10 @@ impl<'a> Engine<'a> {
     /// wanted or not, and each recorded path the view does not name.
     fn observe_all(&mut self, view: &Lowered) -> Result<Observed, EngineError> {
         let snapshot = self.ledger.read()?;
-        let mut observed = Observed::new(LedgerToken::new(snapshot.token.to_string()));
+        let mut observed = Observed::new(
+            LedgerToken::new(snapshot.token.to_string()),
+            self.cell.clone(),
+        );
         let mut subjects: BTreeMap<NodePath, Node> = snapshot
             .records
             .values()
@@ -161,7 +196,6 @@ impl<'a> Engine<'a> {
                 Observation::Present(live) => Some(LiveState {
                     deletability: self.provider.deletability(node.kind(), &live),
                     live,
-                    failed: false,
                 }),
             };
             observed = observed.with(Seen {

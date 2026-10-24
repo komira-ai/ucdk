@@ -61,6 +61,9 @@ pub enum Refusal {
     PlanHashMismatch { approved: PlanHash, plan: PlanHash },
     /// The plan made from the world as it is now is not the approved one.
     PlanChanged { approved: PlanHash, now: PlanHash },
+    /// The file holds nodes of a kind that carries no stamp of its own, which the engine does
+    /// not apply yet.
+    UnsupportedStampMode(Vec<NodePath>),
 }
 
 impl fmt::Display for Refusal {
@@ -83,6 +86,14 @@ impl fmt::Display for Refusal {
                 short(now),
                 short(approved)
             ),
+            Self::UnsupportedStampMode(paths) => {
+                let list: Vec<String> = paths.iter().map(ToString::to_string).collect();
+                write!(
+                    f,
+                    "refused: kinds that carry no stamp of their own are not applied yet: {}",
+                    list.join(", ")
+                )
+            }
         }
     }
 }
@@ -103,6 +114,12 @@ pub struct Report {
     pub reaped: Vec<NodePath>,
     /// Objects left alone on purpose, and why.
     pub retained: Vec<(NodePath, Retained)>,
+    /// Objects the provider reports as still converging: nothing was written to them and their
+    /// records are not confirmed. The run still succeeds; a later run settles them.
+    pub converging: Vec<NodePath>,
+    /// Objects that read as failed after this run's create or repair: their records are not
+    /// confirmed, and the run still succeeds; a later run updates them again.
+    pub failed: Vec<NodePath>,
     /// Objects a rollback deleted (or found gone).
     pub rolled_back: Vec<NodePath>,
     /// Objects a rollback could not delete.
