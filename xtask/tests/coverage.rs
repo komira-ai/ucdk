@@ -6,9 +6,10 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::{Fake, cache_tools, scratch, strings, write};
+use xtask::Finding;
 use xtask::coverage::{
-    Counts, FLOOR, LCOV, check_branches_measured, check_main_rs, crate_of, excluded, gate, members,
-    parse_lcov, run,
+    Counts, FLOOR, LCOV, allow_generated_only, check_branches_measured, check_main_rs, crate_of,
+    excluded, gate, generated_only, members, parse_lcov, run,
 };
 
 /// One lcov record: `lines` lines of which `hit` ran, `branches` branches of which `taken` ran.
@@ -369,5 +370,125 @@ fn the_verb_fails_when_the_lcov_file_has_no_branch_records() {
     assert_eq!(
         found.iter().map(|f| f.rule).collect::<Vec<_>>(),
         ["coverage-no-branches"]
+    );
+}
+
+const HEADER: &str = "// SPDX-License-Identifier: Apache-2.0\n";
+const GLUE: &str = "#[allow(clippy::all)]\npub mod v1 {\n    include!(concat!(env!(\"OUT_DIR\"), \"/x.rs\"));\n}\n";
+
+fn generated(root: &std::path::Path, members: &[&str]) -> Vec<String> {
+    generated_only(root, &strings(members))
+        .into_iter()
+        .collect()
+}
+
+#[test]
+fn a_crate_of_only_include_glue_is_generated_only() {
+    let root = scratch("generated-only-glue");
+    write(&root, "crates/pb/src/lib.rs", &format!("{HEADER}{GLUE}"));
+    write(
+        &root,
+        "crates/inner/src/lib.rs",
+        &format!("{HEADER}#![allow(missing_docs)]\nmod gen {{\n    include!(\"x.rs\");\n}}\n"),
+    );
+    // A second file of glue under a subdirectory, and a file that is not Rust.
+    write(
+        &root,
+        "crates/inner/src/more/mod.rs",
+        "include!(\"y.rs\");\n",
+    );
+    write(&root, "crates/inner/src/notes.txt", "fn not_rust() {}\n");
+    assert_eq!(generated(&root, &["inner", "pb"]), ["inner", "pb"]);
+}
+
+#[test]
+fn a_crate_with_a_hand_written_line_is_not_generated_only() {
+    let root = scratch("generated-only-code");
+    // One line that is not glue, per crate; each near-miss of a glue shape is also code.
+    let cases = [
+        ("fn", "fn helper() {}"),
+        ("attr-open", "#[derive(Debug"),
+        ("inner-attr-open", "#![allow(x"),
+        ("pub-mod-decl", "pub mod v1;"),
+        ("mod-decl", "mod v1;"),
+        ("include-open", "include!(x)"),
+        ("use", "use std::fmt;"),
+    ];
+    for (name, code) in cases {
+        write(
+            &root,
+            &format!("crates/{name}/src/lib.rs"),
+            &format!("{GLUE}{code}\n"),
+        );
+    }
+    // No `include!` at all: an empty crate is an ordinary crate, and is failed as one.
+    write(&root, "crates/empty/src/lib.rs", HEADER);
+    // No `src` directory at all.
+    write(&root, "crates/nosrc/Cargo.toml", "");
+    // Glue in one file does not excuse code in another.
+    write(&root, "crates/mixed/src/lib.rs", GLUE);
+    write(&root, "crates/mixed/src/util.rs", "pub fn f() {}\n");
+    let names: Vec<&str> = cases
+        .iter()
+        .map(|(n, _)| *n)
+        .chain(["empty", "nosrc", "mixed"])
+        .collect();
+    assert_eq!(generated(&root, &names), Vec::<String>::new());
+}
+
+#[test]
+fn only_the_no_lines_finding_of_a_generated_only_crate_is_allowed() {
+    let generated = std::collections::BTreeSet::from(["pb".to_owned()]);
+    let mut found = vec![
+        Finding::new("coverage-no-lines", "pb", "no line measured"),
+        Finding::new("coverage-no-lines", "other", "no line measured"),
+        Finding::new("coverage-lines", "pb", "below the floor"),
+    ];
+    allow_generated_only(&mut found, &generated);
+    assert_eq!(
+        found
+            .iter()
+            .map(|f| (f.rule, f.subject.as_str()))
+            .collect::<Vec<_>>(),
+        [("coverage-no-lines", "other"), ("coverage-lines", "pb")]
+    );
+}
+
+#[test]
+fn the_verb_passes_a_generated_only_crate_and_still_fails_an_empty_one() {
+    let lcov = [
+        record("/r/crates/c/src/lib.rs", 10, 10, 2, 2),
+        record("/r/xtask/src/lib.rs", 10, 10, 0, 0),
+    ]
+    .concat();
+    let lcov: &'static str = Box::leak(lcov.into_boxed_str());
+
+    let root = project("verb-generated");
+    write(&root, "crates/pb/src/lib.rs", GLUE);
+    let fake = Fake {
+        on_run: llvm_cov_writes(lcov),
+        ..Fake::default()
+    };
+    let (found, report) = run(&root, &fake);
+    assert!(found.is_empty(), "{found:?}");
+    assert!(
+        report
+            .iter()
+            .any(|l| l.starts_with("pb: lines 0.00% (0/0)"))
+    );
+
+    let root = project("verb-empty");
+    write(&root, "crates/hollow/src/lib.rs", HEADER);
+    let fake = Fake {
+        on_run: llvm_cov_writes(lcov),
+        ..Fake::default()
+    };
+    let (found, _) = run(&root, &fake);
+    assert_eq!(
+        found
+            .iter()
+            .map(|f| (f.rule, f.subject.as_str()))
+            .collect::<Vec<_>>(),
+        [("coverage-no-lines", "hollow")]
     );
 }
