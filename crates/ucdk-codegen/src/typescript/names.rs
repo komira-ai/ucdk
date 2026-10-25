@@ -146,3 +146,68 @@ pub fn doc(text: &str, indent: usize) -> Vec<String> {
     out.push(format!("{pad} */"));
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snake_case_becomes_camel_case_and_pascal_case_for_method_names() {
+        assert_eq!(camel("plan_hash"), "planHash");
+        assert_eq!(camel("a_2b"), "a2b");
+        assert_eq!(camel("a__b"), "aB");
+        assert_eq!(camel("plain"), "plain");
+        assert_eq!(camel(""), "");
+        assert_eq!(pascal("which_choice"), "WhichChoice");
+        assert_eq!(pascal("choice"), "Choice");
+        assert_eq!(pascal(""), "");
+    }
+
+    #[test]
+    fn a_member_a_class_keeps_gets_an_underscore() {
+        for kept in [
+            "encode",
+            "decode",
+            "encodeInto",
+            "mergeFrom",
+            "constructor",
+            "toString",
+            "valueOf",
+        ] {
+            assert_eq!(member(kept), format!("{kept}_"));
+        }
+        assert_eq!(member("encode_into"), "encodeInto_");
+        assert_eq!(member("from"), "from");
+    }
+
+    #[test]
+    fn a_parameter_that_is_a_word_or_a_name_the_generated_code_uses_gets_an_underscore() {
+        for word in [
+            "delete",
+            "default",
+            "new",
+            "class",
+            "fields",
+            "options",
+            "init",
+            "arguments",
+        ] {
+            assert_eq!(param(word), format!("{word}_"));
+        }
+        assert_eq!(param("name"), "name");
+        assert_eq!(param("from"), "from");
+    }
+
+    #[test]
+    fn a_pair_is_written_short_when_both_sides_are_one_word() {
+        assert_eq!(pair("a", "a"), "a");
+        assert_eq!(pair("delete", "delete_"), "delete: delete_");
+    }
+
+    #[test]
+    fn a_doc_comment_is_one_line_when_it_is_one_and_cannot_end_itself() {
+        assert_eq!(doc("One.", 2), ["  /** One. */"]);
+        assert_eq!(doc("A\n\nB", 0), ["/**", " * A", " *", " * B", " */"]);
+        assert_eq!(doc("ends */ here", 0), ["/** ends *\\/ here */"]);
+    }
+}

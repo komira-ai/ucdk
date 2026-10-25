@@ -140,7 +140,7 @@ fn ensure_all_installs_each_pinned_tool_and_reports_each_failure() {
     let found = ensure_all(&root, &fake);
     assert_eq!(
         found.iter().map(|f| f.subject.as_str()).collect::<Vec<_>>(),
-        ["cargo-deny", "cargo-llvm-cov"]
+        ["cargo-deny", "cargo-llvm-cov", "node"]
     );
 
     let blocked = scratch("fetch-all-blocked");
@@ -157,9 +157,14 @@ fn ensure_all_installs_each_pinned_tool_and_reports_each_failure() {
 #[test]
 fn the_pins_are_https_release_urls_with_full_hashes() {
     let tools = pinned();
-    assert_eq!(tools.len(), 2);
+    assert_eq!(tools.len(), 3);
     for t in &tools {
-        assert!(t.url.starts_with("https://github.com/"), "{}", t.url);
+        assert!(
+            t.url.starts_with("https://github.com/")
+                || t.url.starts_with("https://nodejs.org/dist/"),
+            "{}",
+            t.url
+        );
         assert_eq!(t.sha256.len(), 64, "{}", t.name);
         assert!(
             t.sha256

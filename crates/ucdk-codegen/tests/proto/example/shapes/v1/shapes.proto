@@ -96,7 +96,6 @@ message Pair {
 message Words {
   string delete = 1;
   string options = 2;
-  string fields = 3;
 }
 
 message Empty {}

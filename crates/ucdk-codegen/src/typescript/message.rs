@@ -76,7 +76,7 @@ fn encode_field(f: &Field) -> Vec<String> {
         Shape::Map(value) => {
             let mut lines = vec![
                 format!("for (const [key, item] of wire.sortedEntries({this})) {{"),
-                "  const entry: wire.Out = [];".to_owned(),
+                "  const entry = new wire.Out();".to_owned(),
                 "  if (key !== \"\") {".to_owned(),
                 format!("    {}", put(&Scalar::Str, "entry", 1, "key")),
                 "  }".to_owned(),
@@ -90,7 +90,10 @@ fn encode_field(f: &Field) -> Vec<String> {
                 lines.push(format!("    {}", put(value, "entry", 2, "item")));
             }
             lines.push("  }".to_owned());
-            lines.push(format!("  wire.putBytes(out, {}, entry);", f.number));
+            lines.push(format!(
+                "  wire.putBytes(out, {}, entry.bytes());",
+                f.number
+            ));
             lines.push("}".to_owned());
             lines
         }

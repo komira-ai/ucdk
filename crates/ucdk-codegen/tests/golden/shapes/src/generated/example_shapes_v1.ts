@@ -198,8 +198,8 @@ export class Scalars extends wire.Message {
     return new Scalars({ ...fields, aNested: new Scalars_Nested({ v, kind }) });
   }
 
-  static aWords(delete_: string, options_: string, fields_: string, fields: ScalarsInit = {}): Scalars {
-    return new Scalars({ ...fields, aWords: new Words({ delete: delete_, options: options_, fields: fields_ }) });
+  static aWords(delete_: string, options_: string, fields: ScalarsInit = {}): Scalars {
+    return new Scalars({ ...fields, aWords: new Words({ delete: delete_, options: options_ }) });
   }
 
   /** The name of the arm of `other` that is set, or undefined. */
@@ -264,17 +264,17 @@ export class Scalars extends wire.Message {
       wire.putMessage(out, 14, item);
     }
     for (const [key, item] of wire.sortedEntries(this.labels)) {
-      const entry: wire.Out = [];
+      const entry = new wire.Out();
       if (key !== "") {
         wire.putString(entry, 1, key);
       }
       if (item !== "") {
         wire.putString(entry, 2, item);
       }
-      wire.putBytes(out, 15, entry);
+      wire.putBytes(out, 15, entry.bytes());
     }
     for (const [key, item] of wire.sortedEntries(this.innerMap)) {
-      const entry: wire.Out = [];
+      const entry = new wire.Out();
       if (key !== "") {
         wire.putString(entry, 1, key);
       }
@@ -282,27 +282,27 @@ export class Scalars extends wire.Message {
       if (payload.length > 0) {
         wire.putBytes(entry, 2, payload);
       }
-      wire.putBytes(out, 16, entry);
+      wire.putBytes(out, 16, entry.bytes());
     }
     for (const [key, item] of wire.sortedEntries(this.counts)) {
-      const entry: wire.Out = [];
+      const entry = new wire.Out();
       if (key !== "") {
         wire.putString(entry, 1, key);
       }
       if (item !== 0) {
         wire.putVarintField(entry, 2, item);
       }
-      wire.putBytes(out, 17, entry);
+      wire.putBytes(out, 17, entry.bytes());
     }
     for (const [key, item] of wire.sortedEntries(this.modes)) {
-      const entry: wire.Out = [];
+      const entry = new wire.Out();
       if (key !== "") {
         wire.putString(entry, 1, key);
       }
       if (item !== 0) {
         wire.putVarintField(entry, 2, item);
       }
-      wire.putBytes(out, 18, entry);
+      wire.putBytes(out, 18, entry.bytes());
     }
     if (this.from !== "") {
       wire.putString(out, 19, this.from);
@@ -719,20 +719,17 @@ export class Pair extends wire.Message {
 export interface WordsInit {
   delete?: string;
   options?: string;
-  fields?: string;
 }
 
 /** Fields named like words a TypeScript parameter may not be called. */
 export class Words extends wire.Message {
   delete: string;
   options: string;
-  fields: string;
 
   constructor(init: WordsInit = {}) {
     super();
     this.delete = init.delete ?? "";
     this.options = init.options ?? "";
-    this.fields = init.fields ?? "";
   }
 
   protected encodeInto(out: wire.Out): void {
@@ -741,9 +738,6 @@ export class Words extends wire.Message {
     }
     if (this.options !== "") {
       wire.putString(out, 2, this.options);
-    }
-    if (this.fields !== "") {
-      wire.putString(out, 3, this.fields);
     }
   }
 
@@ -757,10 +751,6 @@ export class Words extends wire.Message {
         }
         case 2: {
           this.options = wire.str(value);
-          break;
-        }
-        case 3: {
-          this.fields = wire.str(value);
           break;
         }
         default:

@@ -218,8 +218,8 @@ class Scalars(_wire.Message):
         return cls(a_nested=Scalars_Nested(v=v, kind=kind), **fields)
 
     @classmethod
-    def a_words(cls, delete: str, options: str, fields: str, **fields: Any) -> "Scalars":
-        return cls(a_words=Words(delete=delete, options=options, fields=fields), **fields)
+    def a_words(cls, delete: str, options: str, **fields: Any) -> "Scalars":
+        return cls(a_words=Words(delete=delete, options=options), **fields)
 
     def which_other(self) -> Optional[str]:
         """The name of the arm of `other` that is set, or None."""
@@ -613,26 +613,21 @@ class Words(_wire.Message):
     _FIELDS = (
         "delete",
         "options",
-        "fields",
     )
 
     def __init__(
         self,
         delete: str = "",
         options: str = "",
-        fields: str = "",
     ) -> None:
         self.delete = delete
         self.options = options
-        self.fields = fields
 
     def _encode_into(self, out: bytearray) -> None:
         if self.delete:
             _wire.put_string(out, 1, self.delete)
         if self.options:
             _wire.put_string(out, 2, self.options)
-        if self.fields:
-            _wire.put_string(out, 3, self.fields)
 
     def _merge(self, data: bytes) -> None:
         for number, wire_type, value in _wire.read_fields(data):
@@ -642,9 +637,6 @@ class Words(_wire.Message):
             elif number == 2:
                 _wire.expect(wire_type, _wire.LEN)
                 self.options = _wire.get_string(value)
-            elif number == 3:
-                _wire.expect(wire_type, _wire.LEN)
-                self.fields = _wire.get_string(value)
 
 
 class Empty(_wire.Message):

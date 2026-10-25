@@ -26,8 +26,37 @@ export class DecodeError extends Error {
 
 // ---- writing ---------------------------------------------------------------------------------
 
-/** The bytes being written. */
-export type Out = number[];
+/** The bytes being written: a buffer that grows. */
+export class Out {
+  #buffer = new Uint8Array(256);
+  #length = 0;
+
+  #reserve(more: number): void {
+    const needed = this.#length + more;
+    if (needed > this.#buffer.length) {
+      const grown = new Uint8Array(Math.max(needed, this.#buffer.length * 2));
+      grown.set(this.#buffer.subarray(0, this.#length));
+      this.#buffer = grown;
+    }
+  }
+
+  push(byte: number): void {
+    this.#reserve(1);
+    this.#buffer[this.#length] = byte;
+    this.#length += 1;
+  }
+
+  append(data: Uint8Array): void {
+    this.#reserve(data.length);
+    this.#buffer.set(data, this.#length);
+    this.#length += data.length;
+  }
+
+  /** A copy of the bytes written. */
+  bytes(): Uint8Array {
+    return this.#buffer.slice(0, this.#length);
+  }
+}
 
 /** Appends `value` as a varint; a negative number is its 64-bit two's complement. */
 export function putVarint(out: Out, value: number | bigint): void {
@@ -52,12 +81,10 @@ export function putBool(out: Out, number: number, value: boolean): void {
   putVarintField(out, number, value ? 1 : 0);
 }
 
-export function putBytes(out: Out, number: number, value: ArrayLike<number>): void {
+export function putBytes(out: Out, number: number, value: Uint8Array): void {
   putTag(out, number, LEN);
   putVarint(out, value.length);
-  for (let i = 0; i < value.length; i += 1) {
-    out.push(value[i] as number);
-  }
+  out.append(value);
 }
 
 export function putString(out: Out, number: number, value: string): void {
@@ -260,8 +287,8 @@ export abstract class Message {
 
   /** The proto3 binary form of this message. */
   encode(): Uint8Array {
-    const out: Out = [];
+    const out = new Out();
     this.encodeInto(out);
-    return Uint8Array.from(out);
+    return out.bytes();
   }
 }

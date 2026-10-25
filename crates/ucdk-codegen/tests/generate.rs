@@ -346,10 +346,10 @@ fn a_member_the_class_keeps_gets_an_underscore_and_a_parameter_that_is_a_word_do
     assert!(text.contains("  encode_?: string;"));
     // As a property any word is a name, as a parameter it is not.
     assert!(text.contains(
-        "static aWords(delete_: string, options_: string, fields_: string, fields: ScalarsInit = {}): Scalars {"
+        "static aWords(delete_: string, options_: string, fields: ScalarsInit = {}): Scalars {"
     ));
     assert!(text.contains(
-        "new Scalars({ ...fields, aWords: new Words({ delete: delete_, options: options_, fields: fields_ }) })"
+        "new Scalars({ ...fields, aWords: new Words({ delete: delete_, options: options_ }) })"
     ));
     // A message without fields needs no object.
     assert!(text.contains("aEmpty: new Empty() })"));
