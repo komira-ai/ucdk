@@ -5,8 +5,9 @@
 use std::fmt::Write as _;
 
 use ucdk_api::v1::ExitClass;
-use ucdk_engine::{Failure, Report};
+use ucdk_engine::{Failure, ObjectStatus, Report, Standing, State};
 use ucdk_plan::{Action, Plan, PlanHash, Retained};
+use ucdk_provider::Status;
 
 use crate::args::Mode;
 use crate::world::ProviderName;
@@ -65,6 +66,39 @@ pub fn plan_text(provider: ProviderName, mode: Mode, plan: &Plan) -> String {
     } else {
         format!("{changes} to change\n")
     });
+    text
+}
+
+/// What the ledger and the provider show, one line per object: the record's state, the live
+/// object's status, and whether the two agree.
+pub fn status_text(provider: ProviderName, objects: &[ObjectStatus]) -> String {
+    let mut text = format!("ucdk status\nprovider: {}\n", provider.as_str());
+    for object in objects {
+        let record = object.record.map_or("none", |state| match state {
+            State::Intent => "intent",
+            State::Confirmed => "confirmed",
+            State::Reaping => "reaping",
+        });
+        let live = object.live.map_or("absent", |status| match status {
+            Status::Ready => "ready",
+            Status::Converging => "converging",
+            Status::Failed => "failed",
+        });
+        let note = match object.standing {
+            Standing::Agrees => "agrees",
+            Standing::Pending => "pending (a run began and did not finish)",
+            Standing::Missing => "missing (recorded, and the object is gone)",
+            Standing::NotApplied => "not applied",
+            Standing::Unclaimed => "unclaimed (not ours, or ours with no record)",
+        };
+        let _ = writeln!(
+            text,
+            "  {} [{}] record: {record}, live: {live}, {note}",
+            object.path,
+            object.kind.as_str()
+        );
+    }
+    let _ = writeln!(text, "{} objects", objects.len());
     text
 }
 

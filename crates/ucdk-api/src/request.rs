@@ -6,7 +6,8 @@ use ucdk_plan::{Finding, Lowered, Plan, PlanHash, lower};
 use ucdk_proto::v1::ResourceList;
 
 use crate::v1::{
-    ApplyRequest, DestroyRequest, Error, ErrorCode, ExitClass, Mode, Outcome, PlanRequest, outcome,
+    ApplyRequest, DestroyRequest, Error, ErrorCode, ExitClass, Mode, Outcome, PlanRequest,
+    StatusRequest, outcome,
 };
 
 /// Why a request message cannot become an engine request.
@@ -60,6 +61,15 @@ impl PlanRequest {
         Ok(Request::Plan {
             desired: desired(self.resources.as_ref())?,
             mode,
+        })
+    }
+}
+
+impl StatusRequest {
+    /// The engine request that reads the world; it changes nothing.
+    pub fn to_request(&self) -> Result<Request, RequestError> {
+        Ok(Request::Status {
+            desired: desired(self.resources.as_ref())?,
         })
     }
 }

@@ -3,8 +3,11 @@
 
 use std::fmt;
 
+use std::collections::BTreeMap;
+
+use ucdk_ledger::State;
 use ucdk_plan::{Conflict, Lowered, Plan, PlanHash, Retained};
-use ucdk_provider::NodePath;
+use ucdk_provider::{Kind, NodePath, Status};
 
 use crate::error::{EngineError, short};
 
@@ -36,6 +39,9 @@ pub enum Request {
         plan: Plan,
         plan_hash: PlanHash,
     },
+    /// Read the ledger and the live objects it records and `desired` names, and change
+    /// nothing: no ledger write, no provider call that mutates.
+    Status { desired: Lowered },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +50,8 @@ pub enum Outcome {
     Planned(Plan),
     /// The run finished.
     Done(Report),
+    /// The answer of a `Request::Status`: one entry per object, in path order.
+    Status(Vec<ObjectStatus>),
     /// The run was refused before anything was changed.
     Refused(Refusal),
     /// The run stopped; `Failure::report` says what had been done.
@@ -139,4 +147,34 @@ pub struct Failure {
     /// be read).
     pub at: Option<NodePath>,
     pub error: EngineError,
+}
+
+/// How an object's record and the live object stand against each other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standing {
+    /// The record is confirmed and the live object is the one it names, carrying our stamp.
+    Agrees,
+    /// The record is an intent or a reap (a run began and did not finish) and the live object
+    /// is ours: a later run settles it.
+    Pending,
+    /// A record exists and no live object does (deleted out of band, or never created).
+    Missing,
+    /// The file names the object and there is neither a record nor a live object.
+    NotApplied,
+    /// A live object is there that is not ours, or ours with no record of it.
+    Unclaimed,
+}
+
+/// One object as the ledger and the provider show it now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectStatus {
+    pub path: NodePath,
+    pub kind: Kind,
+    /// The state of the ledger's record; none when the ledger has none.
+    pub record: Option<State>,
+    /// The live object's status; none when the provider shows no such object.
+    pub live: Option<Status>,
+    pub standing: Standing,
+    /// The non-secret outputs the record holds.
+    pub outputs: BTreeMap<String, String>,
 }

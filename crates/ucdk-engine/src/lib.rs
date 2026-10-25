@@ -27,6 +27,9 @@
 //!   that is still converging gets no write, and its record is not confirmed until a read
 //!   shows it ready; the run still succeeds and the report says which objects are waiting.
 //!   An object that still reads failed after the run's create or repair is reported as failed.
+//! - **Read-only status.** `Request::Status` reads the ledger and observes each recorded and
+//!   each wanted object through the provider, and makes no ledger write and no provider call
+//!   that mutates; each entry says whether record and object agree.
 //! - **One cell.** Every stamp carries the engine's cell, and an object stamped for another
 //!   cell is not ours.
 //! - **Outputs.** After a confirmed create or update the record holds the object's non-secret
@@ -55,8 +58,10 @@ mod delete;
 mod engine;
 mod error;
 mod seam;
+mod status;
 mod write;
 
 pub use engine::Engine;
 pub use error::EngineError;
-pub use seam::{Failure, Mode, Outcome, Refusal, Report, Request};
+pub use seam::{Failure, Mode, ObjectStatus, Outcome, Refusal, Report, Request, Standing};
+pub use ucdk_ledger::State;

@@ -101,6 +101,7 @@ impl<'a> Engine<'a> {
                 Ok(view) => self.run(&view, &plan, &plan_hash, false),
                 Err(refusal) => Outcome::Refused(refusal),
             },
+            Request::Status { desired } => self.status_of(&desired),
         }
     }
 
