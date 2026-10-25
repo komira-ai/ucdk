@@ -6,15 +6,18 @@
 //! path relative to an SDK's package directory and its text. Nothing here touches the file
 //! system but [`compile`], which reads the protos; the caller writes (or compares) the files.
 //!
-//! One target exists: [`python`]. Per proto package it writes a module of message classes that
-//! encode and decode themselves (so the SDK has no protobuf runtime dependency), and, for the
-//! resource catalog, typed templates and typed output references read from the message options.
+//! Two targets exist: [`python`] and [`typescript`]. Per proto package each writes a module of
+//! message classes that encode and decode themselves (so the SDK has no protobuf runtime
+//! dependency), and, for the resource catalog, typed templates and typed output references read
+//! from the message options. What the targets read from the descriptors is shared (`model`,
+//! `kinds`); what they write is not.
 
 mod docs;
 mod kinds;
 mod model;
 mod names;
 pub mod python;
+pub mod typescript;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -89,4 +92,9 @@ pub fn compile(root: &Path) -> Result<DescriptorPool, Error> {
 /// The Python SDK's generated files for the repository's protos under `root`.
 pub fn python_for(root: &Path) -> Result<Vec<File>, Error> {
     python::generate(&compile(root)?, &PROTO_FILES)
+}
+
+/// The TypeScript SDK's generated files for the repository's protos under `root`.
+pub fn typescript_for(root: &Path) -> Result<Vec<File>, Error> {
+    typescript::generate(&compile(root)?, &PROTO_FILES)
 }

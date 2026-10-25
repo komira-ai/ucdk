@@ -72,10 +72,20 @@ pub fn generate_shapes() -> Vec<Generated> {
     ucdk_codegen::python::generate(&shapes_pool(), &[SHAPES]).expect("the fixture generates")
 }
 
+pub fn generate_shapes_ts() -> Vec<Generated> {
+    ucdk_codegen::typescript::generate(&shapes_pool(), &[SHAPES]).expect("the fixture generates")
+}
+
 /// The refusal for `source` (a proto file in the package `t`).
 pub fn refusal(source: &str) -> Error {
     let text = format!("syntax = \"proto3\";\npackage t;\n{source}");
     ucdk_codegen::python::generate(&pool_of(&text), &["test.proto"]).expect_err("it is refused")
+}
+
+/// The refusal of the TypeScript target for `source` (a proto file in the package `t`).
+pub fn refusal_ts(source: &str) -> Error {
+    let text = format!("syntax = \"proto3\";\npackage t;\n{source}");
+    ucdk_codegen::typescript::generate(&pool_of(&text), &["test.proto"]).expect_err("it is refused")
 }
 
 pub fn text_of<'a>(files: &'a [Generated], name: &str) -> &'a str {

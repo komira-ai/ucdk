@@ -83,6 +83,7 @@ class Scalars(_wire.Message):
         "a_empty",
         "a_deep",
         "a_nested",
+        "a_words",
         "o_text",
         "nested",
         "http",
@@ -119,6 +120,7 @@ class Scalars(_wire.Message):
         a_empty: Optional[Empty] = None,
         a_deep: Optional[Nest_Deep] = None,
         a_nested: Optional[Scalars_Nested] = None,
+        a_words: Optional[Words] = None,
         o_text: Optional[str] = None,
         nested: Optional[Scalars_Nested] = None,
         http: Http2Mode = Http2Mode.UNSPECIFIED,
@@ -152,6 +154,7 @@ class Scalars(_wire.Message):
         self.a_empty = a_empty
         self.a_deep = a_deep
         self.a_nested = a_nested
+        self.a_words = a_words
         self.o_text = o_text
         self.nested = nested
         self.http = http
@@ -168,6 +171,7 @@ class Scalars(_wire.Message):
             "a_empty",
             "a_deep",
             "a_nested",
+            "a_words",
         ))
 
     def _clear_choice(self) -> None:
@@ -179,6 +183,7 @@ class Scalars(_wire.Message):
         self.a_empty = None
         self.a_deep = None
         self.a_nested = None
+        self.a_words = None
 
     @classmethod
     def a_text(cls, a_text: str, **fields: Any) -> "Scalars":
@@ -211,6 +216,10 @@ class Scalars(_wire.Message):
     @classmethod
     def a_nested(cls, v: str, kind: Scalars_Nested_Kind, **fields: Any) -> "Scalars":
         return cls(a_nested=Scalars_Nested(v=v, kind=kind), **fields)
+
+    @classmethod
+    def a_words(cls, delete: str, options: str, fields: str, **fields: Any) -> "Scalars":
+        return cls(a_words=Words(delete=delete, options=options, fields=fields), **fields)
 
     def which_other(self) -> Optional[str]:
         """The name of the arm of `other` that is set, or None."""
@@ -314,6 +323,8 @@ class Scalars(_wire.Message):
             _wire.put_message(out, 36, self.a_deep)
         elif arm == "a_nested":
             _wire.put_message(out, 37, self.a_nested)
+        elif arm == "a_words":
+            _wire.put_message(out, 38, self.a_words)
         arm = self.which_other()
         if arm == "o_text":
             _wire.put_string(out, 40, self.o_text)
@@ -473,6 +484,14 @@ class Scalars(_wire.Message):
                     current = Scalars_Nested()
                 self.a_nested = current
                 self.a_nested._merge(value)
+            elif number == 38:
+                _wire.expect(wire_type, _wire.LEN)
+                current = self.a_words
+                self._clear_choice()
+                if current is None:
+                    current = Words()
+                self.a_words = current
+                self.a_words._merge(value)
             elif number == 40:
                 _wire.expect(wire_type, _wire.LEN)
                 self._clear_other()
@@ -584,6 +603,48 @@ class Pair(_wire.Message):
             elif number == 3:
                 _wire.expect(wire_type, _wire.VARINT)
                 self.speed = _wire.get_enum(Mode, value)
+
+
+class Words(_wire.Message):
+    """
+    Fields named like words a TypeScript parameter may not be called.
+    """
+
+    _FIELDS = (
+        "delete",
+        "options",
+        "fields",
+    )
+
+    def __init__(
+        self,
+        delete: str = "",
+        options: str = "",
+        fields: str = "",
+    ) -> None:
+        self.delete = delete
+        self.options = options
+        self.fields = fields
+
+    def _encode_into(self, out: bytearray) -> None:
+        if self.delete:
+            _wire.put_string(out, 1, self.delete)
+        if self.options:
+            _wire.put_string(out, 2, self.options)
+        if self.fields:
+            _wire.put_string(out, 3, self.fields)
+
+    def _merge(self, data: bytes) -> None:
+        for number, wire_type, value in _wire.read_fields(data):
+            if number == 1:
+                _wire.expect(wire_type, _wire.LEN)
+                self.delete = _wire.get_string(value)
+            elif number == 2:
+                _wire.expect(wire_type, _wire.LEN)
+                self.options = _wire.get_string(value)
+            elif number == 3:
+                _wire.expect(wire_type, _wire.LEN)
+                self.fields = _wire.get_string(value)
 
 
 class Empty(_wire.Message):

@@ -4,7 +4,7 @@
 use prost_reflect::EnumDescriptor;
 
 use crate::model::Scalar;
-use crate::names::{enum_member, local_name, module_of};
+use crate::names::{enum_member, type_ref};
 
 impl Scalar {
     /// The Python type, written as seen from `current`, the package of the module it is in.
@@ -60,17 +60,6 @@ impl Scalar {
             Self::Enum(_) => format!("_wire.get_enum({}, {raw})", self.annotation(current)),
             Self::Message(_) => format!("{}.decode({raw})", self.annotation(current)),
         }
-    }
-}
-
-/// A type named `full_name` of `package`, as written in a module of package `current`: bare in
-/// its own module, qualified by the module it is imported from otherwise.
-pub fn type_ref(package: &str, full_name: &str, current: &str) -> String {
-    let name = local_name(full_name, package);
-    if package == current {
-        name
-    } else {
-        format!("{}.{name}", module_of(package))
     }
 }
 

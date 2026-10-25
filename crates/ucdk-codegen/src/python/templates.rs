@@ -97,7 +97,7 @@ fn template(catalog: &Catalog, kind: &Kind) -> Vec<String> {
 
     // Each oneof argument takes either arm: the name each is known by inside the class, and its
     // Python type.
-    let mut arm_lists: Vec<(&str, Vec<(&str, String)>, Vec<String>)> = Vec::new();
+    let mut arm_lists: Vec<(&str, Vec<(&str, String)>)> = Vec::new();
     for oneof in &kind.oneofs {
         let arms: Vec<(&str, String)> = oneof
             .arms
@@ -107,8 +107,7 @@ fn template(catalog: &Catalog, kind: &Kind) -> Vec<String> {
         for ((_, message), (_, ty)) in oneof.arms.iter().zip(&arms) {
             out.push(format!("    {} = {ty}", message.name()));
         }
-        let types = arms.iter().map(|(_, ty)| ty.clone()).collect();
-        arm_lists.push((&oneof.name, arms, types));
+        arm_lists.push((&oneof.name, arms));
     }
 
     out.push(String::new());
@@ -133,7 +132,8 @@ fn template(catalog: &Catalog, kind: &Kind) -> Vec<String> {
             out.push(format!("        {},", param(f, "")));
         }
     }
-    for (oneof, _, types) in &arm_lists {
+    for (oneof, arms) in &arm_lists {
+        let types: Vec<&str> = arms.iter().map(|(_, ty)| ty.as_str()).collect();
         out.push(format!(
             "        {oneof}: Union[{}, None] = None,",
             types.join(", ")
@@ -152,7 +152,7 @@ fn template(catalog: &Catalog, kind: &Kind) -> Vec<String> {
         out.push(format!("            {}={value},", f.attr));
     }
     out.push("        )".to_owned());
-    for (oneof, arms, _) in &arm_lists {
+    for (oneof, arms) in &arm_lists {
         let pairs: Vec<String> = arms
             .iter()
             .map(|(attr, ty)| format!("(\"{attr}\", {ty})"))

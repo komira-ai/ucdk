@@ -74,3 +74,14 @@ pub fn docstring(text: &str, indent: usize) -> Vec<String> {
         })
         .collect()
 }
+
+/// A type named `full_name` of `package`, as written in a module of package `current`: bare in
+/// its own module, qualified by the module it is imported from otherwise.
+pub fn type_ref(package: &str, full_name: &str, current: &str) -> String {
+    let name = local_name(full_name, package);
+    if package == current {
+        name
+    } else {
+        format!("{}.{name}", module_of(package))
+    }
+}
