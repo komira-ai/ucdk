@@ -2,7 +2,7 @@
 /**
  * The C ABI of the ucdk library (`crates/ucdk-capi/include/ucdk.h`), bound with `node:ffi`.
  *
- * This is the whole of the binding: load the library, check its version, call the nine
+ * This is the whole of the binding: load the library, check its version, call the ten
  * functions. Nothing is read from the environment; the library is named by an argument.
  *
  * A `Library` calls the library on the thread it is used on, and a call blocks that thread until
@@ -14,12 +14,12 @@ import type * as Ffi from "node:ffi";
 import { AbiMismatch, LibraryError, errorFor } from "./errors.ts";
 
 /** The ABI this SDK was written for, as [major, minor]: the header's UCDK_ABI_MAJOR/MINOR. */
-export const SDK_ABI: readonly [number, number] = [0, 1];
+export const SDK_ABI: readonly [number, number] = [0, 2];
 
 /** The verbs that take a request message and answer with a response message. */
-export type Verb = "load_catalog" | "plan" | "apply" | "destroy" | "status";
+export type Verb = "load_catalog" | "plan" | "apply" | "destroy" | "status" | "leaks";
 
-const VERBS: readonly Verb[] = ["load_catalog", "plan", "apply", "destroy", "status"];
+const VERBS: readonly Verb[] = ["load_catalog", "plan", "apply", "destroy", "status", "leaks"];
 
 /** [major, minor] of `ucdk_abi_version()`, which is (major << 16) | minor. */
 export function splitVersion(version: number): [number, number] {

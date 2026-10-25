@@ -13,8 +13,8 @@ use common::{Hooked, call, list_of, service_of};
 use prost::Message as _;
 use ucdk_api::v1::{Mode, PlanRequest, StatusRequest};
 use ucdk_capi::{
-    OK, Session, into_handle, ucdk_buf_free, ucdk_load_catalog, ucdk_plan, ucdk_session_close,
-    ucdk_status,
+    OK, Session, into_handle, ucdk_buf_free, ucdk_leaks, ucdk_load_catalog, ucdk_plan,
+    ucdk_session_close, ucdk_status,
 };
 use ucdk_ledger::MemoryLedger;
 use ucdk_provider::kit;
@@ -54,7 +54,7 @@ static ALLOCATOR: Counting = Counting;
 
 /// Proves: a response is held by the library's allocation until `ucdk_buf_free` (the live bytes
 /// rise by at least the response's length and fall back to exactly where they were), and
-/// 300 calls of the three read verbs, each freed, leave the live bytes where the first round left
+/// 400 calls of the four read verbs, each freed, leave the live bytes where the first round left
 /// them. Catches a response that is copied and the original leaked, a free that does not free,
 /// and a per-call leak.
 #[test]
@@ -67,7 +67,7 @@ fn every_response_is_freed_by_buf_free_and_nothing_leaks() {
         kit::cell(),
     ));
     let list = list_of(vec![service_of("web", 80), service_of("db", 5432)]);
-    let requests: [(common::VerbFn, Vec<u8>); 3] = [
+    let requests: [(common::VerbFn, Vec<u8>); 4] = [
         (ucdk_load_catalog, list.encode_to_vec()),
         (
             ucdk_plan,
@@ -84,6 +84,7 @@ fn every_response_is_freed_by_buf_free_and_nothing_leaks() {
             }
             .encode_to_vec(),
         ),
+        (ucdk_leaks, Vec::new()),
     ];
     let round = || {
         for (verb, request) in &requests {
@@ -113,6 +114,6 @@ fn every_response_is_freed_by_buf_free_and_nothing_leaks() {
     for _ in 0..100 {
         round();
     }
-    assert_eq!(live(), before, "300 calls left nothing behind");
+    assert_eq!(live(), before, "400 calls left nothing behind");
     ucdk_session_close(session);
 }

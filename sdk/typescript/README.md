@@ -38,7 +38,7 @@ console.log(done.done?.created, done.exit);
 - 64 bit integers are `bigint`s; the rest are `number`s. An enum is a constant object
   (`api.ExitClass.DONE`) and its type. A field is named in camel case (`planHash`).
 - `src/generated` is written by `cargo xtask gen-sdk` from the protos and is not edited by hand.
-  Everything else in `src` is hand-written and small: `library.ts` (the nine C functions),
+  Everything else in `src` is hand-written and small: `library.ts` (the ten C functions),
   `session.ts` and `worker.ts`, and `errors.ts`.
 
 Tests are in `tests`, use only Node's built-in test runner, and run with `cargo xtask sdk-test`,

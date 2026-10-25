@@ -13,7 +13,7 @@ use ucdk_plan::{Lowered, lower};
 use ucdk_proto::v1::ResourceList;
 
 use crate::args::{Approval, Command, Invocation, Mode, USAGE, Verb, parse};
-use crate::render::{failure, header, plan_text, report_text, status_text};
+use crate::render::{failure, header, leaks_text, plan_text, report_text, status_text};
 use crate::world::World;
 
 /// A command that stops: its exit code and what to print to standard error.
@@ -89,6 +89,13 @@ fn check_saved(invocation: &Invocation, approval: &Approval) -> Result<(), Exit>
 }
 
 fn execute(invocation: &Invocation, world: &mut World) -> Result<ExitClass, Exit> {
+    if matches!(invocation.verb, Verb::Leaks) {
+        let ledger = world.ledger.clone();
+        let cell = world.cell.clone();
+        let outcome =
+            Engine::new(world.cloud(invocation.provider), &ledger, cell).handle(Request::Leaks);
+        return finish(outcome, invocation, world);
+    }
     let desired = read_input(&invocation.input)?;
     if let Verb::Apply(approval) | Verb::Destroy(approval) = &invocation.verb {
         check_saved(invocation, approval)?;
@@ -147,13 +154,18 @@ fn finish(outcome: Outcome, invocation: &Invocation, world: &mut World) -> Resul
                 .push_str(&status_text(invocation.provider, &objects));
             Ok(class)
         }
+        Outcome::Leaks(leaks) => {
+            world.out.push_str(&leaks_text(invocation.provider, &leaks));
+            Ok(class)
+        }
         Outcome::Refused(Refusal::UnhostedKinds(unhosted)) => {
             // The refusal is the run's whole answer: it goes to standard output, one line for
             // each node, under the header of the command that was refused.
             let verb = match invocation.verb {
                 Verb::Plan { .. } => "plan",
                 Verb::Status => "status",
-                Verb::Apply(_) | Verb::Destroy(_) => "apply",
+                // `leaks` asks for no kind, so it is never refused for one.
+                Verb::Apply(_) | Verb::Destroy(_) | Verb::Leaks => "apply",
             };
             let lines: BTreeSet<String> = unhosted
                 .iter()

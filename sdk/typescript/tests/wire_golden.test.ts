@@ -109,6 +109,18 @@ function report(): api.Report {
     blockedByFailed: [new api.Blocked({ path: "j/run", producer: "i/run" })],
     rolledBack: ["k/run"],
     rollbackFailed: [new api.RollbackFailure({ path: "l/run", message: "gone" })],
+    leaks: [leak()],
+    leakSweepFailed: error(),
+  });
+}
+
+function leak(): api.Leak {
+  return new api.Leak({
+    kind: "service",
+    physicalId: "svc-0001",
+    name: "ghost-run",
+    owner: "ghost",
+    node: "abcdefghijklmnopqrstuvwxyz",
   });
 }
 
@@ -177,6 +189,7 @@ function cases(): Record<string, Case> {
       planHash: "cd".repeat(32),
     }),
     status_request: new api.StatusRequest({ resources: resourceList() }),
+    leaks_request: new api.LeaksRequest({}),
     outcome_planned: new api.Outcome({ planned: plan, exit: api.ExitClass.DONE }),
     outcome_done: new api.Outcome({ done: report(), exit: api.ExitClass.DONE }),
     outcome_refused_findings: refused({ findings: new api.Findings({ findings: [finding()] }) }),
@@ -232,6 +245,10 @@ function cases(): Record<string, Case> {
         ],
       }),
       exit: api.ExitClass.DONE,
+    }),
+    outcome_leaks: new api.Outcome({
+      leaks: new api.LeaksResponse({ leaks: [leak()] }),
+      exit: api.ExitClass.LEAKS,
     }),
     catalog_response: new api.CatalogResponse({
       nodes: [

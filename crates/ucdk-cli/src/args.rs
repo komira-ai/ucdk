@@ -11,6 +11,7 @@ pub const USAGE: &str = "\
 usage: ucdk --version
        ucdk plan --provider=<fake|fake-limited> --input=<resources.pb> [--mode=<apply|destroy>] [--out=<plan file>]
        ucdk status --provider=<fake|fake-limited> --input=<resources.pb>
+       ucdk leaks --provider=<fake|fake-limited>
        ucdk apply --provider=<fake|fake-limited> --input=<resources.pb> --plan=<plan file> --expect-plan-hash=<hash>
        ucdk destroy --provider=<fake|fake-limited> --input=<resources.pb> --plan=<plan file> --expect-plan-hash=<hash>
 ";
@@ -32,6 +33,9 @@ pub enum Verb {
     Destroy(Approval),
     /// Show what the ledger records and the provider holds; changes nothing.
     Status,
+    /// Show the cell's stamped objects the ledger does not record; changes nothing, and ends
+    /// with exit 8 when it finds some.
+    Leaks,
 }
 
 /// What a plan is made for.
@@ -55,6 +59,7 @@ pub struct Invocation {
     pub verb: Verb,
     pub provider: ProviderName,
     pub mode: Mode,
+    /// The resource list file; empty for `leaks`, which reads no file.
     pub input: String,
 }
 
@@ -143,6 +148,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             split_flags(flags, &["provider", "input"], &[])?,
             Mode::Apply,
         ),
+        "leaks" => (split_flags(flags, &["provider"], &[])?, Mode::Apply),
         "apply" => (split_flags(flags, both, &[])?, Mode::Apply),
         "destroy" => (split_flags(flags, both, &[])?, Mode::Destroy),
         other => return Err(format!("`{other}` is not a command")),
@@ -152,6 +158,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             out: values.get("out").cloned(),
         },
         "status" => Verb::Status,
+        "leaks" => Verb::Leaks,
         "apply" => Verb::Apply(approval(&values)?),
         _ => Verb::Destroy(approval(&values)?),
     };
@@ -161,6 +168,6 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         provider: ProviderName::parse(provider)
             .ok_or_else(|| format!("`{provider}` is not a provider (fake, fake-limited)"))?,
         mode,
-        input: values["input"].clone(),
+        input: values.get("input").cloned().unwrap_or_default(),
     }))
 }

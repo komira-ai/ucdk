@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #![allow(unsafe_code)]
-//! The header and the library say the same thing: the same nine functions in the same
+//! The header and the library say the same thing: the same ten functions in the same
 //! order with the same signatures, the same constants, the same buffer layout, and every name
 //! binds to the function of that name.
 
@@ -62,7 +62,7 @@ fn defines(text: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
-const PROTOTYPES: [&str; 9] = [
+const PROTOTYPES: [&str; 10] = [
     "uint32_t ucdk_abi_version(void)",
     "int32_t ucdk_session_open(const uint8_t *config, size_t config_len, ucdk_session **out_session, ucdk_buf *out_error)",
     "void ucdk_session_close(ucdk_session *session)",
@@ -71,10 +71,11 @@ const PROTOTYPES: [&str; 9] = [
     "int32_t ucdk_apply(ucdk_session *session, const uint8_t *req, size_t req_len, ucdk_buf *out)",
     "int32_t ucdk_destroy(ucdk_session *session, const uint8_t *req, size_t req_len, ucdk_buf *out)",
     "int32_t ucdk_status(ucdk_session *session, const uint8_t *req, size_t req_len, ucdk_buf *out)",
+    "int32_t ucdk_leaks(ucdk_session *session, const uint8_t *req, size_t req_len, ucdk_buf *out)",
     "void ucdk_buf_free(ucdk_buf buf)",
 ];
 
-/// The same nine, bound by name: a declaration the way a C caller's linker sees it. A name that
+/// The same ten, bound by name: a declaration the way a C caller's linker sees it. A name that
 /// the library does not export, or a signature that differs from the Rust function's, fails
 /// to link or to compile.
 mod linked {
@@ -95,6 +96,7 @@ mod linked {
         pub fn ucdk_apply(s: *mut SessionHandle, r: *const u8, n: usize, o: *mut Buf) -> i32;
         pub fn ucdk_destroy(s: *mut SessionHandle, r: *const u8, n: usize, o: *mut Buf) -> i32;
         pub fn ucdk_status(s: *mut SessionHandle, r: *const u8, n: usize, o: *mut Buf) -> i32;
+        pub fn ucdk_leaks(s: *mut SessionHandle, r: *const u8, n: usize, o: *mut Buf) -> i32;
         pub fn ucdk_buf_free(buf: Buf);
     }
 }
@@ -139,6 +141,7 @@ fn every_symbol_binds_to_its_function() {
         ucdk_apply,
         ucdk_destroy,
         ucdk_status,
+        ucdk_leaks,
         ucdk_buf_free
     );
     for ((name, linked, own), symbol) in pairs.iter().zip(SYMBOLS) {

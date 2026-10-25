@@ -83,6 +83,15 @@ class Session:
             self._call("destroy", api.DestroyRequest(resources=resources, plan_hash=plan_hash))
         )
 
+    def leaks(self) -> api.Outcome:
+        """Compares the cell's stamped objects with the ledger and changes nothing.
+
+        `outcome.leaks.leaks` lists the objects that carry the cell's stamp and have no ledger
+        record; `outcome.exit` is `EXIT_CLASS_LEAKS` (8) when there are any. A stamp never
+        authorises a delete: nothing is removed.
+        """
+        return api.Outcome.decode(self._call("leaks", api.LeaksRequest()))
+
     def status(self, resources: proto.ResourceList) -> api.Outcome:
         """Reads the ledger and the live objects; `outcome.status` holds one entry per object."""
         return api.Outcome.decode(

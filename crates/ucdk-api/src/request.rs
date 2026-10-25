@@ -6,8 +6,8 @@ use ucdk_plan::{Finding, Lowered, Plan, PlanHash, lower};
 use ucdk_proto::v1::ResourceList;
 
 use crate::v1::{
-    ApplyRequest, DestroyRequest, Error, ErrorCode, ExitClass, Mode, Outcome, PlanRequest,
-    StatusRequest, outcome,
+    ApplyRequest, DestroyRequest, Error, ErrorCode, ExitClass, LeaksRequest, Mode, Outcome,
+    PlanRequest, StatusRequest, outcome,
 };
 
 /// Why a request message cannot become an engine request.
@@ -71,6 +71,13 @@ impl StatusRequest {
         Ok(Request::Status {
             desired: desired(self.resources.as_ref())?,
         })
+    }
+}
+
+impl LeaksRequest {
+    /// The engine request that sweeps the cell for leaks; it changes nothing.
+    pub fn to_request(&self) -> Request {
+        Request::Leaks
     }
 }
 

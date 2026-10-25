@@ -139,7 +139,14 @@ impl<'a> Engine<'a> {
                 plan,
                 plan_hash,
                 rollback,
-            } => self.run(&desired, &plan, &plan_hash, rollback),
+            } => match self.run(&desired, &plan, &plan_hash, rollback) {
+                // The last step, after the lease is given back: a read that reports.
+                Outcome::Done(mut report) => {
+                    self.sweep_into(&mut report);
+                    Outcome::Done(report)
+                }
+                other => other,
+            },
             Request::Destroy {
                 desired,
                 plan,
@@ -149,6 +156,7 @@ impl<'a> Engine<'a> {
                 Err(refusal) => Outcome::Refused(refusal),
             },
             Request::Status { desired } => self.status_of(&desired),
+            Request::Leaks => self.leaks_of(),
         }
     }
 

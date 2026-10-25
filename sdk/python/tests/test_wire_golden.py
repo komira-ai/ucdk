@@ -99,6 +99,18 @@ def report():
         blocked_by_failed=[api.Blocked(path="j/run", producer="i/run")],
         rolled_back=["k/run"],
         rollback_failed=[api.RollbackFailure(path="l/run", message="gone")],
+        leaks=[leak()],
+        leak_sweep_failed=error(),
+    )
+
+
+def leak():
+    return api.Leak(
+        kind="service",
+        physical_id="svc-0001",
+        name="ghost-run",
+        owner="ghost",
+        node="abcdefghijklmnopqrstuvwxyz",
     )
 
 
@@ -161,6 +173,7 @@ def cases():
             resources=resource_list(), plan_hash="cd" * 32
         ),
         "status_request": api.StatusRequest(resources=resource_list()),
+        "leaks_request": api.LeaksRequest(),
         "outcome_planned": api.Outcome(planned=plan, exit=api.ExitClass.DONE),
         "outcome_done": api.Outcome(done=report(), exit=api.ExitClass.DONE),
         "outcome_refused_findings": refused(findings=api.Findings(findings=[finding()])),
@@ -213,6 +226,9 @@ def cases():
                 ]
             ),
             exit=api.ExitClass.DONE,
+        ),
+        "outcome_leaks": api.Outcome(
+            leaks=api.LeaksResponse(leaks=[leak()]), exit=api.ExitClass.LEAKS
         ),
         "catalog_response": api.CatalogResponse(
             nodes=[

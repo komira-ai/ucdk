@@ -40,6 +40,9 @@ class ExitClass(enum.IntEnum):
     FAILED_NO_EFFECT = 4
     # Failed after changing something: plan again before running again.
     FAILED_CHANGED = 6
+    # A leak sweep found objects that carry our stamp and have no ledger record. Only the leaks
+    # verb ends this way; an apply that finds leaks reports them and is done.
+    LEAKS = 8
 
 
 class CredentialSource(enum.IntEnum):
@@ -419,6 +422,28 @@ class StatusRequest(_wire.Message):
                     self.resources = ucdk_resource_v1.ResourceList()
                 self.resources = self.resources
                 self.resources._merge(value)
+
+
+class LeaksRequest(_wire.Message):
+    """
+    Compare the cell's stamped objects with the ledger, and change nothing. It needs no resource
+    list: it is about the cell, not about a file.
+    """
+
+    _FIELDS = (
+    )
+
+    def __init__(
+        self,
+    ) -> None:
+        pass
+
+    def _encode_into(self, out: bytearray) -> None:
+        return
+
+    def _merge(self, data: bytes) -> None:
+        for number, wire_type, value in _wire.read_fields(data):
+            pass
 
 
 class Retained(_wire.Message):
@@ -1281,6 +1306,11 @@ class RollbackFailure(_wire.Message):
 class Report(_wire.Message):
     """
     What a run did, by object, in the order it did it.
+
+    Attributes:
+        leaks: The leak sweep an apply ends with: objects that carry the cell's stamp and have no ledger
+            record. They are reported and left alone; the apply is not failed for them.
+        leak_sweep_failed: Set when that sweep could not read; the apply still stands.
     """
 
     _FIELDS = (
@@ -1295,6 +1325,8 @@ class Report(_wire.Message):
         "blocked_by_failed",
         "rolled_back",
         "rollback_failed",
+        "leaks",
+        "leak_sweep_failed",
     )
 
     def __init__(
@@ -1310,6 +1342,8 @@ class Report(_wire.Message):
         blocked_by_failed: Iterable[Blocked] = (),
         rolled_back: Iterable[str] = (),
         rollback_failed: Iterable[RollbackFailure] = (),
+        leaks: Iterable[Leak] = (),
+        leak_sweep_failed: Optional[Error] = None,
     ) -> None:
         self.created = list(created)
         self.updated = list(updated)
@@ -1322,6 +1356,8 @@ class Report(_wire.Message):
         self.blocked_by_failed = list(blocked_by_failed)
         self.rolled_back = list(rolled_back)
         self.rollback_failed = list(rollback_failed)
+        self.leaks = list(leaks)
+        self.leak_sweep_failed = leak_sweep_failed
 
     def _encode_into(self, out: bytearray) -> None:
         for item in self.created:
@@ -1346,6 +1382,10 @@ class Report(_wire.Message):
             _wire.put_string(out, 10, item)
         for item in self.rollback_failed:
             _wire.put_message(out, 11, item)
+        for item in self.leaks:
+            _wire.put_message(out, 12, item)
+        if self.leak_sweep_failed is not None:
+            _wire.put_message(out, 13, self.leak_sweep_failed)
 
     def _merge(self, data: bytes) -> None:
         for number, wire_type, value in _wire.read_fields(data):
@@ -1382,6 +1422,106 @@ class Report(_wire.Message):
             elif number == 11:
                 _wire.expect(wire_type, _wire.LEN)
                 self.rollback_failed.append(RollbackFailure.decode(value))
+            elif number == 12:
+                _wire.expect(wire_type, _wire.LEN)
+                self.leaks.append(Leak.decode(value))
+            elif number == 13:
+                _wire.expect(wire_type, _wire.LEN)
+                if self.leak_sweep_failed is None:
+                    self.leak_sweep_failed = Error()
+                self.leak_sweep_failed = self.leak_sweep_failed
+                self.leak_sweep_failed._merge(value)
+
+
+class Leak(_wire.Message):
+    """
+    A live object that carries the cell's stamp and that no ledger record accounts for. The
+    stamp is a claim, not an authority: nothing deletes the object on it.
+
+    Attributes:
+        name: The name the provider shows, without any stamp encoding.
+        owner: The top-level owner the stamp names.
+        node: The node key the stamp names.
+    """
+
+    _FIELDS = (
+        "kind",
+        "physical_id",
+        "name",
+        "owner",
+        "node",
+    )
+
+    def __init__(
+        self,
+        kind: str = "",
+        physical_id: str = "",
+        name: str = "",
+        owner: str = "",
+        node: str = "",
+    ) -> None:
+        self.kind = kind
+        self.physical_id = physical_id
+        self.name = name
+        self.owner = owner
+        self.node = node
+
+    def _encode_into(self, out: bytearray) -> None:
+        if self.kind:
+            _wire.put_string(out, 1, self.kind)
+        if self.physical_id:
+            _wire.put_string(out, 2, self.physical_id)
+        if self.name:
+            _wire.put_string(out, 3, self.name)
+        if self.owner:
+            _wire.put_string(out, 4, self.owner)
+        if self.node:
+            _wire.put_string(out, 5, self.node)
+
+    def _merge(self, data: bytes) -> None:
+        for number, wire_type, value in _wire.read_fields(data):
+            if number == 1:
+                _wire.expect(wire_type, _wire.LEN)
+                self.kind = _wire.get_string(value)
+            elif number == 2:
+                _wire.expect(wire_type, _wire.LEN)
+                self.physical_id = _wire.get_string(value)
+            elif number == 3:
+                _wire.expect(wire_type, _wire.LEN)
+                self.name = _wire.get_string(value)
+            elif number == 4:
+                _wire.expect(wire_type, _wire.LEN)
+                self.owner = _wire.get_string(value)
+            elif number == 5:
+                _wire.expect(wire_type, _wire.LEN)
+                self.node = _wire.get_string(value)
+
+
+class LeaksResponse(_wire.Message):
+    """
+    What a leak sweep found, by physical id. Empty when there are no leaks (the exit class is
+    then DONE; with leaks it is LEAKS).
+    """
+
+    _FIELDS = (
+        "leaks",
+    )
+
+    def __init__(
+        self,
+        leaks: Iterable[Leak] = (),
+    ) -> None:
+        self.leaks = list(leaks)
+
+    def _encode_into(self, out: bytearray) -> None:
+        for item in self.leaks:
+            _wire.put_message(out, 1, item)
+
+    def _merge(self, data: bytes) -> None:
+        for number, wire_type, value in _wire.read_fields(data):
+            if number == 1:
+                _wire.expect(wire_type, _wire.LEN)
+                self.leaks.append(Leak.decode(value))
 
 
 class ObjectStatus(_wire.Message):
@@ -1589,6 +1729,7 @@ class Outcome(_wire.Message):
     Attributes:
         invalid: The request was not understood; the exit class is USAGE.
         status: The answer of a status request.
+        leaks: The answer of a leaks request.
     """
 
     _FIELDS = (
@@ -1599,6 +1740,7 @@ class Outcome(_wire.Message):
         "exit",
         "invalid",
         "status",
+        "leaks",
     )
 
     def __init__(
@@ -1610,6 +1752,7 @@ class Outcome(_wire.Message):
         exit: ExitClass = ExitClass.DONE,
         invalid: Optional[Error] = None,
         status: Optional[StatusResponse] = None,
+        leaks: Optional[LeaksResponse] = None,
     ) -> None:
         self.planned = planned
         self.done = done
@@ -1618,6 +1761,7 @@ class Outcome(_wire.Message):
         self.exit = exit
         self.invalid = invalid
         self.status = status
+        self.leaks = leaks
 
     def which_result(self) -> Optional[str]:
         """The name of the arm of `result` that is set, or None."""
@@ -1628,6 +1772,7 @@ class Outcome(_wire.Message):
             "failed",
             "invalid",
             "status",
+            "leaks",
         ))
 
     def _clear_result(self) -> None:
@@ -1637,6 +1782,7 @@ class Outcome(_wire.Message):
         self.failed = None
         self.invalid = None
         self.status = None
+        self.leaks = None
 
     @classmethod
     def planned(cls, planned: Plan, **fields: Any) -> "Outcome":
@@ -1662,6 +1808,10 @@ class Outcome(_wire.Message):
     def status(cls, status: StatusResponse, **fields: Any) -> "Outcome":
         return cls(status=status, **fields)
 
+    @classmethod
+    def leaks(cls, leaks: LeaksResponse, **fields: Any) -> "Outcome":
+        return cls(leaks=leaks, **fields)
+
     def _encode_into(self, out: bytearray) -> None:
         arm = self.which_result()
         if arm == "planned":
@@ -1676,6 +1826,8 @@ class Outcome(_wire.Message):
             _wire.put_message(out, 6, self.invalid)
         elif arm == "status":
             _wire.put_message(out, 7, self.status)
+        elif arm == "leaks":
+            _wire.put_message(out, 8, self.leaks)
         if self.exit:
             _wire.put_varint_field(out, 5, self.exit)
 
@@ -1732,3 +1884,11 @@ class Outcome(_wire.Message):
                     current = StatusResponse()
                 self.status = current
                 self.status._merge(value)
+            elif number == 8:
+                _wire.expect(wire_type, _wire.LEN)
+                current = self.leaks
+                self._clear_result()
+                if current is None:
+                    current = LeaksResponse()
+                self.leaks = current
+                self.leaks._merge(value)

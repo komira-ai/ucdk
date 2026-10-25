@@ -33,6 +33,7 @@ class Closing(unittest.TestCase):
             lambda: session.apply(wanted, "a" * 64),
             lambda: session.destroy(wanted, "a" * 64),
             lambda: session.status(wanted),
+            lambda: session.leaks(),
         ):
             with self.assertRaises(SessionClosed):
                 call()

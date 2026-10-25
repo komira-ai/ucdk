@@ -124,6 +124,14 @@ fn a_report_keeps_every_list_apart() {
         blocked_by_failed: vec![(path("i/run"), path("h/run"))],
         rolled_back: vec![path("j/run")],
         rollback_failed: vec![(path("k/run"), EngineError::LedgerBusy)],
+        leaks: vec![ucdk_engine::Leak {
+            kind: ucdk_provider::Kind::service(),
+            physical: ucdk_provider::PhysicalId::new("svc-9"),
+            name: "ghost-run".to_owned(),
+            owner: path("ghost/run").owner(),
+            node: path("ghost/run").key(),
+        }],
+        leak_sweep_failed: Some(EngineError::LeaseLost),
     };
     let wire = v1::Report::from(&report);
     assert_eq!(wire.created, ["a/run"]);
@@ -151,6 +159,12 @@ fn a_report_keeps_every_list_apart() {
     assert_eq!(
         wire.rollback_failed[0].message,
         EngineError::LedgerBusy.to_string()
+    );
+    assert_eq!(wire.leaks.len(), 1);
+    assert_eq!(wire.leaks[0].physical_id, "svc-9");
+    assert_eq!(
+        wire.leak_sweep_failed.map(|e| e.code),
+        Some(v1::ErrorCode::LeaseLost as i32)
     );
 }
 
