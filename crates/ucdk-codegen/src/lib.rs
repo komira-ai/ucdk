@@ -11,6 +11,8 @@
 //! resource catalog, typed templates and typed output references read from the message options.
 
 mod docs;
+mod kinds;
+mod model;
 mod names;
 pub mod python;
 
