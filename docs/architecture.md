@@ -309,13 +309,17 @@ into a `Catalog` from the resource list message, which `ucdk-proto` embeds as `D
   holding `[store/]name[@version]` (and a key also in a value map of the same message is refused),
   `string`, `uint32`, `int32` and `int64` are one field, and any other message is one text field
   built from a template. A field of any other type is refused when the catalog is read, not
-  skipped.
+  skipped. So are options that cannot apply: `render` off a message field, `role` on a map or
+  together with `unlowered` or `node_name`, an integer `fallback` outside its field's type, a role
+  name that is not one lower-case word of letters and digits (or is `run`), and two roles, or two
+  node field names (empty, containing `.`, or equal), that collide.
 - Field options say only what the type cannot: `node_name` (the node field name when it is not the
   field's), `render` (the template of a message-typed field, `{cpu_millis}m/{memory_mb}MB`),
   `fallback` (the versioned default written where the author wrote nothing), `role` (on a
   message-typed arm: a second node `<resource>/<role>`, always emitted, wanted when the arm is
   written, with the arm message's scalar fields as its fields) and `unlowered` (a choice that
-  changes no node field). `service` and `job` use exactly these; their defaults and role names are
+  changes no node field). A message field that is not written and has no `fallback` renders
+  its template with every placeholder as zero or empty. `service` and `job` use exactly these; their defaults and role names are
   in `resource.proto`.
 
 The shapes themselves (`Image`, `Value`, `SecretRef`, `Uses`, and the rendering of scalars) are

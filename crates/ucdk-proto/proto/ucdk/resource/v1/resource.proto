@@ -99,13 +99,17 @@ extend google.protobuf.MessageOptions {
 //                                   one text or integer field
 //   * any other message             one text field, built from the `render` template
 // A field not of these shapes, and not marked `unlowered` or `role`, is refused when the
-// catalog is read.
+// catalog is read, as are options that cannot apply: `render` off a message field, `role` on a
+// map or with `unlowered` or `node_name`, an integer `fallback` outside its field's type, a
+// role name that is not one lower-case word (or is `run`), and two roles or two node field names
+// that collide.
 extend google.protobuf.FieldOptions {
   // The node field name (or the prefix before `.<index>` or `.<key>`) when it is not the
   // field's own name: `args` lowers to `arg.0`, `arg.1`.
   string node_name = 50011;
   // For a message-typed field: the text of the node field, with `{name}` replaced by the value
-  // of the message's scalar field `name` (an unset one reads as its zero value).
+  // of the message's scalar field `name` (an unset one reads as its zero value). A message field
+  // that is not written and has no `fallback` renders with every placeholder as zero or empty.
   string render = 50012;
   // The value when the field is not written (for an integer: its text, which must parse). A
   // written zero is a value: only a field with presence (`optional`, a message) can tell it

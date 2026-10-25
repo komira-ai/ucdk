@@ -510,9 +510,10 @@ fn read_case(types: &str) -> Result<Catalog, CatalogError> {
 }
 
 fn bad_field(types: &str) -> (String, &'static str) {
-    match read_case(types).err().expect("refused") {
-        CatalogError::BadField { field, why, .. } => (field, why),
-        other => panic!("expected a bad field, got {other:?}"),
+    match read_case(types) {
+        Err(CatalogError::BadField { field, why, .. }) => (field, why),
+        Err(other) => panic!("expected a bad field, got {other:?} for {types}"),
+        Ok(_) => panic!("not refused: {types}"),
     }
 }
 
@@ -547,7 +548,7 @@ fn a_field_the_descriptors_cannot_lower_is_refused_when_the_catalog_is_read() {
         (
             format!("message T {{ {MARK} uint32 n = 1 [({ucdk}.fallback) = \"many\"]; }}"),
             "n",
-            "the `fallback` is not an integer",
+            "the `fallback` is not an integer of the field's type",
         ),
         (
             format!("message T {{ {MARK} repeated string l = 1 [({ucdk}.fallback) = \"x\"]; }}"),
@@ -743,4 +744,112 @@ fn new_list_is_an_instance_of_the_catalogs_list_message() {
         "example.queue.v1.ResourceList"
     );
     assert!(catalog.validate(&catalog.new_list()).is_empty());
+}
+
+/// Proves: options that would panic lowering, collide node paths or be silently ignored are
+/// refused when the catalog is read, each naming the field and the reason. Role names must be a
+/// lower-case word (a valid path segment, no `/`, no `-`), not `run`, and unique in a kind; node
+/// field names must be non-empty, free of `.` and unique across a kind; `render` belongs to a
+/// message field, `role` not to a map or together with `unlowered`, `node_name` not to a role;
+/// an integer `fallback` must fit the field's own type.
+#[test]
+fn malformed_catalog_options_are_refused_when_the_catalog_is_read() {
+    let u = "ucdk.resource.v1";
+    let role = |name: &str| {
+        format!("message R {{}} message T {{ {MARK} R r = 1 [({u}.role) = \"{name}\"]; }}")
+    };
+    let bad_role = "a role name must be a lower-case word of letters and digits, not `run`";
+    let mut cases: Vec<(String, &str, &str)> = ["run", "", "a b", "a/b", "a-b", "Up"]
+        .into_iter()
+        .map(|name| (role(name), "r", bad_role))
+        .collect();
+    let rest: Vec<(String, &str, &str)> = vec![
+        (
+            format!(
+                "message R {{}} message T {{ {MARK} oneof o {{ R a = 1 [({u}.role) = \"x\"]; R b = 2 [({u}.role) = \"x\"]; }} }}"
+            ),
+            "b",
+            "two roles of a type share a name",
+        ),
+        (
+            format!(
+                "message T {{ {MARK} string a = 1 [({u}.node_name) = \"x\"]; string b = 2 [({u}.node_name) = \"x\"]; }}"
+            ),
+            "b",
+            "two fields of a type lower to the same node field name",
+        ),
+        (
+            format!("message T {{ {MARK} string a = 1; uint32 b = 2 [({u}.node_name) = \"a\"]; }}"),
+            "b",
+            "two fields of a type lower to the same node field name",
+        ),
+        (
+            format!("message T {{ {MARK} string a = 1 [({u}.node_name) = \"\"]; }}"),
+            "a",
+            "a node field name must be a non-empty word without `.`",
+        ),
+        (
+            format!("message T {{ {MARK} string a = 1 [({u}.node_name) = \"x.y\"]; }}"),
+            "a",
+            "a node field name must be a non-empty word without `.`",
+        ),
+        (
+            format!("message T {{ {MARK} string a = 1 [({u}.render) = \"x\"]; }}"),
+            "a",
+            "`render` needs a message field",
+        ),
+        (
+            format!("message T {{ {MARK} repeated string a = 1 [({u}.render) = \"x\"]; }}"),
+            "a",
+            "`render` needs a message field",
+        ),
+        (
+            format!("message T {{ {MARK} map<string, {u}.Value> m = 1 [({u}.role) = \"r\"]; }}"),
+            "m",
+            "a role must not be on a map",
+        ),
+        (
+            format!(
+                "message R {{}} message T {{ {MARK} R r = 1 [({u}.role) = \"r\", ({u}.unlowered) = true]; }}"
+            ),
+            "r",
+            "`role` and `unlowered` cannot be combined",
+        ),
+        (
+            format!(
+                "message R {{}} message T {{ {MARK} R r = 1 [({u}.role) = \"r\", ({u}.node_name) = \"n\"]; }}"
+            ),
+            "r",
+            "`node_name` has no meaning on a role",
+        ),
+    ];
+    cases.extend(rest);
+    for (ty, fallback) in [
+        ("uint32", "-1"),
+        ("uint32", "4294967296"),
+        ("uint32", "x"),
+        ("int32", "2147483648"),
+        ("int32", "-2147483649"),
+        ("int64", "9223372036854775808"),
+    ] {
+        cases.push((
+            format!("message T {{ {MARK} {ty} n = 1 [({u}.fallback) = \"{fallback}\"]; }}"),
+            "n",
+            "the `fallback` is not an integer of the field's type",
+        ));
+    }
+    for (types, field, why) in cases {
+        assert_eq!(bad_field(&types), (field.to_owned(), why), "{types}");
+    }
+}
+
+/// Proves: the limits of integer fallbacks are accepted: `u32::MAX` for a uint32, a negative
+/// one for an int64.
+#[test]
+fn an_integer_fallback_that_fits_its_field_is_accepted() {
+    let u = "ucdk.resource.v1";
+    let types = format!(
+        "message T {{ {MARK} uint32 a = 1 [({u}.fallback) = \"4294967295\"]; int64 b = 2 [({u}.fallback) = \"-5\"]; int32 c = 3 [({u}.fallback) = \"-2147483648\"]; }}"
+    );
+    assert!(read_case(&types).is_ok());
 }

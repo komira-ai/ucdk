@@ -17,7 +17,9 @@ use prost_reflect::{
 };
 use ucdk_proto::DESCRIPTOR_SET;
 use ucdk_proto::v1::{Output, Portability};
-use ucdk_provider::FieldValue;
+use ucdk_provider::{FieldValue, NodePath};
+
+use super::lower::ROLE_RUN;
 
 /// The package whose shared shapes (`Image`, `Value`, `SecretRef`, `Uses`) the catalog knows.
 const PACKAGE: &str = "ucdk.resource.v1";
@@ -296,8 +298,8 @@ fn plan_kind(arm: FieldDescriptor, options: &Options) -> Result<KindPlan, Catalo
         .iter()
         .flat_map(|v| v.as_enum_number().and_then(|n| Output::try_from(n).ok()))
         .collect();
-    let mut fields = Vec::new();
-    let mut roles = Vec::new();
+    let mut fields: Vec<FieldPlan> = Vec::new();
+    let mut roles: Vec<RolePlan> = Vec::new();
     for field in message.fields() {
         let bad = |why| CatalogError::BadField {
             kind: name.clone(),
@@ -305,13 +307,32 @@ fn plan_kind(arm: FieldDescriptor, options: &Options) -> Result<KindPlan, Catalo
             why,
         };
         let own = field.options();
-        if own.has_extension(&options.unlowered) {
+        let role = text_option(&own, &options.role);
+        let unlowered = own.has_extension(&options.unlowered);
+        if unlowered && role.is_some() {
+            return Err(bad("`role` and `unlowered` cannot be combined"));
+        }
+        if unlowered {
             continue;
         }
-        if let Some(role) = text_option(&own, &options.role) {
+        if let Some(role) = role {
             let PbKind::Message(inner) = field.kind() else {
                 return Err(bad("a role must be on a message field"));
             };
+            if field.is_map() {
+                return Err(bad("a role must not be on a map"));
+            }
+            if own.has_extension(&options.node_name) {
+                return Err(bad("`node_name` has no meaning on a role"));
+            }
+            if !role_name_ok(&role) {
+                return Err(bad(
+                    "a role name must be a lower-case word of letters and digits, not `run`",
+                ));
+            }
+            if roles.iter().any(|r| r.role == role) {
+                return Err(bad("two roles of a type share a name"));
+            }
             let scalars: Vec<FieldDescriptor> = inner.fields().collect();
             if !scalars.iter().all(is_scalar) {
                 return Err(bad("a role's message may hold only scalar fields"));
@@ -323,7 +344,18 @@ fn plan_kind(arm: FieldDescriptor, options: &Options) -> Result<KindPlan, Catalo
             });
             continue;
         }
-        fields.push(plan_field(&field, &own, options).map_err(bad)?);
+        let planned = plan_field(&field, &own, options).map_err(bad)?;
+        if planned.stem.is_empty() || planned.stem.contains('.') {
+            return Err(bad(
+                "a node field name must be a non-empty word without `.`",
+            ));
+        }
+        if fields.iter().any(|f| f.stem == planned.stem) {
+            return Err(bad(
+                "two fields of a type lower to the same node field name",
+            ));
+        }
+        fields.push(planned);
     }
     Ok(KindPlan {
         name,
@@ -335,6 +367,12 @@ fn plan_kind(arm: FieldDescriptor, options: &Options) -> Result<KindPlan, Catalo
     })
 }
 
+/// Whether `role` makes a node path `<resource>/<role>` that is one valid segment, is not the
+/// run node's, and keeps the node name `<resource>-<role>` unambiguous (no `-`).
+fn role_name_ok(role: &str) -> bool {
+    role != ROLE_RUN && !role.contains(['/', '-']) && NodePath::new(&format!("r/{role}")).is_ok()
+}
+
 fn plan_field(
     field: &FieldDescriptor,
     own: &DynamicMessage,
@@ -342,6 +380,7 @@ fn plan_field(
 ) -> Result<FieldPlan, &'static str> {
     let stem = text_option(own, &options.node_name).unwrap_or_else(|| field.name().to_owned());
     let template = text_option(own, &options.render);
+    let has_template = template.is_some();
     let raw = text_option(own, &options.fallback);
     let shape = if field.is_map() {
         let entry = field.kind().as_message().cloned();
@@ -378,6 +417,9 @@ fn plan_field(
     } else {
         return Err("the type of the field cannot be lowered");
     };
+    if has_template && !matches!(shape, Shape::Render(_)) {
+        return Err("`render` needs a message field");
+    }
     let fallback = match (&shape, raw) {
         (_, None) => None,
         (Shape::Render(_), Some(text)) => Some(FieldValue::Text(text)),
@@ -385,8 +427,8 @@ fn plan_field(
             Some(FieldValue::Text(text))
         }
         (Shape::Scalar, Some(text)) => Some(FieldValue::Int(
-            text.parse()
-                .map_err(|_| "the `fallback` is not an integer")?,
+            parse_int(&field.kind(), &text)
+                .ok_or("the `fallback` is not an integer of the field's type")?,
         )),
         (_, Some(_)) => return Err("a `fallback` needs a field with one value"),
     };
@@ -396,6 +438,15 @@ fn plan_field(
         shape,
         fallback,
     })
+}
+
+/// An integer fallback, if `text` is a value of the integer type `kind`.
+fn parse_int(kind: &PbKind, text: &str) -> Option<i64> {
+    match kind {
+        PbKind::Uint32 => text.parse::<u32>().ok().map(i64::from),
+        PbKind::Int32 => text.parse::<i32>().ok().map(i64::from),
+        _ => text.parse::<i64>().ok(),
+    }
 }
 
 /// `{name}` placeholders over the scalar fields of `message`; `None` if one is unknown or the
