@@ -9,11 +9,12 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use common::{
-    FlakyLedger, Hooked, apply, apply_with, chain, destroy, done, lowered, mutations, objects,
-    owned_by_fake, path, paths, physical_of, records, service_of, service_reading,
+    AnyLedger, Backend, FlakyLedger, Hooked, apply, apply_with, chain, destroy, done, lowered,
+    mutations, objects, owned_by_fake, path, paths, physical_of, records, service_of,
+    service_reading,
 };
 use ucdk_engine::{EngineError, Outcome, Refusal, Report};
-use ucdk_ledger::{Change, Ledger as _, LedgerError, MemoryLedger, Record, State};
+use ucdk_ledger::{Change, Ledger as _, LedgerError, Record, State};
 use ucdk_plan::{ConflictKind, Lowered};
 use ucdk_proto::v1::Output;
 use ucdk_provider::{Kind, Provider as _, ProviderError, Refusal as CallRefusal};
@@ -28,10 +29,9 @@ fn failure(outcome: Outcome) -> ucdk_engine::Failure {
 
 // ---- one crashed create ----------------------------------------------------------------------
 
-#[test]
-fn crash_after_intent_adopts_on_rerun() {
+fn crash_after_intent_adopts_on_rerun(backend: Backend) {
     let mut fake = Fake::standard();
-    let ledger = MemoryLedger::new();
+    let ledger = backend.ledger();
     // The first create lands and its reply is lost: the ledger holds an intent with no object
     // id, and the object is there.
     fake.faults_mut().ambiguous_at_call.replace(1);
@@ -58,10 +58,9 @@ fn crash_after_intent_adopts_on_rerun() {
     assert!(records(&ledger)[&path("db/run")].physical.is_some());
 }
 
-#[test]
-fn a_create_that_loses_a_race_to_our_own_stamp_takes_the_winner() {
+fn a_create_that_loses_a_race_to_our_own_stamp_takes_the_winner(backend: Backend) {
     let mut fake = Fake::standard();
-    let ledger = MemoryLedger::new();
+    let ledger = backend.ledger();
     // Before the create lands, another run creates the same object with the same stamp.
     fake.faults_mut().race_next.clone_from(&true);
     let report = done(apply(&mut fake, &ledger, &chain()));
@@ -70,10 +69,9 @@ fn a_create_that_loses_a_race_to_our_own_stamp_takes_the_winner() {
     assert_eq!(fake.object_count(), 4);
 }
 
-#[test]
-fn a_create_over_an_object_that_is_not_ours_stops_the_run() {
+fn a_create_over_an_object_that_is_not_ours_stops_the_run(backend: Backend) {
     let mut fake = Fake::standard();
-    let ledger = MemoryLedger::new();
+    let ledger = backend.ledger();
     // After the plan and the re-read, an object with the node's name appears with no stamp.
     let at = 2 * chain().nodes().len() + 2; // the re-read is call +1, the create is call +2
     let mut hooked = Hooked::new(&mut fake, at, |fake| {
@@ -86,10 +84,9 @@ fn a_create_over_an_object_that_is_not_ours_stops_the_run() {
     assert_eq!(fake.object_count(), 1, "only the foreign object");
 }
 
-#[test]
-fn a_foreign_object_found_at_the_re_read_stops_the_run() {
+fn a_foreign_object_found_at_the_re_read_stops_the_run(backend: Backend) {
     let mut fake = Fake::standard();
-    let ledger = MemoryLedger::new();
+    let ledger = backend.ledger();
     // After both plans, an object with the node's name appears with no stamp, just before the
     // step reads the node again: the step stops before any intent or create.
     let at = 2 * chain().nodes().len() + 1;
@@ -106,7 +103,7 @@ fn a_foreign_object_found_at_the_re_read_stops_the_run() {
 }
 
 /// What a later run's plan refuses: the conflicts it names, by path.
-fn refused_as(fake: &mut Fake, ledger: &MemoryLedger) -> Vec<(String, ConflictKind)> {
+fn refused_as(fake: &mut Fake, ledger: &AnyLedger) -> Vec<(String, ConflictKind)> {
     let Outcome::Refused(Refusal::Conflicts(list)) = apply(fake, ledger, &chain()) else {
         panic!("the run should have been refused for conflicts");
     };
@@ -115,10 +112,9 @@ fn refused_as(fake: &mut Fake, ledger: &MemoryLedger) -> Vec<(String, ConflictKi
         .collect()
 }
 
-#[test]
-fn a_create_refused_over_a_foreign_object_leaves_no_intent() {
+fn a_create_refused_over_a_foreign_object_leaves_no_intent(backend: Backend) {
     let mut fake = Fake::standard();
-    let ledger = MemoryLedger::new();
+    let ledger = backend.ledger();
     // After the plan and the re-read, an object with the node's name appears with no stamp.
     let at = 2 * chain().nodes().len() + 2;
     let mut hooked = Hooked::new(&mut fake, at, |fake| {
@@ -140,10 +136,9 @@ fn a_create_refused_over_a_foreign_object_leaves_no_intent() {
     assert_eq!(fake.object_count(), 1, "only the foreign object");
 }
 
-#[test]
-fn a_create_refused_over_a_foreign_object_keeps_a_record_another_writer_changed() {
+fn a_create_refused_over_a_foreign_object_keeps_a_record_another_writer_changed(backend: Backend) {
     let mut fake = Fake::standard();
-    let ledger = MemoryLedger::new();
+    let ledger = backend.ledger();
     // Between this run's intent and its read of the object that refused the create, another
     // writer puts a different record at the path: it is theirs, so it stays.
     let at = 2 * chain().nodes().len() + 2;
@@ -162,10 +157,9 @@ fn a_create_refused_over_a_foreign_object_keeps_a_record_another_writer_changed(
     assert_eq!(records(&ledger)[&path("db/run")].state, State::Reaping);
 }
 
-#[test]
-fn a_create_refused_as_existing_while_reads_cannot_see_it_keeps_the_intent() {
+fn a_create_refused_as_existing_while_reads_cannot_see_it_keeps_the_intent(backend: Backend) {
     let mut fake = Fake::standard();
-    let ledger = MemoryLedger::new();
+    let ledger = backend.ledger();
     // The racing object exists but reads are lagging: the engine cannot see what refused it.
     {
         let faults = fake.faults_mut();
@@ -249,14 +243,14 @@ fn scenarios() -> Vec<Scenario> {
 /// The state a run leaves: the objects and the ledger's records.
 fn state_of(
     fake: &Fake,
-    ledger: &MemoryLedger,
+    ledger: &AnyLedger,
 ) -> (String, BTreeMap<ucdk_provider::NodePath, Record>) {
     (objects(fake), records(ledger))
 }
 
 /// No leaked object (everything the owners hold is recorded) and no duplicate (one object per
 /// record, so the object count is the record count).
-fn assert_consistent(fake: &mut Fake, ledger: &MemoryLedger, context: &str) {
+fn assert_consistent(fake: &mut Fake, ledger: &AnyLedger, context: &str) {
     let recorded = records(ledger);
     let mut ids: Vec<_> = recorded
         .values()
@@ -276,11 +270,10 @@ fn assert_consistent(fake: &mut Fake, ledger: &MemoryLedger, context: &str) {
     );
 }
 
-#[test]
-fn crash_sweep_every_call_k_no_duplicates_or_orphans() {
+fn crash_sweep_every_call_k_no_duplicates_or_orphans(backend: Backend) {
     for scenario in scenarios() {
         // A clean run: its state is what every crashed-then-rerun world must end in.
-        let (mut clean, clean_ledger) = (Fake::standard(), MemoryLedger::new());
+        let (mut clean, clean_ledger) = (Fake::standard(), backend.ledger());
         for setup in &scenario.setup {
             done(apply(&mut clean, &clean_ledger, setup));
         }
@@ -297,7 +290,7 @@ fn crash_sweep_every_call_k_no_duplicates_or_orphans() {
         for ambiguous in [false, true] {
             for k in 1..=total {
                 let context = format!("{} (k={k}, ambiguous={ambiguous})", scenario.name);
-                let (mut fake, ledger) = (Fake::standard(), MemoryLedger::new());
+                let (mut fake, ledger) = (Fake::standard(), backend.ledger());
                 for setup in &scenario.setup {
                     done(apply(&mut fake, &ledger, setup));
                 }
@@ -341,7 +334,7 @@ fn crash_sweep_every_call_k_no_duplicates_or_orphans() {
 /// a new id when the next run creates it again.
 fn state_without_ids(
     fake: &Fake,
-    ledger: &MemoryLedger,
+    ledger: &AnyLedger,
 ) -> (Vec<String>, BTreeMap<ucdk_provider::NodePath, Record>) {
     let mut lines: Vec<String> = objects(fake)
         .lines()
@@ -368,9 +361,8 @@ fn state_without_ids(
     (lines, recorded)
 }
 
-#[test]
-fn crash_sweep_rollback_every_call_k_no_duplicates_or_orphans() {
-    let (mut clean, clean_ledger) = (Fake::standard(), MemoryLedger::new());
+fn crash_sweep_rollback_every_call_k_no_duplicates_or_orphans(backend: Backend) {
+    let (mut clean, clean_ledger) = (Fake::standard(), backend.ledger());
     done(apply(&mut clean, &clean_ledger, &chain()));
     let expected = state_without_ids(&clean, &clean_ledger);
 
@@ -380,7 +372,7 @@ fn crash_sweep_rollback_every_call_k_no_duplicates_or_orphans() {
     for trigger_ambiguous in [false, true] {
         for k in 5..=7u64 {
             let context = format!("rollback (trigger ambiguous={trigger_ambiguous}, k={k})");
-            let (mut fake, ledger) = (Fake::standard(), MemoryLedger::new());
+            let (mut fake, ledger) = (Fake::standard(), backend.ledger());
             {
                 let faults = fake.faults_mut();
                 if trigger_ambiguous {
@@ -417,10 +409,9 @@ fn crash_sweep_rollback_every_call_k_no_duplicates_or_orphans() {
     }
 }
 
-#[test]
-fn crash_sweep_every_ledger_write_no_duplicates_or_orphans() {
+fn crash_sweep_every_ledger_write_no_duplicates_or_orphans(backend: Backend) {
     for scenario in scenarios() {
-        let (mut clean, clean_ledger) = (Fake::standard(), MemoryLedger::new());
+        let (mut clean, clean_ledger) = (Fake::standard(), backend.ledger());
         for setup in &scenario.setup {
             done(apply(&mut clean, &clean_ledger, setup));
         }
@@ -473,8 +464,8 @@ fn crash_sweep_every_ledger_write_no_duplicates_or_orphans() {
 const CHAIN_NODES: [&str; 4] = ["db/run", "api/run", "web/run", "web/public"];
 
 /// A world set up by `scenario`, with the object of `lost` (when given) deleted out of band.
-fn world_with_loss(scenario: &Scenario, lost: Option<&str>) -> (Fake, MemoryLedger) {
-    let (mut fake, ledger) = (Fake::standard(), MemoryLedger::new());
+fn world_with_loss(backend: Backend, scenario: &Scenario, lost: Option<&str>) -> (Fake, AnyLedger) {
+    let (mut fake, ledger) = (Fake::standard(), backend.ledger());
     for setup in &scenario.setup {
         done(apply(&mut fake, &ledger, setup));
     }
@@ -491,7 +482,7 @@ fn world_with_loss(scenario: &Scenario, lost: Option<&str>) -> (Fake, MemoryLedg
 /// what the act manages completes and leaves no object and no record.
 fn assert_converges(
     fake: &mut Fake,
-    ledger: &MemoryLedger,
+    ledger: &AnyLedger,
     act: &Act,
     expected: &(String, BTreeMap<ucdk_provider::NodePath, Record>),
     context: &str,
@@ -511,8 +502,7 @@ fn assert_converges(
     assert!(records(ledger).is_empty(), "{context}: records left");
 }
 
-#[test]
-fn crash_sweep_converges_after_out_of_band_delete() {
+fn crash_sweep_converges_after_out_of_band_delete(backend: Backend) {
     // Every scenario of the sweep, then each of them with one object deleted out of band first.
     let mut cases: Vec<(Scenario, Option<&str>)> = Vec::new();
     for scenario in scenarios() {
@@ -529,7 +519,7 @@ fn crash_sweep_converges_after_out_of_band_delete() {
         ));
     }
     for (scenario, lost) in cases {
-        let (mut clean, clean_ledger) = world_with_loss(&scenario, lost);
+        let (mut clean, clean_ledger) = world_with_loss(backend, &scenario, lost);
         let before = mutations(&clean);
         done(run_act(&mut clean, &clean_ledger, &scenario.act));
         let total = mutations(&clean) - before;
@@ -542,7 +532,7 @@ fn crash_sweep_converges_after_out_of_band_delete() {
                     "{} (lost {lost:?}, k={k}, ambiguous={ambiguous})",
                     scenario.name
                 );
-                let (mut fake, ledger) = world_with_loss(&scenario, lost);
+                let (mut fake, ledger) = world_with_loss(backend, &scenario, lost);
                 let at = (mutations(&fake) + k) as u64;
                 {
                     let faults = fake.faults_mut();
@@ -568,20 +558,19 @@ fn crash_sweep_converges_after_out_of_band_delete() {
     }
 }
 
-#[test]
-fn a_recreate_after_an_out_of_band_delete_with_a_lost_reply_converges() {
+fn a_recreate_after_an_out_of_band_delete_with_a_lost_reply_converges(backend: Backend) {
     let scenario = Scenario {
         name: "recreate",
         setup: vec![chain()],
         act: Act::Apply(chain()),
     };
-    let (mut clean, clean_ledger) = world_with_loss(&scenario, Some("db/run"));
+    let (mut clean, clean_ledger) = world_with_loss(backend, &scenario, Some("db/run"));
     done(apply(&mut clean, &clean_ledger, &chain()));
     let expected = state_of(&clean, &clean_ledger);
 
     // The object is deleted out of band; the run that makes it again has its create applied
     // and the reply lost.
-    let (mut fake, ledger) = world_with_loss(&scenario, Some("db/run"));
+    let (mut fake, ledger) = world_with_loss(backend, &scenario, Some("db/run"));
     let old = physical_of(&ledger, "db/run");
     *fake.faults_mut().ambiguous_at_call = Some((mutations(&fake) + 1) as u64);
     let f = failure(apply(&mut fake, &ledger, &chain()));
@@ -607,13 +596,12 @@ fn created_by(outcome: &Outcome) -> Vec<String> {
     report.created.iter().map(ToString::to_string).collect()
 }
 
-#[test]
-fn interleaved_applies_create_nothing_twice() {
+fn interleaved_applies_create_nothing_twice(backend: Backend) {
     for scenario in scenarios() {
         let Act::Apply(target) = &scenario.act else {
             continue;
         };
-        let (mut clean, clean_ledger) = (Fake::standard(), MemoryLedger::new());
+        let (mut clean, clean_ledger) = (Fake::standard(), backend.ledger());
         for setup in &scenario.setup {
             done(apply(&mut clean, &clean_ledger, setup));
         }
@@ -626,7 +614,7 @@ fn interleaved_applies_create_nothing_twice() {
 
         for at in 1..=calls {
             let context = format!("{} (second run before call {at})", scenario.name);
-            let (mut fake, ledger) = (Fake::standard(), MemoryLedger::new());
+            let (mut fake, ledger) = (Fake::standard(), backend.ledger());
             for setup in &scenario.setup {
                 done(apply(&mut fake, &ledger, setup));
             }
@@ -665,16 +653,15 @@ fn interleaved_applies_create_nothing_twice() {
     }
 }
 
-#[test]
-fn a_run_stale_against_the_ledger_writes_again_and_a_busy_ledger_is_reported() {
+fn a_run_stale_against_the_ledger_writes_again_and_a_busy_ledger_is_reported(backend: Backend) {
     // A write that finds the document changed is tried again after a fresh read.
-    let (mut fake, ledger) = (Fake::standard(), common::FlakyLedger::new());
+    let (mut fake, ledger) = (Fake::standard(), common::FlakyLedger::on(backend));
     let report = done(apply(&mut fake, &ledger, &chain()));
     assert_eq!(report.created.len(), 4);
 
     // A ledger that stays stale through every attempt stops the run, and the world has not
     // moved on from the intent that could not be written.
-    let (mut fake, ledger) = (Fake::standard(), common::FlakyLedger::new());
+    let (mut fake, ledger) = (Fake::standard(), common::FlakyLedger::on(backend));
     ledger.always_stale(true);
     let f = failure(apply(&mut fake, &ledger, &chain()));
     assert_eq!(f.error, EngineError::LedgerBusy);
@@ -682,9 +669,8 @@ fn a_run_stale_against_the_ledger_writes_again_and_a_busy_ledger_is_reported() {
     assert_eq!(ledger.writes(), 5, "five attempts");
 }
 
-#[test]
-fn a_ledger_that_cannot_be_read_stops_the_run_before_anything_is_changed() {
-    let (mut fake, ledger) = (Fake::standard(), common::FlakyLedger::new());
+fn a_ledger_that_cannot_be_read_stops_the_run_before_anything_is_changed(backend: Backend) {
+    let (mut fake, ledger) = (Fake::standard(), common::FlakyLedger::on(backend));
     ledger.fail_reads(true);
     let f = failure(apply(&mut fake, &ledger, &chain()));
     assert_eq!(f.at, None);
@@ -695,8 +681,7 @@ fn a_ledger_that_cannot_be_read_stops_the_run_before_anything_is_changed() {
     assert!(fake.calls().is_empty());
 }
 
-#[test]
-fn errors_and_refusals_read_as_sentences() {
+fn errors_and_refusals_read_as_sentences(backend: Backend) {
     let sentences = [
         EngineError::Provider(ProviderError::Transient("busy".to_owned())).to_string(),
         EngineError::Ledger(LedgerError::Stale).to_string(),
@@ -716,7 +701,7 @@ fn errors_and_refusals_read_as_sentences() {
             "a/run: no object is read, but the record is an intent that no read has confirmed",
         ]
     );
-    let (mut fake, ledger) = (Fake::standard(), MemoryLedger::new());
+    let (mut fake, ledger) = (Fake::standard(), backend.ledger());
     fake.add_foreign(&Kind::service(), "db-run", None);
     let Outcome::Refused(refusal) = apply(&mut fake, &ledger, &chain()) else {
         panic!("expected a refusal");
@@ -726,3 +711,44 @@ fn errors_and_refusals_read_as_sentences() {
         "refused: db/run: an object with no stamp is there"
     );
 }
+
+// ---- every scenario above, once per ledger ---------------------------------------------------
+
+/// Runs each named scenario on the in-memory ledger and on the file ledger, as the tests
+/// `<name>::memory` and `<name>::file`.
+macro_rules! on_every_ledger {
+    ($($name:ident),* $(,)?) => {
+        $(
+            mod $name {
+                #[test]
+                fn memory() {
+                    super::$name(super::Backend::Memory);
+                }
+
+                #[test]
+                fn file() {
+                    super::$name(super::Backend::File);
+                }
+            }
+        )*
+    };
+}
+
+on_every_ledger!(
+    crash_after_intent_adopts_on_rerun,
+    a_create_that_loses_a_race_to_our_own_stamp_takes_the_winner,
+    a_create_over_an_object_that_is_not_ours_stops_the_run,
+    a_foreign_object_found_at_the_re_read_stops_the_run,
+    a_create_refused_over_a_foreign_object_leaves_no_intent,
+    a_create_refused_over_a_foreign_object_keeps_a_record_another_writer_changed,
+    a_create_refused_as_existing_while_reads_cannot_see_it_keeps_the_intent,
+    crash_sweep_every_call_k_no_duplicates_or_orphans,
+    crash_sweep_rollback_every_call_k_no_duplicates_or_orphans,
+    crash_sweep_every_ledger_write_no_duplicates_or_orphans,
+    crash_sweep_converges_after_out_of_band_delete,
+    a_recreate_after_an_out_of_band_delete_with_a_lost_reply_converges,
+    interleaved_applies_create_nothing_twice,
+    a_run_stale_against_the_ledger_writes_again_and_a_busy_ledger_is_reported,
+    a_ledger_that_cannot_be_read_stops_the_run_before_anything_is_changed,
+    errors_and_refusals_read_as_sentences,
+);

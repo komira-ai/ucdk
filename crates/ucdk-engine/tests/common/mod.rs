@@ -4,10 +4,12 @@
 //! a provider that runs code before a chosen call, and a ledger that can be made to fail.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use ucdk_engine::{Engine, Mode, Outcome, Report, Request};
-use ucdk_ledger::{Change, Ledger, LedgerError, MemoryLedger, Record, Snapshot, Token};
+use ucdk_ledger::{Change, FileLedger, Ledger, LedgerError, MemoryLedger, Record, Snapshot, Token};
 use ucdk_plan::{Lowered, Plan, lower};
 use ucdk_proto::v1::resource::Body;
 use ucdk_proto::v1::{Access, Image, Ref, Resource, ResourceList, Service, Uses, image, service};
@@ -160,11 +162,11 @@ pub fn objects(fake: &Fake) -> String {
     dump[..end].to_owned()
 }
 
-pub fn records(ledger: &MemoryLedger) -> BTreeMap<NodePath, Record> {
+pub fn records(ledger: &dyn Ledger) -> BTreeMap<NodePath, Record> {
     ledger.read().expect("read").records
 }
 
-pub fn physical_of(ledger: &MemoryLedger, p: &str) -> PhysicalId {
+pub fn physical_of(ledger: &dyn Ledger, p: &str) -> PhysicalId {
     records(ledger)[&path(p)]
         .physical
         .clone()
@@ -297,13 +299,81 @@ impl Provider for Hooked<'_> {
     }
 }
 
+// ---- the ledgers the scenarios run on ---------------------------------------------------------
+
+/// The ledger implementations the shared scenarios run against.
+#[derive(Debug, Clone, Copy)]
+pub enum Backend {
+    Memory,
+    File,
+}
+
+impl Backend {
+    /// A new, empty ledger of this kind.
+    pub fn ledger(self) -> AnyLedger {
+        match self {
+            Self::Memory => AnyLedger::Memory(MemoryLedger::new()),
+            Self::File => {
+                let dir = Scratch::new();
+                let ledger =
+                    FileLedger::open(dir.0.join("ledger.ucdk")).expect("open the file ledger");
+                AnyLedger::File(ledger, Arc::new(dir))
+            }
+        }
+    }
+}
+
+/// A directory for one file ledger, removed when the last handle to the ledger is dropped.
+#[derive(Debug)]
+pub struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, Ordering::SeqCst);
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("engine-ledgers-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("make the scratch directory");
+        Self(dir)
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A ledger of either kind. A clone shares the document, as a clone of each kind does.
+#[derive(Debug, Clone)]
+pub enum AnyLedger {
+    Memory(MemoryLedger),
+    File(FileLedger, Arc<Scratch>),
+}
+
+impl Ledger for AnyLedger {
+    fn read(&self) -> Result<Snapshot, LedgerError> {
+        match self {
+            Self::Memory(ledger) => ledger.read(),
+            Self::File(ledger, _) => ledger.read(),
+        }
+    }
+
+    fn write(&self, expected: &Token, change: Change) -> Result<Token, LedgerError> {
+        match self {
+            Self::Memory(ledger) => ledger.write(expected, change),
+            Self::File(ledger, _) => ledger.write(expected, change),
+        }
+    }
+}
+
 // ---- a ledger that can be made to fail -------------------------------------------------------
 
 /// A memory ledger that counts writes and can fail the `n`th write, fail every read, or report
 /// every write as stale.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct FlakyLedger {
-    pub inner: MemoryLedger,
+    pub inner: AnyLedger,
     writes: AtomicU64,
     fail_write_at: AtomicU64,
     fail_reads: AtomicBool,
@@ -312,7 +382,17 @@ pub struct FlakyLedger {
 
 impl FlakyLedger {
     pub fn new() -> Self {
-        Self::default()
+        Self::on(Backend::Memory)
+    }
+
+    pub fn on(backend: Backend) -> Self {
+        Self {
+            inner: backend.ledger(),
+            writes: AtomicU64::default(),
+            fail_write_at: AtomicU64::default(),
+            fail_reads: AtomicBool::default(),
+            always_stale: AtomicBool::default(),
+        }
     }
 
     pub fn writes(&self) -> u64 {

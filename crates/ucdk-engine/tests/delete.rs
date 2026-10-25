@@ -5,8 +5,8 @@
 mod common;
 
 use common::{
-    Hooked, apply, apply_with, cell, chain, chain_with, destroy, done, lowered, mutations, objects,
-    path, paths, physical_of, plan_of, planned, records, service_of,
+    AnyLedger, Backend, Hooked, apply, apply_with, cell, chain, chain_with, destroy, done, lowered,
+    mutations, objects, path, paths, physical_of, plan_of, planned, records, service_of,
 };
 use ucdk_engine::{Engine, EngineError, Mode, Outcome, Refusal, Request};
 use ucdk_ledger::{Change, Ledger as _, MemoryLedger, Origin, State};
@@ -16,6 +16,10 @@ use ucdk_provider_fake::{Fake, FakeConfig, Op};
 
 fn world() -> (Fake, MemoryLedger) {
     (Fake::standard(), MemoryLedger::new())
+}
+
+fn world_on(backend: Backend) -> (Fake, AnyLedger) {
+    (Fake::standard(), backend.ledger())
 }
 
 fn deletes(fake: &Fake) -> usize {
@@ -396,9 +400,8 @@ fn a_delete_the_provider_refuses_leaves_the_record_reaping_and_the_next_run_dele
     assert!(!records(&ledger).contains_key(&path("web/public")));
 }
 
-#[test]
-fn rollback_removes_only_created_this_run() {
-    let (mut fake, ledger) = world();
+fn rollback_removes_only_created_this_run(backend: Backend) {
+    let (mut fake, ledger) = world_on(backend);
     let base = lowered(vec![
         service_of("api", 81, false, &["db"]),
         service_of("db", 5432, false, &[]),
@@ -429,9 +432,8 @@ fn rollback_removes_only_created_this_run() {
     assert_eq!(kept, ["api/run", "db/run"]);
 }
 
-#[test]
-fn a_failed_run_without_rollback_leaves_what_it_created() {
-    let (mut fake, ledger) = world();
+fn a_failed_run_without_rollback_leaves_what_it_created(backend: Backend) {
+    let (mut fake, ledger) = world_on(backend);
     let fail_at = 3;
     fake.faults_mut().fail_at_call.replace(fail_at);
     let f = failure(apply(&mut fake, &ledger, &chain()));
@@ -440,10 +442,9 @@ fn a_failed_run_without_rollback_leaves_what_it_created() {
     assert_eq!(fake.object_count(), 2);
 }
 
-#[test]
-fn rollback_keeps_what_it_must_keep() {
+fn rollback_keeps_what_it_must_keep(backend: Backend) {
     let mut fake = keeping();
-    let ledger = MemoryLedger::new();
+    let ledger = backend.ledger();
     // The fifth create, `zzz/run`, is refused; the four before it are rolled back, except the
     // kept kind.
     let more = lowered(vec![
@@ -463,9 +464,8 @@ fn rollback_keeps_what_it_must_keep() {
     assert_eq!(fake.object_count(), 1, "the kept object stays");
 }
 
-#[test]
-fn rollback_reports_what_it_could_not_delete_and_goes_on() {
-    let (mut fake, ledger) = world();
+fn rollback_reports_what_it_could_not_delete_and_goes_on(backend: Backend) {
+    let (mut fake, ledger) = world_on(backend);
     // Creates: `db/run`, `api/run`; the third is refused. The rollback's first delete
     // (mutation 4, of `api/run`) times out; the second (of `db/run`) succeeds.
     {
@@ -777,3 +777,32 @@ fn a_lost_create_reply_and_a_lagging_read_do_not_let_destroy_orphan_the_object()
     assert_eq!(fake.object_count(), 0);
     assert!(records(&ledger).is_empty());
 }
+
+// ---- rollback, once per ledger ---------------------------------------------------------------
+
+/// Runs each named scenario on the in-memory ledger and on the file ledger, as the tests
+/// `<name>::memory` and `<name>::file`.
+macro_rules! on_every_ledger {
+    ($($name:ident),* $(,)?) => {
+        $(
+            mod $name {
+                #[test]
+                fn memory() {
+                    super::$name(super::Backend::Memory);
+                }
+
+                #[test]
+                fn file() {
+                    super::$name(super::Backend::File);
+                }
+            }
+        )*
+    };
+}
+
+on_every_ledger!(
+    rollback_removes_only_created_this_run,
+    a_failed_run_without_rollback_leaves_what_it_created,
+    rollback_keeps_what_it_must_keep,
+    rollback_reports_what_it_could_not_delete_and_goes_on,
+);
