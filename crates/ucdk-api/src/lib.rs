@@ -24,6 +24,7 @@ mod response;
 
 pub use exit::{exit_class, failure_class};
 pub use request::{Approved, RequestError};
+pub use response::catalog_response;
 
 /// The generated messages of `ucdk.api.v1`.
 #[allow(clippy::all, clippy::pedantic, missing_docs)]
