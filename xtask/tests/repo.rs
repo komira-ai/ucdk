@@ -55,14 +55,23 @@ fn security_md_has_no_email_address() {
 }
 
 #[test]
-fn the_workflow_has_two_jobs_each_one_xtask_verb() {
+fn the_workflow_has_three_jobs_each_one_xtask_verb() {
     let text = read(".github/workflows/ci.yml");
     let runs: Vec<&str> = text
         .lines()
         .filter_map(|l| l.trim().strip_prefix("- run: "))
         .collect();
-    assert_eq!(runs, ["cargo xtask check", "cargo xtask coverage"]);
-    assert!(text.contains("  check:\n") && text.contains("  coverage:\n"));
+    assert_eq!(
+        runs,
+        [
+            "cargo xtask check",
+            "cargo xtask coverage",
+            "cargo xtask sdk-test"
+        ]
+    );
+    for job in ["check", "coverage", "sdk"] {
+        assert!(text.contains(&format!("  {job}:\n")), "{job}");
+    }
     assert!(
         !text.contains("secrets."),
         "no secrets in a pull-request workflow"

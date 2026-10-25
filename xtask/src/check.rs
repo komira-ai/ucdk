@@ -7,7 +7,7 @@ use std::path::Path;
 use crate::cmd::{Cmd, Runner};
 use crate::event::{Event, commit_base};
 use crate::{
-    Finding, coverage, dco, direction, fetch, lint, purity, runlines, spdx, tree, unsafe_scope,
+    Finding, coverage, dco, direction, fetch, lint, purity, runlines, sdk, spdx, tree, unsafe_scope,
 };
 
 /// One gate's name, what it found, and what it examined (printed with the result).
@@ -98,6 +98,7 @@ pub fn run(root: &Path, runner: &dyn Runner, event: &Event, flag: Option<&str>) 
     let members = coverage::members(root).unwrap_or_default();
     let count = |keep: fn(&str) -> bool| files.iter().filter(|(p, _)| keep(p)).count();
     let file_count = plural(files.len(), "file", "files");
+    let (stale, generated) = sdk::check_fresh(root);
     let mut gates: Vec<Gate> = vec![
         (
             "tools",
@@ -141,6 +142,11 @@ pub fn run(root: &Path, runner: &dyn Runner, event: &Event, flag: Option<&str>) 
             "unsafe-scope",
             unsafe_scope::check_unsafe_scope(root, &members),
             plural(members.len(), "manifest", "manifests"),
+        ),
+        (
+            "sdk-fresh",
+            stale,
+            plural(generated, "generated file", "generated files"),
         ),
         (
             "public-lint tree",

@@ -63,7 +63,7 @@ pure workspace crates).
 | API | `ucdk-api` | the `ucdk.api.v1` protobuf messages for everything that is not a resource (session config, requests, plan, report, findings, error; `StatusRequest` and `StatusResponse` for the engine's read-only status) and the code converting requests to the engine's requests and the engine's outcomes to messages (a plan only goes out: a caller sends the hash, never a plan); the single table from outcome to exit class that both the CLI and the SDKs use | no |
 | C ABI | `ucdk-capi` | the `cdylib`, the C header (`crates/ucdk-capi/include/ucdk.h`), panic containment, buffer ownership. The only crate in the workspace allowed `unsafe` | no |
 | SDKs | `sdk/python`, `sdk/typescript` (**proposal**) | the loader, the session wrapper, and generated typed templates | n/a |
-| Generator | `ucdk-codegen` (**proposal**) | reads the descriptor set and writes the generated SDK sources | no |
+| Generator | `ucdk-codegen` | compiles the protos in-process, reads the descriptors and returns the generated SDK sources as files (`cargo xtask gen-sdk` writes them; the `sdk-fresh` gate of `check` compares them with the committed ones). Python is the one target | no |
 
 The engine already states the seam this document builds on: the whole surface is one pair of
 plain enums, `Request` and `Outcome`, "not a wire format: a later shared library wraps exactly
@@ -290,7 +290,7 @@ reachable from the ABI.
   list on macOS), and a test reads the built library's exported symbol table and compares it with
   the header.
 
-## 6. How SDKs are generated (proposal)
+## 6. How SDKs are generated (exists for Python: `ucdk-codegen`)
 
 ### 6.1 Input
 
@@ -310,22 +310,26 @@ no `protoc` and no per-language protobuf toolchain is needed to generate anythin
 
 The hand-written part does not grow when a resource is added. A test enforces that (10.4).
 
-### 6.3 Encoding: generated, no protobuf runtime dependency (recommendation)
+### 6.3 Encoding: generated, no protobuf runtime dependency (decided, built)
 
-Two ways to serialize the generated messages:
+The generator emits the encoder and decoder itself (option B of the design): an SDK has no
+protobuf runtime dependency, no per-language protobuf generator and no version skew. The subset
+of proto3 it writes code for is the one the protos use: strings, booleans, `int32`, `int64`,
+`uint32`, `uint64`, enums, messages, `repeated` strings and messages, `map<string, T>`, `oneof`
+and `optional`; any other field type is refused by name when the generator reads it (a new proto
+feature is a decision in `ucdk-codegen/src/python/types.rs`, not a field an SDK silently drops).
 
-- **A.** Generate the message code with each language's own protobuf tooling and depend on its
-  runtime. Least code of ours; adds a runtime dependency, a per-language generator toolchain and
-  version skew to each SDK.
-- **B.** The generator emits the encoder and decoder itself. The used subset of proto3 is small
-  (strings, `uint32`, bool, enums, nested messages, repeated, `map<string, Message>`, `oneof`,
-  `optional`, `Duration`). No runtime dependency in the SDK, one generator in Rust, tested in
-  Rust.
+The bytes are the ones the Rust side writes, not merely valid protobuf: a message is written in
+field-number order except that a whole oneof sits where its lowest arm is (that is how prost
+orders its fields), a singular scalar is left out when it is the default, an `optional` field and
+a message when it is absent, a map in key order with a default key or value left out of an entry.
 
-Recommendation: **B**, with one cross-language contract test: for each golden message in
-`crates/ucdk-proto/tests/wire.rs`, every SDK encodes the same value and must produce the same
-bytes, and decodes the golden bytes back to the same value. If B proves too costly in review, A
-is the fallback and the contract test is unchanged.
+The contract test is `sdk/wire-golden`: for each case, a golden file of the bytes the Rust
+messages encode to (written and held by `crates/ucdk-api/tests/sdk_golden.rs`, one case per
+message shape, with `manifest.txt` naming the message of each). Every SDK builds the same value by
+hand, must encode it to the same bytes and must decode the bytes to the same value
+(`sdk/python/tests/test_wire_golden.py`). `crates/ucdk-codegen/tests/golden_coverage.rs` fails
+unless the goldens set every field of every message of both packages.
 
 ### 6.4 What "adding a resource" costs
 
@@ -384,13 +388,20 @@ shape is added; and a provider still has to be written for the kind.
 - Blocking calls: the Python SDK releases the GIL by construction under `ctypes`; the TypeScript
   SDK runs each call on a worker thread and exposes a promise.
 
-### 6.6 Generated code in the repository
+### 6.6 Generated code in the repository (built)
 
-Proposal: generated SDK sources are **not committed**; `cargo xtask gen-sdk` writes them into the
-SDK package directories and the SDK tests and packaging jobs run it first. The generator's own
-output for a fixed small proto (a checked-in fixture) is committed as a golden, so a generator
-change shows up as a diff in review. This follows the repo's existing rule that nothing generated
-is committed (`ucdk-proto/build.rs`).
+Generated SDK sources are **committed**, under `sdk/python/ucdk/generated/`. `cargo xtask gen-sdk`
+writes them (and removes a generated file the generator no longer writes); the `sdk-fresh` gate
+of `cargo xtask check` regenerates them in memory and fails on a file that differs, is missing, or
+is extra, so a proto or generator change shows in review as the diff of the SDK it changes, and no
+checkout ever builds an SDK from a stale tree. The repository's rule that nothing generated is
+committed still holds for the Rust types (`ucdk-proto/build.rs` writes them into the build
+directory); the reason it does not for an SDK is that a Python package is used from a checkout
+without a build step.
+
+The generator's own output for a fixed proto (`crates/ucdk-codegen/tests/proto`, every supported
+field shape, comments, names that need care) is kept as golden files in
+`crates/ucdk-codegen/tests/golden`, held by a Rust test and loaded by a Python test.
 
 ## 7. Resources as protos (exists)
 
@@ -514,7 +525,7 @@ repository does today is a **proposal**.
 | `ucdk-api` (proposal) | message-to-value conversion in both directions; the outcome-to-exit table | round-trip tests; an exhaustive match so a new `Outcome` or `Refusal` variant fails to compile until it is mapped | a field dropped in conversion, an unmapped outcome |
 | `ucdk-capi` | the nine functions, called as C would | see 10.3 | ownership, panic, version and malformed-input defects |
 | SDKs (proposal) | binding and generated code | see 10.4 | an SDK that disagrees with the core or with another SDK |
-| generator (proposal) | output for fixture protos | golden output; compile or import check per language | generated code that does not load or encode wrongly |
+| generator | output for fixture protos; the committed SDK; a kind added to `resource.proto` | golden output (`tests/generate.rs`, `templates.rs`, `golden_coverage.rs`), the `sdk-fresh` gate, and the fixture's golden loaded and run by the Python tests | generated code that does not load or encode wrongly, a refused-in-silence field type, a stale committed SDK |
 
 ### 10.2 Crash and fault injection
 
@@ -542,12 +553,13 @@ again against the built `cdylib` loaded dynamically:
 - run under Miri for the ABI crate's pure-Rust path after merge, and under a sanitizer build
   after merge, since neither runs in the pull-request budget.
 
-### 10.4 SDK conformance (proposal)
+### 10.4 SDK conformance (Python: wire contract and generated code exist)
 
 The SDK tests are written in the SDK's language, because the point is to exercise the binding.
-This is an exception to "tests are Rust" in `CONTRIBUTING.md` and needs that rule amended
-explicitly, scoped to `sdk/<language>` and driven only through a `cargo xtask sdk-test` verb so
-the workflow still runs one verb per line.
+This is an exception to "tests are Rust" in `CONTRIBUTING.md`, scoped to `sdk/<language>` and
+driven only through the `cargo xtask sdk-test` verb so the workflow still runs one verb per line.
+The Python SDK's tests are the standard library's `unittest` only: nothing is installed and no
+network is used.
 
 - **Wire contract:** every golden message encodes to the same bytes in every SDK and decodes back
   (6.3).
@@ -578,13 +590,13 @@ Live tests never run in pull-request CI.
 | fmt, clippy, deny, SPDX, run-lines, dependency direction, public lint, sign-off (`cargo xtask check`) | yes | yes |
 | unit, golden, engine, CLI, kit on fake and emulators; 99% line and branch per crate (`cargo xtask coverage`) | yes | yes |
 | ABI conformance in-process; symbol table check | yes | yes |
-| SDK conformance on Linux x86-64 for each SDK (`cargo xtask sdk-test`) | yes (proposal) | all supported platforms |
+| SDK conformance on Linux x86-64 for each SDK (`cargo xtask sdk-test`) | yes | all supported platforms |
 | built `cdylib` loaded dynamically, Miri, sanitizer builds | no | yes |
 | macOS arm64 and Linux arm64 builds and SDK conformance | no | yes |
 | live cloud runs | never | explicit, on demand |
 
-The current workflow has two jobs (`check`, `coverage`); the SDK job would be a third, one
-`cargo xtask` verb per job as the existing rule requires.
+The workflow has three jobs (`check`, `coverage`, `sdk`), one `cargo xtask` verb per job as the
+rule requires.
 
 ## 11. Open questions
 
@@ -592,10 +604,9 @@ These are the decisions this document cannot make alone:
 
 1. **Loadable providers** (3.5, 8.3): is there a provider that must be written outside Rust? The
    recommendation is no, so providers are linked into the core.
-2. **SDK-language tests** (10.4): `CONTRIBUTING.md` says tests are Rust. The recommendation is a
-   scoped exception for `sdk/<language>`, run through one xtask verb.
-3. **Encoding strategy** (6.3): generated encoders (recommended) or each language's protobuf
-   runtime.
+2. **SDK-language tests** (10.4): decided: a scoped exception for `sdk/<language>`, run through
+   `cargo xtask sdk-test` (`CONTRIBUTING.md`).
+3. **Encoding strategy** (6.3): decided: generated encoders.
 4. **The first real cloud's order** after the fake, and the live-account and spend rules for
    section 10.5.
 5. **Descriptor-driven lowering** (6.4) is built; kinds are added as a message with options.
@@ -620,12 +631,17 @@ lists its tests by name. The first part ends with a working Python SDK; real clo
    exemption and its `unsafe-scope` gate in `cargo xtask check`; the nine functions; panic
    containment; the in-process ABI conformance tests of 10.3; a test that the checked-in header
    matches the exports; see 3.6 for what is not done).
-7. **`ucdk-codegen` and `cargo xtask gen-sdk`.** Descriptor reading, a fixture proto with golden
-   output, the Python target.
+7. **`ucdk-codegen` and `cargo xtask gen-sdk`** (done: `crates/ucdk-codegen`, the Python target:
+   message classes with their own encoders and decoders, typed resource templates and output
+   references read from the options, `sdk/python/ucdk/generated` committed and held by the
+   `sdk-fresh` gate; a fixture proto with golden output; the wire goldens in `sdk/wire-golden`,
+   written by `ucdk-api/tests/sdk_golden.rs` and checked by `sdk/python/tests`; the scoped
+   Python-test exception, `cargo xtask sdk-test` and the third CI job of step 9 came with it).
 8. **Python SDK** (`sdk/python`): loader, `Session`, generated templates, platform wheel layout;
    `cargo xtask sdk-test`; the wire contract and verb contract tests. **Milestone: plan, apply,
    destroy through Python against the fake provider, end to end, through the real library.**
-9. **CONTRIBUTING and CI updates** for SDK tests and the third CI job (the amendment in 10.4).
+9. **CONTRIBUTING and CI updates** for SDK tests and the third CI job (done with step 7: the
+   scoped exception in `CONTRIBUTING.md`, `cargo xtask sdk-test`, the `sdk` job).
 10. **TypeScript target and SDK** (`sdk/typescript`): generator target, binding decision, worker
     thread wrapper, same contract tests and the same scenario files.
 11. **Lease and fencing** with an injected clock (9, item 2), with the crash sweep extended.

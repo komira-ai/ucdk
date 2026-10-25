@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 serde_json.workspace = true
 sha2.workspace = true
+ucdk-codegen = { path = "../crates/ucdk-codegen" }
 
 [lints]
 workspace = true

@@ -1,0 +1,100 @@
+// SPDX-License-Identifier: Apache-2.0
+// A fixture for the generator: every field shape the generator supports, comments to carry into
+// the docstrings, and names that need care in Python.
+
+syntax = "proto3";
+
+package example.shapes.v1;
+
+// How fast.
+enum Mode {
+  // Not said.
+  MODE_UNSPECIFIED = 0;
+  MODE_FAST = 1;
+  // Carries no prefix.
+  SLOW = 2;
+  // What is left of the prefix is not a name.
+  MODE_3D = 3;
+}
+
+// A name with a digit in it.
+enum Http2Mode {
+  HTTP2_MODE_UNSPECIFIED = 0;
+  HTTP2_MODE_ON = 1;
+}
+
+// Every kind of field.
+//
+// A second paragraph, with a \ and """ in it.
+message Scalars {
+  // A string.
+  string text = 1;
+  bool flag = 2;
+  int32 small = 3;
+  int64 big = 4;
+  uint32 usmall = 5;
+  uint64 ubig = 6;
+  Mode mode = 7;
+  optional string opt_text = 8;
+  optional int32 opt_small = 9;
+  optional Mode opt_mode = 10;
+  optional bool opt_flag = 11;
+  Inner inner = 12;
+  repeated string names = 13;
+  repeated Inner inners = 14;
+  map<string, string> labels = 15;
+  map<string, Inner> inner_map = 16;
+  map<string, uint32> counts = 17;
+  map<string, Mode> modes = 18;
+  // A Python keyword.
+  string from = 19;
+  // The name of a method of every message.
+  string encode = 20;
+  // Arms of every kind. The lowest arm is 30.
+  oneof choice {
+    string a_text = 30;
+    int64 a_int = 31;
+    Mode a_mode = 32;
+    Inner a_inner = 33;
+    Pair a_pair = 34;
+    Empty a_empty = 35;
+    Nest.Deep a_deep = 36;
+    Scalars.Nested a_nested = 37;
+  }
+  // Its arms are on both sides of `nested`: the oneof is written at 40, before it.
+  oneof other {
+    string o_text = 40;
+    bool o_flag = 60;
+  }
+  Nested nested = 50;
+  Http2Mode http = 51;
+
+  message Nested {
+    string v = 1;
+    // Nested enum.
+    enum Kind {
+      KIND_UNSPECIFIED = 0;
+      KIND_X = 1;
+    }
+    Kind kind = 2;
+  }
+}
+
+message Inner {
+  string v = 1;
+}
+
+// Plain scalars only: a constructor can take them as arguments.
+message Pair {
+  string left = 1;
+  int32 right = 2;
+  Mode speed = 3;
+}
+
+message Empty {}
+
+message Nest {
+  message Deep {
+    string d = 1;
+  }
+}

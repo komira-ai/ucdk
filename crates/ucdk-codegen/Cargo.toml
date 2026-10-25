@@ -1,0 +1,18 @@
+[package]
+name = "ucdk-codegen"
+description = "Reads the ucdk protos' descriptors and writes the generated SDK sources: messages with their own encoders, typed resource templates and output references."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Reflection over the descriptors the generator reads; already in the tree through protox.
+prost-reflect.workspace = true
+# Compiles the protos in-process (no protoc binary), with their comments.
+protox.workspace = true
+
+[lints]
+workspace = true

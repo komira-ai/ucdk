@@ -20,6 +20,8 @@ prost-build.workspace = true
 protox.workspace = true
 
 [dev-dependencies]
+# The Duration of the request-timeout fields the wire goldens build.
+prost-types.workspace = true
 ucdk-ledger = { path = "../ucdk-ledger" }
 ucdk-provider-fake = { path = "../ucdk-provider-fake" }
 

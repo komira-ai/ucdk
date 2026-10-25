@@ -164,6 +164,8 @@ fn lint_flags_hosts_and_addresses_outside_the_allow_list() {
         "the language and .lang files".to_owned(),
         "plain text, no scheme://".to_owned(),
         "file:///a/b and HTTPS://Github.COM/x".to_owned(),
+        // An attribute of an object, as in generated code, is not a host.
+        join(&["if self.", "internal is not None:"]),
     ];
     for text in &good {
         assert!(rules(text).is_empty(), "{text}");

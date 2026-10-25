@@ -6,7 +6,7 @@ mod common;
 use std::path::PathBuf;
 use std::process::Command;
 
-use common::{Fake, cache_tools, scratch, strings, write};
+use common::{Fake, cache_tools, install_sdk, scratch, strings, write};
 use xtask::check::{render, run};
 use xtask::cli;
 use xtask::event::Event;
@@ -37,6 +37,7 @@ fn project(name: &str) -> PathBuf {
         "jobs:\n  check:\n    steps:\n      - run: cargo xtask check\n",
     );
     cache_tools(&root);
+    install_sdk(&root);
     root
 }
 
@@ -52,7 +53,7 @@ fn failed(gates: &[xtask::check::Gate]) -> Vec<&str> {
         .collect()
 }
 
-const STATIC_GATES: [&str; 13] = [
+const STATIC_GATES: [&str; 14] = [
     "tools",
     "tree",
     "fmt",
@@ -64,6 +65,7 @@ const STATIC_GATES: [&str; 13] = [
     "purity",
     "direction",
     "unsafe-scope",
+    "sdk-fresh",
     "public-lint tree",
     "public-lint pull request text",
 ];
@@ -114,7 +116,7 @@ fn check_runs_every_gate_even_after_one_fails() {
         "{text}"
     );
     assert!(
-        text.ends_with("== xtask check: 2 of 13 gates failed\n"),
+        text.ends_with("== xtask check: 2 of 14 gates failed\n"),
         "{text}"
     );
     assert_eq!(
@@ -154,7 +156,7 @@ fn a_pull_request_adds_the_sign_off_and_commit_message_gates() {
         ..Fake::default()
     };
     let gates = run(&root, &unsigned, &pull_request("base1"), None);
-    assert_eq!(names(&gates)[13..], ["dco", "commit-message lint"]);
+    assert_eq!(names(&gates)[14..], ["dco", "commit-message lint"]);
     assert_eq!(failed(&gates), ["dco"]);
     assert!(
         unsigned
@@ -190,7 +192,7 @@ fn a_pull_request_without_a_base_or_with_an_unreadable_range_fails() {
     let root = project("check-pr-errors");
     let gates = run(&root, &Fake::default(), &pull_request(""), None);
     assert_eq!(failed(&gates), ["dco"]);
-    assert_eq!(gates[13].1[0].rule, "dco-no-base");
+    assert_eq!(gates[14].1[0].rule, "dco-no-base");
 
     let broken = Fake {
         fail_on: vec!["git log"],
@@ -198,7 +200,7 @@ fn a_pull_request_without_a_base_or_with_an_unreadable_range_fails() {
     };
     let gates = run(&root, &broken, &pull_request("base1"), None);
     assert_eq!(failed(&gates), ["dco"]);
-    assert_eq!(gates[13].1[0].rule, "git");
+    assert_eq!(gates[14].1[0].rule, "git");
 }
 
 #[test]
@@ -330,7 +332,13 @@ fn the_coverage_verb_prints_the_per_crate_table() {
             write(
                 &cmd.dir,
                 xtask::coverage::LCOV,
-                &[line("crates/c"), line("xtask")].concat(),
+                &[
+                    line("crates/c"),
+                    line("crates/ucdk-api"),
+                    line("crates/ucdk-proto"),
+                    line("xtask"),
+                ]
+                .concat(),
             );
         }
     });

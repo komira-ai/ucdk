@@ -555,6 +555,7 @@ version = "0.0.0"
 dependencies = [
  "prost",
  "prost-build",
+ "prost-types",
  "protox",
  "ucdk-engine",
  "ucdk-ledger",
@@ -590,6 +591,14 @@ dependencies = [
  "ucdk-proto",
  "ucdk-provider",
  "ucdk-provider-fake",
+]
+
+[[package]]
+name = "ucdk-codegen"
+version = "0.0.0"
+dependencies = [
+ "prost-reflect",
+ "protox",
 ]
 
 [[package]]
@@ -686,6 +695,7 @@ version = "0.0.0"
 dependencies = [
  "serde_json",
  "sha2",
+ "ucdk-codegen",
 ]
 
 [[package]]

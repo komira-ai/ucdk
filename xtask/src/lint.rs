@@ -292,8 +292,11 @@ fn ipv4(line: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// A name that ends in an internal suffix. `self.<name>` is an attribute of an object (the
+/// generated SDK has a field called `internal`), not a host.
 fn suffix(line: &str) -> Option<String> {
     line.split(|c: char| !(c.is_ascii_alphanumeric() || ".-".contains(c)))
+        .filter(|t| !t.starts_with("self."))
         .find(|t| INTERNAL_SUFFIXES.iter().any(|s| t.ends_with(s)))
         .map(str::to_owned)
 }
