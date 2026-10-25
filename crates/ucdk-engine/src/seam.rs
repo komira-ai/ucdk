@@ -2,6 +2,7 @@
 //! The seam: what is asked of the engine and what comes back, as plain Rust values.
 
 use std::fmt;
+use std::time::Duration;
 
 use std::collections::BTreeMap;
 
@@ -75,6 +76,9 @@ pub enum Refusal {
     /// The file wants nodes of a kind the provider does not host: every one is listed with its
     /// kind. Nothing was read or written.
     UnhostedKinds(Vec<(NodePath, Kind)>),
+    /// Another run holds the ledger's lease: it is named, with how long until the lease can be
+    /// taken if that run ends without releasing it. Nothing was read or written.
+    LeaseHeld { holder: String, remaining: Duration },
 }
 
 impl fmt::Display for Refusal {
@@ -104,6 +108,12 @@ impl fmt::Display for Refusal {
                     .collect();
                 write!(f, "refused: {}", list.join("; "))
             }
+            Self::LeaseHeld { holder, remaining } => write!(
+                f,
+                "refused: the ledger is leased to {holder}; try again when that run has ended \
+                 (its lease can be taken within {} second(s) at most)",
+                remaining.as_secs().max(1)
+            ),
             Self::UnsupportedStampMode(paths) => {
                 let list: Vec<String> = paths.iter().map(ToString::to_string).collect();
                 write!(

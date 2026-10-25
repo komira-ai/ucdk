@@ -141,6 +141,54 @@ fn destroy_deletes_dependents_before_what_they_need() {
 }
 
 #[test]
+fn an_object_deleted_out_of_band_after_the_plan_is_reaped_by_the_delete_step() {
+    let (mut fake, ledger) = world();
+    done(apply(&mut fake, &ledger, &chain()));
+    let id = physical_of(&ledger, "web/public");
+    // The destroy's plan reads four objects and the run's own read another four; the first
+    // delete step (`web/public`) reads its object again as call nine. Just before it, someone
+    // deletes the object by hand.
+    let at = 2 * chain().nodes().len() + 1;
+    let mut hooked = Hooked::new(&mut fake, at, move |fake| {
+        ucdk_provider::Provider::delete(fake, &Kind::new("public"), &id).expect("delete");
+    });
+    let report = done(destroy(&mut hooked, &ledger, &chain()));
+    drop(hooked);
+    assert_eq!(report.reaped, paths(&["web/public"]));
+    assert_eq!(report.deleted.len(), 3);
+    assert_eq!(fake.object_count(), 0);
+    assert!(records(&ledger).is_empty());
+}
+
+#[test]
+fn a_delete_step_whose_record_a_peer_of_the_holder_dropped_stops_as_not_ours() {
+    let (mut fake, ledger) = world();
+    done(apply(&mut fake, &ledger, &chain()));
+    // Just before the delete step looks up its record, a peer of the same holder (the lease
+    // admits no other writer) drops it; the apply held fence 1 and the destroy holds 2.
+    let at = 2 * chain().nodes().len();
+    let peer = ledger.clone();
+    let mut hooked = Hooked::new(&mut fake, at, move |_| {
+        let token = peer.read().expect("read").token;
+        peer.write_fenced(
+            ucdk_ledger::Fence::new(2),
+            &token,
+            Change::Remove(path("web/public")),
+        )
+        .expect("write");
+    });
+    let f = failure(destroy(&mut hooked, &ledger, &chain()));
+    drop(hooked);
+    assert_eq!(f.at, Some(path("web/public")));
+    assert_eq!(f.error, EngineError::NotOurs(path("web/public")));
+    assert_eq!(
+        deletes(&fake),
+        0,
+        "nothing is deleted on a record that is not there"
+    );
+}
+
+#[test]
 fn destroy_leaves_an_owner_the_file_does_not_name() {
     let (mut fake, ledger) = world();
     let both = lowered(vec![
@@ -516,14 +564,19 @@ fn a_record_dropped_by_another_run_before_the_reap_is_not_an_error() {
     let id = physical_of(&ledger, "web/public");
     ucdk_provider::Provider::delete(&mut fake, &Kind::new("public"), &id).expect("delete");
     let wanted = chain_with(5432, false);
-    // The plan reads the record and finds the object gone; another run reaps the record before
-    // this run's reap step looks at it (the hook runs at the plan's last read).
+    // The plan reads the record and finds the object gone; a peer of the same holder (the lease
+    // admits no other writer) reaps the record before this run's reap step looks at it (the
+    // hook runs at the plan's last read). The first apply held fence 1, this one holds 2.
     let at = 2 * wanted.nodes().len();
     let peer = ledger.clone();
     let mut hooked = Hooked::new(&mut fake, at, move |_| {
         let token = peer.read().expect("read").token;
-        peer.write(&token, Change::Remove(path("web/public")))
-            .expect("write");
+        peer.write_fenced(
+            ucdk_ledger::Fence::new(2),
+            &token,
+            Change::Remove(path("web/public")),
+        )
+        .expect("write");
     });
     let report = done(apply(&mut hooked, &ledger, &wanted));
     drop(hooked);

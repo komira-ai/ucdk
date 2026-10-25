@@ -12,6 +12,7 @@ import { Library, Session, api, proto, resources } from "../src/index.ts";
 
 export const REPO = fileURLToPath(new URL("../../../", import.meta.url));
 export const DATA = join(REPO, "crates/ucdk-cli/tests/data");
+export const LEDGER_GOLDEN = join(REPO, "sdk/ledger-golden");
 export const LIBRARY = join(
   REPO,
   "target/debug",

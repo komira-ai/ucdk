@@ -205,6 +205,9 @@ function cases(): Record<string, Case> {
     outcome_refused_unsupported_stamp_mode: refused({
       unsupportedStampMode: new api.UnsupportedStampMode({ paths: ["web/run"] }),
     }),
+    outcome_refused_lease_held: refused({
+      leaseHeld: new api.LeaseHeld({ holder: "ci-7", remainingMs: 95000n }),
+    }),
     outcome_refused_unhosted_kinds: refused({
       unhostedKinds: new api.UnhostedKinds({
         kinds: [new api.UnhostedKind({ path: "batch/run", kind: "job" })],

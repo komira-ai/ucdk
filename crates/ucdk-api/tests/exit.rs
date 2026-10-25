@@ -85,6 +85,10 @@ fn every_refusal_is_refused() {
         },
         Refusal::UnsupportedStampMode(vec![path("web/run")]),
         Refusal::UnhostedKinds(vec![(path("web/run"), ucdk_provider::Kind::job())]),
+        Refusal::LeaseHeld {
+            holder: "ci-7".to_owned(),
+            remaining: std::time::Duration::from_secs(95),
+        },
     ];
     for refusal in refusals {
         assert_eq!(
@@ -135,6 +139,7 @@ fn a_failure_whose_call_may_have_changed_something_needs_a_new_plan() {
         EngineError::Provider(ProviderError::Unknown("timed out".to_owned())),
         EngineError::Ledger(LedgerError::Stale),
         EngineError::LedgerBusy,
+        EngineError::LeaseLost,
         EngineError::NotOurs(path("web/run")),
     ];
     for error in unsure {

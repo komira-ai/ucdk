@@ -56,7 +56,7 @@ pure workspace crates).
 | Provider contract | `ucdk-provider` | the `Provider` trait, the node model (`Node`, `Kind`, `DesiredField`), stamps and cells, errors classified by what the caller may assume (`Refused`, `Permanent`, `Transient`, `InFlight`, `Unknown`), and the contract kit (`kit`) every provider must pass | yes |
 | Planning | `ucdk-plan` | validating and lowering a `ResourceList` to nodes in dependency order (`catalog`), the plan against an observed state, and the `PlanHash` an approver pins | yes |
 | Reference provider | `ucdk-provider-fake` | an in-memory provider with fault injection; the executable spec of the trait | yes |
-| Ledger | `ucdk-ledger` | records, the single-document compare-and-swap `Ledger` trait, `MemoryLedger`, `FileLedger`; `Lease` is an interface only, nothing implements it | no |
+| Ledger | `ucdk-ledger` | records, the single-document compare-and-swap `Ledger` trait, `MemoryLedger`, `FileLedger`, and the lease with its fencing token (`acquire`, `renew`, `release`, `write_fenced`) on both | no |
 | Engine | `ucdk-engine` | `Engine::handle(Request) -> Outcome`: write-ahead apply, re-observe before each mutation, closed-world delete, opt-in rollback, outputs, status. Synchronous | no |
 | Host: CLI | `ucdk-cli` | `plan`, `apply`, `destroy` against the fake, as a library (`run(args, &mut World) -> u8`) with a three-line `main.rs` | no |
 | Repository checks | `xtask` | `cargo xtask check`, `coverage`, `fetch` | no |
@@ -472,9 +472,8 @@ be written in Rust.
 **Exists:** `Ledger` is a single document with a version `Token`; a write names the token it read
 and fails with `LedgerError::Stale` if another writer got there first. `MemoryLedger` keeps the
 document in the process, for tests. `FileLedger` keeps it in a file, so a run can be resumed by
-another process on the same machine (below). `Lease` (acquire, release, `Epoch`) is an
-interface and nothing implements or calls it. The engine copes with two runs on one ledger by
-compare-and-swap writes and the create refusal, not by exclusion.
+another process on the same machine (below). Both keep a lease in the document (9.2): an apply
+or a destroy takes it for its run, and every ledger write it makes carries the lease's fence.
 
 **Decided direction:** deployment state is stored in each environment. The ledger for a cell
 lives in storage the provider owns inside that environment (an object store in the same account,
@@ -486,8 +485,8 @@ source of truth.
 
 1. **Done: the file ledger** (`FileLedger`; single machine, not a team backend), so a run can
    resume after a crash before any cloud exists. See 9.1.
-2. A real lease with an injected clock and epoch fencing in the ledger write, so a stalled run
-   cannot write after a newer one took over. Fencing protects the ledger, not the cloud.
+2. **Done: the lease** with an injected clock and fencing in the ledger write, so a stalled run
+   cannot write after a newer one took over. Fencing protects the ledger, not the cloud. See 9.2.
 3. An object-store ledger on conditional writes (create-only, then if-match), with the lease in
    the same document, implemented by the provider that owns the environment. A provider that
    cannot give conditional writes is refused as a ledger home.
@@ -511,14 +510,53 @@ source of truth.
   refused on open with the line and the reason (`OpenError::Corrupt`). The file is never
   repaired or overwritten by a refused open. The checksum guards against accidents, not
   tampering.
-- **One writer at a time is out of scope.** The real answer is the lease (item 2), which expires
-  and fences. Until then `open` takes an advisory lock on `<path>.lock` and refuses a second open
-  while any handle is alive (`OpenError::Locked`). The lock does not expire, does not cross
-  machines or network file systems reliably, and does not stop a process that ignores it.
+- **One writer at a time.** `open` takes an advisory lock on `<path>.lock` and refuses a second
+  open while any handle is alive (`OpenError::Locked`). The lock does not expire, does not cross
+  machines or network file systems reliably, and does not stop a process that ignores it; the
+  lease (9.2) is what holds a writer that outlived its turn, and it is in the file.
+- **The lease in the file.** Format 1.1 adds two lines before the first record: `fence <n>`, the
+  fence of the last grant, and `lease <holder> <expires-ms>` while one is held. A lease change
+  rewrites the file like a write does, and does not move the document's version.
 - **Not yet wired to the CLI.** The CLI's only cloud is the in-memory fake, so a state file
   could not resume anything; `--state` arrives with the first provider whose objects outlive
   the process. to the run that asks and never written.
 `SessionConfig` names the ledger by kind and location, plus a credential source by name.
+
+### 9.2 The lease and the fence
+
+A run that writes takes the ledger's lease first (`Ledger::acquire(holder, ttl)`) and gets a
+`Lease`: its `holder` (a name for the other side's message), a `Fence` and the time it lapses.
+Every write it makes is `Ledger::write_fenced(fence, token, change)`, and the ledger refuses it
+unless the fence is the one it granted last and the lease has not lapsed.
+
+- **The fence only goes up.** Each grant is the last one plus one, whether the earlier lease was
+  released or lapsed, and the number is kept in the document through a release. A holder that
+  stalled past its lease, whose process is still running, is refused at its next write with
+  `LedgerError::Fenced`, which the file ledger's advisory lock cannot do: the lock is gone with
+  the handle, the fence is not.
+- **Renew, release.** `renew(fence, ttl)` moves the lapse to `now + ttl` for the current fence
+  of a lease that has not lapsed; a lapsed one is acquired again (a new fence), never revived.
+  `release(fence)` lets the next `acquire` in at once.
+- **Time is the ledger's.** A ledger has a `Clock` (`SystemClock`, or a `ManualClock` a test
+  moves), and a holder's own clock decides nothing. A new holder is granted the lease only once
+  the clock reads the lapse plus `MAX_CLOCK_SKEW` (5 seconds); the lapse itself already refuses
+  the old holder's writes. The gap is the bound on how far two handles' clocks on one document
+  may disagree. Skew beyond it, or a clock stepped back, is not covered; the fence still refuses
+  a holder that was overtaken.
+- **Leasing does not move the token.** A grant, a renewal and a release leave the document's
+  version alone, so a plan made before a run took the lease is still the plan the run checks.
+- **Unfenced writes.** `Ledger::write` is for a document nobody leases: it is refused as
+  `LedgerError::Leased` while a lease is live (or lapsed less than the skew bound ago).
+- **The engine.** An apply or a destroy acquires after its refusals that need no ledger and
+  before it observes anything, renews at the start of every step, and releases when it ends,
+  whatever it ended with. A plan or a status takes no lease. The holder defaults to a name of
+  the process (`Engine::with_holder` names it) and the lease lasts ten minutes between renewals
+  (`Engine::with_lease_ttl`). A run refused for the lease is `Refusal::LeaseHeld` (holder and the
+  longest wait), `ucdk.api.v1.LeaseHeld`, exit class refused, nothing read or written. A run
+  whose lease is lost stops with `EngineError::LeaseLost` (`ERROR_CODE_LEASE_LOST`), does not roll
+  back, and what it had begun is resolved by the next holder from the intent record and the stamp.
+- **Not yet.** The holder and the lease length are not in `SessionConfig`, and no verb reads or
+  breaks a lease by hand.
 
 ## 10. Testing plan
 
@@ -550,8 +588,11 @@ looking. It is tested by running a second `run()` over the same world after stop
 call N, for every N of a plan, against each fault the fake can inject, and asserting: at most one
 object per node, no record dropped without a read showing the object gone, no delete of an object
 without both stamp and record. The same sweep is run again for each real provider's emulator
-(8.2). Proposed additions when the lease exists: advance the injected clock past the lease time
-between the two runs and assert the old holder's write is refused as fenced.
+(8.2). With the lease (exists), the sweep is run again with a holder that dies where the first run
+stopped and never releases: the next run is refused while the lease holds, then the injected
+clock is moved past the lease and the skew bound and the run resumes to the clean state; and a
+run whose clock is moved past its lease mid-run, with a second run finishing the work, is
+refused by the ledger at its next write and changes nothing more.
 
 ### 10.3 ABI conformance (in-process part exists)
 
@@ -690,7 +731,7 @@ lists its tests by name. The first part ends with working Python and TypeScript 
     the same wire goldens, scenario files and refusals as Python's). **Milestone: plan, apply,
     destroy through TypeScript against the fake provider, end to end, through the real library.**
     Not done: the npm package layout (step 15), a coverage gate and a type-check gate (10.4).
-11. **Lease and fencing** with an injected clock (9, item 2), with the crash sweep extended.
+11. **Lease and fencing** with an injected clock (done: 9.2; the fence in every engine write, `Refusal::LeaseHeld` and `LEASE_LOST` through `ucdk-api`, the CLI, the library and both SDKs, the crash sweep run again with a dead holder).
 12. **Leak sweep**: a read-only comparison of the cell's stamped objects with the ledger, as a
     new verb in the engine, `ucdk-api`, the library (a minor ABI bump) and both SDKs.
 13. **First real cloud, emulator first.** Provider crate, emulator crate, adapter crate;

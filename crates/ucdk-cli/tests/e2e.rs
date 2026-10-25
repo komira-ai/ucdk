@@ -530,3 +530,40 @@ fn second_apply_of_a_list_with_a_ref_prints_no_changes() {
     assert!(ran.out.ends_with("no changes\n"), "{}", ran.out);
     assert!(!ran.out.contains("later"), "{}", ran.out);
 }
+
+/// Proves: an apply on a ledger another holder has leased exits 3 (refused), says
+/// who holds it on standard error, and creates nothing; a plan and a status are
+/// answered anyway; once the holder releases, the same apply goes through. Catches a command
+/// that writes under someone else's lease, and one that reports the lease as a crash (exit 6).
+#[test]
+fn a_ledger_leased_to_another_holder_refuses_apply_with_exit_3() {
+    let dir = scratch("a_ledger_leased_to_another_holder_refuses_apply_with_exit_3");
+    let input = write_list(&dir, "list.pb", pair());
+    let saved = dir.join("saved.plan").to_string_lossy().into_owned();
+    let mut world = World::new();
+    let (_, hash) = plan(&mut world, "fake", "apply", &input, &saved);
+    let lease =
+        ucdk_ledger::Ledger::acquire(&world.ledger, "ci-7", std::time::Duration::from_secs(600))
+            .expect("another holder takes the lease");
+
+    let refused = carry_out(&mut world, "apply", "fake", &input, &saved, &hash);
+    assert_eq!(refused.code, 3, "{refused:?}");
+    assert!(
+        refused.err.contains("the ledger is leased to ci-7"),
+        "{refused:?}"
+    );
+    assert!(untouched(&world), "a refused apply changes nothing");
+
+    let doomed_plan = dir.join("doomed.plan").to_string_lossy().into_owned();
+    let (doomed, _) = plan(&mut world, "fake", "destroy", &input, &doomed_plan);
+    assert_eq!(doomed.code, 0, "a plan needs no lease: {doomed:?}");
+    let status = cmd(
+        &mut world,
+        &["status", "--provider=fake", &format!("--input={input}")],
+    );
+    assert_eq!(status.code, 0, "a status needs no lease: {status:?}");
+
+    ucdk_ledger::Ledger::release(&world.ledger, lease.fence).expect("release");
+    let applied = carry_out(&mut world, "apply", "fake", &input, &saved, &hash);
+    assert_eq!(applied.code, 0, "{applied:?}");
+}

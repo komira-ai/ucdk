@@ -42,6 +42,17 @@
 //! - **Rollback, opt in.** After a failed apply, only the objects that run created are deleted,
 //!   newest first; nothing it updated is touched.
 //!
+//! # The lease
+//!
+//! An apply or a destroy takes the ledger's lease before it observes anything, renews it at the
+//! start of each step, writes every record under the lease's fence, and releases it when it
+//! ends. A second run on the same ledger is refused as [`Refusal::LeaseHeld`] while the first
+//! holds it. A run whose lease lapsed and was taken over is refused by the ledger at its next
+//! write ([`EngineError::LeaseLost`]) and stops, deleting nothing more even with a rollback. A
+//! run that dies without releasing leaves the lease to lapse; the next run waits for it. Fencing
+//! protects the ledger, not the cloud: a provider call already in flight is not recalled, and
+//! the intent record and the stamp are what let the next holder resolve it.
+//!
 //! # Crash safety
 //!
 //! A create whose answer is lost (a timeout, a crash after the call) leaves an intent record
@@ -50,9 +61,7 @@
 //!
 //! # Not done here
 //!
-//! Lease time and fencing (two runs on one ledger are made safe by the compare-and-swap writes
-//! and the create refusal, not by exclusion), durable ledgers, adoption of objects the tool did
-//! not create.
+//! Durable ledgers beyond one machine, adoption of objects the tool did not create.
 
 mod delete;
 mod engine;
@@ -61,7 +70,7 @@ mod seam;
 mod status;
 mod write;
 
-pub use engine::Engine;
+pub use engine::{DEFAULT_LEASE_TTL, Engine};
 pub use error::EngineError;
 pub use seam::{Failure, Mode, ObjectStatus, Outcome, Refusal, Report, Request, Standing};
 pub use ucdk_ledger::State;

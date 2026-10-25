@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Crash safety and races: a run that stops at any call, with the call failing or its reply
-//! lost, is followed by a run that leaves the world exactly as a clean run would; and runs
-//! that interleave create nothing twice.
+//! lost, is followed by a run that leaves the world exactly as a clean run would; and a run
+//! that takes over from a stalled one creates nothing twice.
 
 mod common;
 
@@ -13,8 +13,10 @@ use common::{
     mutations, objects, owned_by_fake, path, paths, physical_of, records, service_of,
     service_reading,
 };
-use ucdk_engine::{EngineError, Outcome, Refusal, Report};
-use ucdk_ledger::{Change, Ledger as _, LedgerError, Record, State};
+use ucdk_engine::{DEFAULT_LEASE_TTL, EngineError, Outcome, Refusal, Report};
+use ucdk_ledger::{
+    Change, Fence, Ledger as _, LedgerError, MAX_CLOCK_SKEW, ManualClock, Record, State,
+};
 use ucdk_plan::{ConflictKind, Lowered};
 use ucdk_proto::v1::Output;
 use ucdk_provider::{Kind, Provider as _, ProviderError, Refusal as CallRefusal};
@@ -139,8 +141,9 @@ fn a_create_refused_over_a_foreign_object_leaves_no_intent(backend: Backend) {
 fn a_create_refused_over_a_foreign_object_keeps_a_record_another_writer_changed(backend: Backend) {
     let mut fake = Fake::standard();
     let ledger = backend.ledger();
-    // Between this run's intent and its read of the object that refused the create, another
-    // writer puts a different record at the path: it is theirs, so it stays.
+    // Between this run's intent and its read of the object that refused the create, a peer of
+    // the same holder (the lease admits no other writer; this is the first run, so fence 1) puts
+    // a different record at the path: it is theirs, so it stays.
     let at = 2 * chain().nodes().len() + 2;
     let theirs = &ledger;
     let mut hooked = Hooked::new(&mut fake, at, move |fake| {
@@ -148,13 +151,47 @@ fn a_create_refused_over_a_foreign_object_keeps_a_record_another_writer_changed(
         let snapshot = theirs.read().expect("read");
         let mine = snapshot.records[&path("db/run")].clone();
         theirs
-            .write(&snapshot.token, Change::Put(mine.in_state(State::Reaping)))
+            .write_fenced(
+                Fence::new(1),
+                &snapshot.token,
+                Change::Put(mine.in_state(State::Reaping)),
+            )
             .expect("write");
     });
     let f = failure(apply(&mut hooked, &ledger, &chain()));
     drop(hooked);
     assert_eq!(f.error, EngineError::NotOurs(path("db/run")));
     assert_eq!(records(&ledger)[&path("db/run")].state, State::Reaping);
+}
+
+fn a_writer_without_the_lease_cannot_change_a_record_in_the_middle_of_a_run(backend: Backend) {
+    let mut fake = Fake::standard();
+    let ledger = backend.ledger();
+    // Between this run's intent and its read of the object that refused the create, another
+    // writer that does not hold the lease tries to put a different record at the path: the
+    // ledger refuses it, and the run's own record stays.
+    let at = 2 * chain().nodes().len() + 2;
+    let theirs = &ledger;
+    let attempt: Arc<Mutex<Option<Result<(), LedgerError>>>> = Arc::default();
+    let seen = Arc::clone(&attempt);
+    let mut hooked = Hooked::new(&mut fake, at, move |fake| {
+        fake.add_foreign(&Kind::service(), "db-run", None);
+        let snapshot = theirs.read().expect("read");
+        let mine = snapshot.records[&path("db/run")].clone();
+        let result = theirs.write(&snapshot.token, Change::Put(mine.in_state(State::Reaping)));
+        *seen.lock().expect("lock") = Some(result.map(|_| ()));
+    });
+    let f = failure(apply(&mut hooked, &ledger, &chain()));
+    drop(hooked);
+    assert_eq!(f.error, EngineError::NotOurs(path("db/run")));
+    let refused = attempt.lock().expect("lock").take().expect("the hook ran");
+    assert!(
+        matches!(refused, Err(LedgerError::Leased { .. })),
+        "{refused:?}"
+    );
+    // Nothing of the refused write is left: the run dropped its own intent, as it does when
+    // no other writer is involved.
+    assert!(!records(&ledger).contains_key(&path("db/run")));
 }
 
 fn a_create_refused_as_existing_while_reads_cannot_see_it_keeps_the_intent(backend: Backend) {
@@ -325,6 +362,127 @@ fn crash_sweep_every_call_k_no_duplicates_or_orphans(backend: Backend) {
                 let again = run_act(&mut fake, &ledger, &scenario.act);
                 assert!(matches!(again, Outcome::Done(_)), "{context}: {again:?}");
                 assert_eq!(mutations(&fake), settled, "{context}: not settled");
+            }
+        }
+    }
+}
+
+/// A holder that died mid-run, whatever stopped it, leaves its lease to lapse. The next run is
+/// refused while it holds, changing nothing; once the lease and the skew bound are past, it takes
+/// over, and the world ends as a clean run leaves it.
+fn a_new_holder_resumes_after_the_dead_one_lapses(
+    fake: &mut Fake,
+    flaky: &FlakyLedger,
+    clock: &ManualClock,
+    scenario: &Scenario,
+    expected: &(String, BTreeMap<ucdk_provider::NodePath, Record>),
+    context: &str,
+) {
+    let stopped = state_of(fake, &flaky.inner);
+    let refused = run_act(fake, flaky, &scenario.act);
+    assert!(
+        matches!(refused, Outcome::Refused(Refusal::LeaseHeld { .. })),
+        "{context}: {refused:?}"
+    );
+    assert_eq!(
+        state_of(fake, &flaky.inner),
+        stopped,
+        "{context}: a refusal changed something"
+    );
+    clock.advance(DEFAULT_LEASE_TTL + MAX_CLOCK_SKEW);
+    done(run_act(fake, flaky, &scenario.act));
+    assert_eq!(
+        &state_of(fake, &flaky.inner),
+        expected,
+        "{context}: not the clean state"
+    );
+    assert_consistent(fake, &flaky.inner, context);
+}
+
+fn crash_sweep_dead_holder_at_every_ledger_write_a_new_holder_resumes_cleanly(backend: Backend) {
+    for scenario in scenarios() {
+        let (mut clean, clean_ledger) = (Fake::standard(), backend.ledger());
+        for setup in &scenario.setup {
+            done(apply(&mut clean, &clean_ledger, setup));
+        }
+        done(run_act(&mut clean, &clean_ledger, &scenario.act));
+        let expected = state_of(&clean, &clean_ledger);
+
+        let (mut counted, counting) = (Fake::standard(), FlakyLedger::new());
+        for setup in &scenario.setup {
+            done(apply(&mut counted, &counting, setup));
+        }
+        let before = counting.writes();
+        done(run_act(&mut counted, &counting, &scenario.act));
+        let total = counting.writes() - before;
+
+        for k in 1..=total {
+            let context = format!("{} (holder dies at ledger write {k})", scenario.name);
+            let clock = ManualClock::at(1_000_000);
+            let (mut fake, flaky) = (
+                Fake::standard(),
+                FlakyLedger::timed(backend, Arc::new(clock.clone())),
+            );
+            for setup in &scenario.setup {
+                done(apply(&mut fake, &flaky, setup));
+            }
+            flaky.fail_write_at(flaky.writes() + k);
+            flaky.keep_lease(true);
+            failure(run_act(&mut fake, &flaky, &scenario.act));
+            flaky.fail_write_at(0);
+            flaky.keep_lease(false);
+            a_new_holder_resumes_after_the_dead_one_lapses(
+                &mut fake, &flaky, &clock, &scenario, &expected, &context,
+            );
+        }
+    }
+}
+
+fn crash_sweep_dead_holder_at_every_call_k_a_new_holder_resumes_cleanly(backend: Backend) {
+    for scenario in scenarios() {
+        let (mut clean, clean_ledger) = (Fake::standard(), backend.ledger());
+        for setup in &scenario.setup {
+            done(apply(&mut clean, &clean_ledger, setup));
+        }
+        let before = mutations(&clean);
+        done(run_act(&mut clean, &clean_ledger, &scenario.act));
+        let total = mutations(&clean) - before;
+        let expected = state_of(&clean, &clean_ledger);
+
+        for ambiguous in [false, true] {
+            for k in 1..=total {
+                let context = format!(
+                    "{} (holder dies at call k={k}, ambiguous={ambiguous})",
+                    scenario.name
+                );
+                let clock = ManualClock::at(1_000_000);
+                let (mut fake, flaky) = (
+                    Fake::standard(),
+                    FlakyLedger::timed(backend, Arc::new(clock.clone())),
+                );
+                for setup in &scenario.setup {
+                    done(apply(&mut fake, &flaky, setup));
+                }
+                let at = (mutations(&fake) + k) as u64;
+                {
+                    let faults = fake.faults_mut();
+                    if ambiguous {
+                        *faults.ambiguous_at_call = Some(at);
+                    } else {
+                        *faults.fail_at_call = Some(at);
+                    }
+                }
+                flaky.keep_lease(true);
+                failure(run_act(&mut fake, &flaky, &scenario.act));
+                flaky.keep_lease(false);
+                {
+                    let faults = fake.faults_mut();
+                    *faults.ambiguous_at_call = None;
+                    *faults.fail_at_call = None;
+                }
+                a_new_holder_resumes_after_the_dead_one_lapses(
+                    &mut fake, &flaky, &clock, &scenario, &expected, &context,
+                );
             }
         }
     }
@@ -596,7 +754,7 @@ fn created_by(outcome: &Outcome) -> Vec<String> {
     report.created.iter().map(ToString::to_string).collect()
 }
 
-fn interleaved_applies_create_nothing_twice(backend: Backend) {
+fn a_second_run_that_takes_over_a_stalled_one_at_any_call_creates_nothing_twice(backend: Backend) {
     for scenario in scenarios() {
         let Act::Apply(target) = &scenario.act else {
             continue;
@@ -614,7 +772,8 @@ fn interleaved_applies_create_nothing_twice(backend: Backend) {
 
         for at in 1..=calls {
             let context = format!("{} (second run before call {at})", scenario.name);
-            let (mut fake, ledger) = (Fake::standard(), backend.ledger());
+            let clock = ManualClock::at(1_000_000);
+            let (mut fake, ledger) = (Fake::standard(), backend.ledger_on(Arc::new(clock.clone())));
             for setup in &scenario.setup {
                 done(apply(&mut fake, &ledger, setup));
             }
@@ -622,6 +781,9 @@ fn interleaved_applies_create_nothing_twice(backend: Backend) {
             let first = {
                 let (shared, peer, goal) = (Arc::clone(&other), ledger.clone(), target.clone());
                 let mut hooked = Hooked::new(&mut fake, at, move |fake| {
+                    // The first run stalls past its lease and the skew bound; the second takes
+                    // over and runs to the end while the first's call is still to be made.
+                    clock.advance(DEFAULT_LEASE_TTL + MAX_CLOCK_SKEW);
                     let outcome = apply(fake, &peer, &goal);
                     shared.lock().expect("lock").extend(created_by(&outcome));
                 });
@@ -741,13 +903,16 @@ on_every_ledger!(
     a_foreign_object_found_at_the_re_read_stops_the_run,
     a_create_refused_over_a_foreign_object_leaves_no_intent,
     a_create_refused_over_a_foreign_object_keeps_a_record_another_writer_changed,
+    a_writer_without_the_lease_cannot_change_a_record_in_the_middle_of_a_run,
     a_create_refused_as_existing_while_reads_cannot_see_it_keeps_the_intent,
     crash_sweep_every_call_k_no_duplicates_or_orphans,
     crash_sweep_rollback_every_call_k_no_duplicates_or_orphans,
     crash_sweep_every_ledger_write_no_duplicates_or_orphans,
+    crash_sweep_dead_holder_at_every_ledger_write_a_new_holder_resumes_cleanly,
+    crash_sweep_dead_holder_at_every_call_k_a_new_holder_resumes_cleanly,
     crash_sweep_converges_after_out_of_band_delete,
     a_recreate_after_an_out_of_band_delete_with_a_lost_reply_converges,
-    interleaved_applies_create_nothing_twice,
+    a_second_run_that_takes_over_a_stalled_one_at_any_call_creates_nothing_twice,
     a_run_stale_against_the_ledger_writes_again_and_a_busy_ledger_is_reported,
     a_ledger_that_cannot_be_read_stops_the_run_before_anything_is_changed,
     errors_and_refusals_read_as_sentences,

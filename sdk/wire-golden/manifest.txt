@@ -16,6 +16,7 @@ outcome_refused_plan_hash_mismatch.bin ucdk.api.v1.Outcome
 outcome_refused_plan_changed.bin ucdk.api.v1.Outcome
 outcome_refused_unsupported_stamp_mode.bin ucdk.api.v1.Outcome
 outcome_refused_unhosted_kinds.bin ucdk.api.v1.Outcome
+outcome_refused_lease_held.bin ucdk.api.v1.Outcome
 outcome_failed.bin ucdk.api.v1.Outcome
 outcome_invalid.bin ucdk.api.v1.Outcome
 outcome_status.bin ucdk.api.v1.Outcome

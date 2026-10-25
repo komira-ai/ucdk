@@ -168,6 +168,9 @@ class ErrorCode(enum.IntEnum):
     OUTPUT_UNKNOWN = 7
     # The request was not the expected message, or named a hash that is not one.
     INVALID_REQUEST = 8
+    # The run's ledger lease lapsed or was taken over, so the ledger refused its write and the
+    # run stopped. The next run resolves what this one left.
+    LEASE_LOST = 9
 
 
 class SessionConfig(_wire.Message):
@@ -951,6 +954,46 @@ class UnhostedKinds(_wire.Message):
                 self.kinds.append(UnhostedKind.decode(value))
 
 
+class LeaseHeld(_wire.Message):
+    """
+    Another run holds the ledger's lease. Nothing was read or written; try again when that run
+    has ended.
+
+    Attributes:
+        holder: The identity the other run took the lease as.
+        remaining_ms: At most this many milliseconds until the lease can be taken, if that run died without
+            releasing it.
+    """
+
+    _FIELDS = (
+        "holder",
+        "remaining_ms",
+    )
+
+    def __init__(
+        self,
+        holder: str = "",
+        remaining_ms: int = 0,
+    ) -> None:
+        self.holder = holder
+        self.remaining_ms = remaining_ms
+
+    def _encode_into(self, out: bytearray) -> None:
+        if self.holder:
+            _wire.put_string(out, 1, self.holder)
+        if self.remaining_ms:
+            _wire.put_varint_field(out, 2, self.remaining_ms)
+
+    def _merge(self, data: bytes) -> None:
+        for number, wire_type, value in _wire.read_fields(data):
+            if number == 1:
+                _wire.expect(wire_type, _wire.LEN)
+                self.holder = _wire.get_string(value)
+            elif number == 2:
+                _wire.expect(wire_type, _wire.VARINT)
+                self.remaining_ms = _wire.get_uint64(value)
+
+
 class Refusal(_wire.Message):
     """
     Why a run was refused whole, before anything was changed.
@@ -965,6 +1008,7 @@ class Refusal(_wire.Message):
         "unsupported_stamp_mode",
         "message",
         "unhosted_kinds",
+        "lease_held",
     )
 
     def __init__(
@@ -977,6 +1021,7 @@ class Refusal(_wire.Message):
         unsupported_stamp_mode: Optional[UnsupportedStampMode] = None,
         message: str = "",
         unhosted_kinds: Optional[UnhostedKinds] = None,
+        lease_held: Optional[LeaseHeld] = None,
     ) -> None:
         self.findings = findings
         self.conflicts = conflicts
@@ -986,6 +1031,7 @@ class Refusal(_wire.Message):
         self.unsupported_stamp_mode = unsupported_stamp_mode
         self.message = message
         self.unhosted_kinds = unhosted_kinds
+        self.lease_held = lease_held
 
     def which_reason(self) -> Optional[str]:
         """The name of the arm of `reason` that is set, or None."""
@@ -997,6 +1043,7 @@ class Refusal(_wire.Message):
             "plan_changed",
             "unsupported_stamp_mode",
             "unhosted_kinds",
+            "lease_held",
         ))
 
     def _clear_reason(self) -> None:
@@ -1007,6 +1054,7 @@ class Refusal(_wire.Message):
         self.plan_changed = None
         self.unsupported_stamp_mode = None
         self.unhosted_kinds = None
+        self.lease_held = None
 
     @classmethod
     def findings(cls, findings: Findings, **fields: Any) -> "Refusal":
@@ -1036,6 +1084,10 @@ class Refusal(_wire.Message):
     def unhosted_kinds(cls, unhosted_kinds: UnhostedKinds, **fields: Any) -> "Refusal":
         return cls(unhosted_kinds=unhosted_kinds, **fields)
 
+    @classmethod
+    def lease_held(cls, holder: str, remaining_ms: int, **fields: Any) -> "Refusal":
+        return cls(lease_held=LeaseHeld(holder=holder, remaining_ms=remaining_ms), **fields)
+
     def _encode_into(self, out: bytearray) -> None:
         arm = self.which_reason()
         if arm == "findings":
@@ -1052,6 +1104,8 @@ class Refusal(_wire.Message):
             _wire.put_message(out, 6, self.unsupported_stamp_mode)
         elif arm == "unhosted_kinds":
             _wire.put_message(out, 8, self.unhosted_kinds)
+        elif arm == "lease_held":
+            _wire.put_message(out, 9, self.lease_held)
         if self.message:
             _wire.put_string(out, 7, self.message)
 
@@ -1116,6 +1170,14 @@ class Refusal(_wire.Message):
                     current = UnhostedKinds()
                 self.unhosted_kinds = current
                 self.unhosted_kinds._merge(value)
+            elif number == 9:
+                _wire.expect(wire_type, _wire.LEN)
+                current = self.lease_held
+                self._clear_reason()
+                if current is None:
+                    current = LeaseHeld()
+                self.lease_held = current
+                self.lease_held._merge(value)
 
 
 class RetainedObject(_wire.Message):

@@ -8,7 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
 use common::{Scratch, confirmed, path, put, record, sealed};
-use ucdk_ledger::{Change, FileLedger, Ledger, LedgerError, OpenError, Origin, Record, State};
+use ucdk_ledger::{
+    Change, FileLedger, LeaseError, Ledger, LedgerError, OpenError, Origin, Record, State,
+};
 use ucdk_provider::{Kind, PhysicalId};
 
 fn open(scratch: &Scratch) -> FileLedger {
@@ -630,5 +632,130 @@ fn every_refusal_reads_as_a_sentence_naming_the_file() {
             "/x/ledger.ucdk: the ledger is corrupt at line 3: bad; it was not changed",
             "/x/ledger.ucdk: the ledger is format version 2, newer than this build reads (version 1); use a newer build",
         ]
+    );
+}
+
+// ---- the lease in the file ---------------------------------------------------------------------
+
+const TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+#[test]
+fn a_file_written_before_the_lease_existed_is_read_and_its_first_lease_is_fence_one() {
+    let scratch = Scratch::new("lease_old_file");
+    let content = sealed(
+        &[
+            "ucdk-ledger 1.0",
+            "version 4",
+            "record app/run",
+            "kind service",
+            "name n",
+            "origin created",
+            "state confirmed",
+            "physical id-1",
+        ],
+        1,
+    );
+    fs::write(scratch.file(), &content).expect("write");
+    let ledger = open(&scratch);
+    assert_eq!(ledger.read().expect("read").token.to_string(), "v4");
+    let lease = ledger.acquire("alice", TTL).expect("acquire");
+    assert_eq!(lease.fence.value(), 1);
+    drop(ledger);
+    let text = fs::read_to_string(scratch.file()).expect("read");
+    assert!(
+        text.starts_with("ucdk-ledger 1.1\nversion 4\nfence 1\nlease alice "),
+        "{text}"
+    );
+    assert!(text.contains("record app/run"), "the records are kept");
+}
+
+#[test]
+fn a_lease_line_that_is_not_a_lease_is_refused_with_its_line() {
+    let scratch = Scratch::new("lease_bad_lines");
+    let cases = [
+        (
+            &["ucdk-ledger 1.1", "version 1", "fence many"][..],
+            "the fence is not a number",
+        ),
+        (
+            &["ucdk-ledger 1.1", "version 1", "fence"][..],
+            "not validly escaped",
+        ),
+        (
+            &[
+                "ucdk-ledger 1.1",
+                "version 1",
+                "fence 1",
+                "lease alice soon",
+            ][..],
+            "the lease expiry is not a number",
+        ),
+        (
+            &["ucdk-ledger 1.1", "version 1", "fence 1", "lease alice"][..],
+            "needs 2 value",
+        ),
+    ];
+    for (lines, expected) in cases {
+        fs::write(scratch.file(), sealed(lines, 0)).expect("write");
+        let OpenError::Corrupt { why, line, .. } = refused(&scratch) else {
+            panic!("{expected}: not refused as corrupt");
+        };
+        assert!(why.contains(expected), "wanted `{expected}`, got `{why}`");
+        assert_eq!(line, lines.len(), "the line of the bad tag");
+    }
+}
+
+#[test]
+fn a_lease_change_that_cannot_be_written_is_unavailable_and_changes_nothing() {
+    let scratch = Scratch::new("lease_gone_dir");
+    let dir = scratch.dir().join("sub");
+    fs::create_dir(&dir).expect("mkdir");
+    let ledger = FileLedger::open(dir.join("ledger.ucdk")).expect("open");
+    let lease = ledger.acquire("alice", TTL).expect("acquire");
+    fs::remove_dir_all(&dir).expect("remove the directory");
+
+    let acquired = ledger.acquire("bob", TTL);
+    assert!(
+        matches!(acquired, Err(LeaseError::Held { .. })),
+        "a refusal needs no write: {acquired:?}"
+    );
+    let renewed = ledger.renew(lease.fence, TTL);
+    let Err(LedgerError::Unavailable(why)) = renewed else {
+        panic!("the renewal should be unavailable: {renewed:?}");
+    };
+    assert!(why.contains("may or may not have landed"), "{why}");
+    assert!(matches!(
+        ledger.release(lease.fence),
+        Err(LedgerError::Unavailable(_))
+    ));
+    // The handle still has the lease it was granted.
+    let token = ledger.read().expect("read").token;
+    assert!(
+        ledger
+            .write_fenced(lease.fence, &token, Change::Put(record("a/run")))
+            .is_err(),
+        "the write itself cannot land without the directory"
+    );
+    let fresh = FileLedger::open(scratch.dir().join("other.ucdk")).expect("open");
+    assert!(matches!(
+        fresh.acquire("carol", TTL).map(|l| l.fence.value()),
+        Ok(1)
+    ));
+}
+
+#[test]
+fn a_lease_change_to_a_file_with_a_newer_minor_is_refused_like_a_write() {
+    let scratch = Scratch::new("lease_newer_minor");
+    fs::write(scratch.file(), sealed(&["ucdk-ledger 1.7", "version 4"], 0)).expect("write");
+    let ledger = open(&scratch);
+    let acquired = ledger.acquire("alice", TTL);
+    let Err(LeaseError::Unavailable(why)) = acquired else {
+        panic!("not unavailable: {acquired:?}");
+    };
+    assert!(why.contains("newer build"), "{why}");
+    assert_eq!(
+        fs::read(scratch.file()).expect("read"),
+        sealed(&["ucdk-ledger 1.7", "version 4"], 0),
+        "the file is as it was"
     );
 }

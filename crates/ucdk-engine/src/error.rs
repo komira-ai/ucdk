@@ -14,6 +14,9 @@ pub enum EngineError {
     Provider(ProviderError),
     /// A ledger read or write failed.
     Ledger(LedgerError),
+    /// The run's lease was taken over, released or lapsed, so the ledger refused its write (or
+    /// its renewal). The run stopped; whatever it had begun is resolved by the next holder.
+    LeaseLost,
     /// The ledger stayed stale through every retry: another run keeps writing it.
     LedgerBusy,
     /// An object found while the run was going is not ours (no stamp of the node, or a
@@ -42,7 +45,10 @@ impl From<ProviderError> for EngineError {
 
 impl From<LedgerError> for EngineError {
     fn from(e: LedgerError) -> Self {
-        Self::Ledger(e)
+        match e {
+            LedgerError::Fenced | LedgerError::LeaseLapsed => Self::LeaseLost,
+            other => Self::Ledger(other),
+        }
     }
 }
 
@@ -51,6 +57,10 @@ impl fmt::Display for EngineError {
         match self {
             Self::Provider(e) => write!(f, "provider: {e}"),
             Self::Ledger(e) => write!(f, "ledger: {e}"),
+            Self::LeaseLost => f.write_str(
+                "the ledger lease was lost (it lapsed, or another run took it): this run stopped \
+                 at its last whole write",
+            ),
             Self::LedgerBusy => f.write_str("the ledger kept changing under the run"),
             Self::NotOurs(p) => write!(f, "{p}: the object is not ours (stamp and record)"),
             Self::StillPresent(p) => write!(f, "{p}: the object is there when it should be gone"),
