@@ -1,0 +1,46 @@
+[package]
+name = "ucdk-capi"
+description = "The C ABI of ucdk: a shared library whose eight functions carry protobuf bytes, and the header that declares them."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+# The cdylib is the shared library; the rlib lets the tests in this crate call the same
+# functions in-process.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+prost.workspace = true
+ucdk-api = { path = "../ucdk-api" }
+ucdk-engine = { path = "../ucdk-engine" }
+ucdk-ledger = { path = "../ucdk-ledger" }
+ucdk-plan = { path = "../ucdk-plan" }
+ucdk-proto = { path = "../ucdk-proto" }
+ucdk-provider = { path = "../ucdk-provider" }
+ucdk-provider-fake = { path = "../ucdk-provider-fake" }
+
+# The one crate allowed `unsafe`: the workspace forbids it, so this crate cannot inherit the
+# workspace lint table and repeats it, with `unsafe_code` lowered to `deny` and every unsafe
+# block required to say why it is sound. Only the `ffi` module lifts the denial (see lib.rs);
+# `cargo xtask check` pins that no other manifest sets `unsafe_code`.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"
+multiple_unsafe_ops_per_block = "warn"
+missing_safety_doc = "warn"
+cloned_instead_of_copied = "warn"
+explicit_iter_loop = "warn"
+implicit_clone = "warn"
+manual_let_else = "warn"
+map_unwrap_or = "warn"
+needless_pass_by_value = "warn"
+redundant_closure_for_method_calls = "warn"
+semicolon_if_nothing_returned = "warn"
+uninlined_format_args = "warn"

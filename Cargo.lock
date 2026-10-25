@@ -565,6 +565,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucdk-capi"
+version = "0.0.0"
+dependencies = [
+ "prost",
+ "ucdk-api",
+ "ucdk-engine",
+ "ucdk-ledger",
+ "ucdk-plan",
+ "ucdk-proto",
+ "ucdk-provider",
+ "ucdk-provider-fake",
+]
+
+[[package]]
 name = "ucdk-cli"
 version = "0.0.0"
 dependencies = [
