@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 prost.workspace = true
+ucdk-api = { path = "../ucdk-api" }
 ucdk-engine = { path = "../ucdk-engine" }
 ucdk-ledger = { path = "../ucdk-ledger" }
 ucdk-plan = { path = "../ucdk-plan" }

@@ -6,6 +6,8 @@ use std::collections::BTreeSet;
 use std::fs;
 
 use prost::Message as _;
+use ucdk_api::exit_class;
+use ucdk_api::v1::ExitClass;
 use ucdk_engine::{Engine, Mode as EngineMode, Outcome, Report, Request};
 use ucdk_plan::{Lowered, lower};
 use ucdk_proto::v1::ResourceList;
@@ -16,16 +18,22 @@ use crate::world::World;
 
 /// A command that stops: its exit code and what to print to standard error.
 struct Exit {
-    code: u8,
+    code: ExitClass,
     message: String,
 }
 
 fn usage(message: String) -> Exit {
-    Exit { code: 2, message }
+    Exit {
+        code: ExitClass::Usage,
+        message,
+    }
 }
 
 fn refused(message: String) -> Exit {
-    Exit { code: 3, message }
+    Exit {
+        code: ExitClass::Refused,
+        message,
+    }
 }
 
 pub fn run(args: &[String], world: &mut World) -> u8 {
@@ -35,16 +43,18 @@ pub fn run(args: &[String], world: &mut World) -> u8 {
             world
                 .out
                 .push_str(concat!("ucdk ", env!("CARGO_PKG_VERSION"), "\n"));
-            Ok(0)
+            Ok(ExitClass::Done)
         }
         Ok(Command::Run(invocation)) => execute(&invocation, world),
     };
-    result.unwrap_or_else(|exit| {
-        world
-            .err
-            .push_str(&format!("ucdk: {}\n", exit.message.trim_end()));
-        exit.code
-    })
+    result
+        .unwrap_or_else(|exit| {
+            world
+                .err
+                .push_str(&format!("ucdk: {}\n", exit.message.trim_end()));
+            exit.code
+        })
+        .code()
 }
 
 fn read_input(path: &str) -> Result<Lowered, Exit> {
@@ -96,7 +106,7 @@ fn unhosted(invocation: &Invocation, desired: &Lowered, world: &mut World) -> BT
         .collect()
 }
 
-fn execute(invocation: &Invocation, world: &mut World) -> Result<u8, Exit> {
+fn execute(invocation: &Invocation, world: &mut World) -> Result<ExitClass, Exit> {
     let desired = read_input(&invocation.input)?;
     if let Verb::Apply(approval) | Verb::Destroy(approval) = &invocation.verb {
         check_saved(invocation, approval)?;
@@ -116,7 +126,7 @@ fn execute(invocation: &Invocation, world: &mut World) -> Result<u8, Exit> {
                 invocation.provider.as_str(),
                 invocation.mode.as_str(),
             ));
-            return Ok(3);
+            return Ok(ExitClass::Refused);
         }
     }
 
@@ -148,8 +158,9 @@ fn execute(invocation: &Invocation, world: &mut World) -> Result<u8, Exit> {
     finish(outcome, invocation, world)
 }
 
-/// Prints what the command ended with and gives its exit code.
-fn finish(outcome: Outcome, invocation: &Invocation, world: &mut World) -> Result<u8, Exit> {
+/// Prints what the command ended with and gives its exit class.
+fn finish(outcome: Outcome, invocation: &Invocation, world: &mut World) -> Result<ExitClass, Exit> {
+    let class = exit_class(&outcome);
     match outcome {
         Outcome::Planned(plan) => {
             let text = plan_text(invocation.provider, invocation.mode, &plan);
@@ -157,19 +168,24 @@ fn finish(outcome: Outcome, invocation: &Invocation, world: &mut World) -> Resul
                 fs::write(path, &text).map_err(|e| usage(format!("cannot write {path}: {e}")))?;
             }
             world.out.push_str(&text);
-            Ok(0)
+            Ok(class)
         }
         Outcome::Done(report) => {
             world.out.push_str(&report_text(&report));
-            Ok(0)
+            Ok(class)
         }
-        Outcome::Refused(why) => Err(refused(why.to_string())),
+        Outcome::Refused(why) => Err(Exit {
+            code: class,
+            message: why.to_string(),
+        }),
         Outcome::Failed(stopped) => {
             if stopped.report != Report::default() {
                 world.out.push_str(&report_text(&stopped.report));
             }
-            let (code, message) = failure(&stopped);
-            Err(Exit { code, message })
+            Err(Exit {
+                code: class,
+                message: failure(&stopped, class),
+            })
         }
     }
 }
