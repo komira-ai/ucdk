@@ -60,7 +60,7 @@ pure workspace crates).
 | Engine | `ucdk-engine` | `Engine::handle(Request) -> Outcome`: write-ahead apply, re-observe before each mutation, closed-world delete, opt-in rollback, outputs, status. Synchronous | no |
 | Host: CLI | `ucdk-cli` | `plan`, `apply`, `destroy` against the fake, as a library (`run(args, &mut World) -> u8`) with a three-line `main.rs` | no |
 | Repository checks | `xtask` | `cargo xtask check`, `coverage`, `fetch` | no |
-| API | `ucdk-api` | the `ucdk.api.v1` protobuf messages for everything that is not a resource (session config, requests, plan, report, findings, error; the status message waits for the engine's status request, step 5) and the code converting requests to the engine's requests and the engine's outcomes to messages (a plan only goes out: a caller sends the hash, never a plan); the single table from outcome to exit class that both the CLI and the SDKs use | no |
+| API | `ucdk-api` | the `ucdk.api.v1` protobuf messages for everything that is not a resource (session config, requests, plan, report, findings, error; `StatusRequest` and `StatusResponse` for the engine's read-only status) and the code converting requests to the engine's requests and the engine's outcomes to messages (a plan only goes out: a caller sends the hash, never a plan); the single table from outcome to exit class that both the CLI and the SDKs use | no |
 | C ABI | `ucdk-capi` (**proposal**) | the `cdylib`, the C header, panic containment, buffer ownership. The only crate in the workspace allowed `unsafe` | no |
 | SDKs | `sdk/python`, `sdk/typescript` (**proposal**) | the loader, the session wrapper, and generated typed templates | n/a |
 | Generator | `ucdk-codegen` (**proposal**) | reads the descriptor set and writes the generated SDK sources | no |
@@ -126,10 +126,10 @@ What each verb is, in terms of what exists:
   approved hash (`Refusal::PlanHashMismatch`, `Refusal::PlanChanged`), so the guarantee is the one
   the CLI has today (`--expect-plan-hash`).
 - `ucdk_status`: request is a `ResourceList`; response is, per resource, the observed status
-  (`Ready`, `Converging`, `Failed` as `ucdk_provider::Status`), its recorded outputs and whether the
-  ledger and the cloud agree. Read-only. **This is new engine surface**: status exists today only
-  as part of an apply report; a read-only `Request::Status` is added to the engine first (step 5
-  in section 12).
+  (`Ready`, `Converging`, `Failed` as `ucdk_provider::Status`, or absent), the ledger record's state,
+  its recorded outputs and whether the ledger and the cloud agree (`Standing`). Read-only: it is
+  `Request::Status`, which calls `Ledger::read` and `Provider::observe` and nothing else. It lists
+  every recorded object and every wanted node of the list.
 
 A later verb (for example a leak sweep) is a new symbol and a new minor version; nothing existing
 changes.
@@ -471,8 +471,8 @@ repository does today is a **proposal**.
 | `ucdk-plan` | validation findings, lowering, ordering, plan and its hash | unit and golden tests (`tests/catalog.rs`, `descriptor_lowering.rs`, `graph.rs`, `plan.rs`, `hash_text.rs`) | a changed hash, a missed cycle or dangling reference, a foreign object not refused |
 | providers | the trait contract | `kit::run_all` on each provider; fake: fault injection (`fail_at_call`, `read_lag`, `ambiguous_success`, `foreign`, `race_next`, `create_failed`, `converging_reads`) | create that does not stamp atomically, an ambiguous result treated as failure, a delete of a foreign object |
 | `ucdk-ledger` | CAS semantics, record encoding | unit tests; a conformance suite (`tests/conformance.rs`) run on both implementations; file-format and crash tests (`tests/file.rs`) | lost update, stale write accepted, a torn or altered file read as a ledger |
-| `ucdk-engine` | apply, destroy, resume, rollback, outputs, status | integration tests over the fake with call logs (`tests/apply.rs`, `crash.rs`, `delete.rs`, `outputs.rs`, `status.rs`); the crash sweeps and rollback scenarios run on the memory and the file ledger | a mutation before its intent is recorded, a record dropped after a failed read, a delete of an object that is not ours |
-| `ucdk-cli` | arguments, exit codes, plan text, end to end | in-process runs over a `World` (`tests/cli.rs`, `e2e.rs`, `status.rs`) with plan-text goldens | wrong exit class, a drifting plan text |
+| `ucdk-engine` | apply, destroy, resume, rollback, outputs, status | integration tests over the fake with call logs (`tests/apply.rs`, `crash.rs`, `delete.rs`, `outputs.rs`, `status.rs`, `read_status.rs`); the crash sweeps and rollback scenarios run on the memory and the file ledger | a mutation before its intent is recorded, a record dropped after a failed read, a delete of an object that is not ours |
+| `ucdk-cli` | arguments, exit codes, plan text, end to end | in-process runs over a `World` (`tests/cli.rs`, `e2e.rs`, `status.rs`, `status_verb.rs`) with plan-text goldens | wrong exit class, a drifting plan text |
 | `ucdk-api` (proposal) | message-to-value conversion in both directions; the outcome-to-exit table | round-trip tests; an exhaustive match so a new `Outcome` or `Refusal` variant fails to compile until it is mapped | a field dropped in conversion, an unmapped outcome |
 | `ucdk-capi` (proposal) | the eight functions, called as C would | see 10.3 | ownership, panic, version and malformed-input defects |
 | SDKs (proposal) | binding and generated code | see 10.4 | an SDK that disagrees with the core or with another SDK |
@@ -577,7 +577,7 @@ lists its tests by name. The first part ends with a working Python SDK; real clo
 4. **Descriptor-driven lowering** (done: `Catalog`, read from the descriptors; the existing plan
    hashes and goldens pass unchanged; the kind-specific `match` in `catalog` is gone, and
    `tests/descriptor_lowering.rs` lowers a kind declared only in a test proto).
-5. **Read-only status in the engine** (`Request::Status`) and the CLI `status` verb.
+5. **Read-only status in the engine** (done: `Request::Status` reads the ledger and observes each recorded and each wanted object, with no ledger write and no provider mutation; `ucdk.api.v1` `StatusRequest` and `StatusResponse`, exit class done or failed with no effect; `ucdk status --provider --input`).
 6. **`ucdk-capi`: the `cdylib` and the generated C header.** The per-crate `unsafe` exemption and
    its check in `cargo xtask check`; the eight functions; panic containment; ABI conformance
    tests (10.3); symbol-table check; version rules.

@@ -21,14 +21,15 @@ impl ExitClass {
     }
 }
 
-/// How an outcome ends a command. A plan, and a run that finished (even one that left an object
+/// How an outcome ends a command. A plan, a status (whatever it found: a missing object is a finding, not a failure), and a
+/// run that finished (even one that left an object
 /// converging or still failed, which its report says), are done.
 ///
 /// Every outcome and every refusal is named here, so a new variant does not compile until it
 /// has a class.
 pub fn exit_class(outcome: &Outcome) -> ExitClass {
     match outcome {
-        Outcome::Planned(_) | Outcome::Done(_) => ExitClass::Done,
+        Outcome::Planned(_) | Outcome::Done(_) | Outcome::Status(_) => ExitClass::Done,
         Outcome::Refused(why) => match why {
             Refusal::Conflicts(_)
             | Refusal::EmptyScope

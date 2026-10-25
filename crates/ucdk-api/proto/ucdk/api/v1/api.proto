@@ -86,6 +86,12 @@ message DestroyRequest {
   string plan_hash = 2;
 }
 
+// Read the ledger and the live objects, and change nothing. The list names the objects to look
+// at besides those the ledger records.
+message StatusRequest {
+  ucdk.resource.v1.ResourceList resources = 1;
+}
+
 enum StepAction {
   STEP_ACTION_UNSPECIFIED = 0;
   STEP_ACTION_CREATE = 1;
@@ -248,6 +254,58 @@ message Report {
   repeated RollbackFailure rollback_failed = 11;
 }
 
+// Where a ledger record stands.
+enum RecordState {
+  RECORD_STATE_UNSPECIFIED = 0;
+  // Written before a create or update; the call may or may not have landed.
+  RECORD_STATE_INTENT = 1;
+  RECORD_STATE_CONFIRMED = 2;
+  // Written before a delete; the object may or may not be gone.
+  RECORD_STATE_REAPING = 3;
+}
+
+// Whether a live object is working.
+enum LiveStatus {
+  LIVE_STATUS_UNSPECIFIED = 0;
+  LIVE_STATUS_READY = 1;
+  LIVE_STATUS_CONVERGING = 2;
+  LIVE_STATUS_FAILED = 3;
+}
+
+// How an object's record and the live object stand against each other.
+enum Standing {
+  STANDING_UNSPECIFIED = 0;
+  // A confirmed record, and the live object it names carries our stamp.
+  STANDING_AGREES = 1;
+  // An intent or reap record and a live object of ours: a later run settles it.
+  STANDING_PENDING = 2;
+  // A record and no live object.
+  STANDING_MISSING = 3;
+  // The list names it; there is no record and no live object.
+  STANDING_NOT_APPLIED = 4;
+  // A live object that is not ours, or ours with no record.
+  STANDING_UNCLAIMED = 5;
+}
+
+// One recorded or named object, as the ledger and the provider show it now.
+message ObjectStatus {
+  string path = 1;
+  string kind = 2;
+  // Absent when the ledger has no record of the object.
+  optional RecordState record = 3;
+  // Absent when the provider shows no such object.
+  optional LiveStatus live = 4;
+  Standing standing = 5;
+  // The non-secret outputs the record holds.
+  map<string, string> outputs = 6;
+}
+
+// What a status found: one entry per object, in path order. An empty list is an empty ledger and
+// a list that names nothing.
+message StatusResponse {
+  repeated ObjectStatus objects = 1;
+}
+
 enum ErrorCode {
   ERROR_CODE_UNSPECIFIED = 0;
   ERROR_CODE_PROVIDER = 1;
@@ -285,6 +343,8 @@ message Outcome {
     Failure failed = 4;
     // The request was not understood; the exit class is USAGE.
     Error invalid = 6;
+    // The answer of a status request.
+    StatusResponse status = 7;
   }
   ExitClass exit = 5;
 }

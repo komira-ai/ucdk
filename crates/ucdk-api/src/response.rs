@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The engine's values to response messages.
 
-use ucdk_engine::{EngineError, Failure, Outcome, Refusal, Report};
+use ucdk_engine::{EngineError, Failure, ObjectStatus, Outcome, Refusal, Report, Standing, State};
 use ucdk_plan::{Action, Conflict, ConflictKind, Finding, FindingKind, Plan, Retained, Step};
+
+use ucdk_provider::Status;
 
 use crate::exit::exit_class;
 use crate::v1;
@@ -12,6 +14,9 @@ impl From<&Outcome> for v1::Outcome {
         let result = match outcome {
             Outcome::Planned(plan) => v1::outcome::Result::Planned(plan.into()),
             Outcome::Done(report) => v1::outcome::Result::Done(report.into()),
+            Outcome::Status(objects) => v1::outcome::Result::Status(v1::StatusResponse {
+                objects: objects.iter().map(v1::ObjectStatus::from).collect(),
+            }),
             Outcome::Refused(why) => v1::outcome::Result::Refused(why.into()),
             Outcome::Failed(failure) => v1::outcome::Result::Failed(failure.into()),
         };
@@ -240,6 +245,36 @@ impl From<&EngineError> for v1::Error {
         Self {
             code: code as i32,
             message: error.to_string(),
+        }
+    }
+}
+
+impl From<&ObjectStatus> for v1::ObjectStatus {
+    fn from(object: &ObjectStatus) -> Self {
+        let record = object.record.map(|state| match state {
+            State::Intent => v1::RecordState::Intent,
+            State::Confirmed => v1::RecordState::Confirmed,
+            State::Reaping => v1::RecordState::Reaping,
+        });
+        let live = object.live.map(|status| match status {
+            Status::Ready => v1::LiveStatus::Ready,
+            Status::Converging => v1::LiveStatus::Converging,
+            Status::Failed => v1::LiveStatus::Failed,
+        });
+        let standing = match object.standing {
+            Standing::Agrees => v1::Standing::Agrees,
+            Standing::Pending => v1::Standing::Pending,
+            Standing::Missing => v1::Standing::Missing,
+            Standing::NotApplied => v1::Standing::NotApplied,
+            Standing::Unclaimed => v1::Standing::Unclaimed,
+        };
+        Self {
+            path: object.path.to_string(),
+            kind: object.kind.as_str().to_owned(),
+            record: record.map(|r| r as i32),
+            live: live.map(|l| l as i32),
+            standing: standing as i32,
+            outputs: object.outputs.clone(),
         }
     }
 }

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Running a command: read the input, plan against the world, and for `apply` and `destroy`
-//! hand the approved plan to the engine.
+//! hand the approved plan to the engine; `status` only reads.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -13,7 +13,7 @@ use ucdk_plan::{Lowered, lower};
 use ucdk_proto::v1::ResourceList;
 
 use crate::args::{Approval, Command, Invocation, Mode, USAGE, Verb, parse};
-use crate::render::{failure, header, plan_text, report_text};
+use crate::render::{failure, header, plan_text, report_text, status_text};
 use crate::world::World;
 
 /// A command that stops: its exit code and what to print to standard error.
@@ -115,11 +115,11 @@ fn execute(invocation: &Invocation, world: &mut World) -> Result<ExitClass, Exit
         let lines = unhosted(invocation, &desired, world);
         if !lines.is_empty() {
             let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
-            // Only a plan or an apply gets here: a destroy plans against no wanted node.
-            let verb = if matches!(invocation.verb, Verb::Plan { .. }) {
-                "plan"
-            } else {
-                "apply"
+            // Only a plan, a status or an apply gets here: a destroy plans against no wanted node.
+            let verb = match invocation.verb {
+                Verb::Plan { .. } => "plan",
+                Verb::Status => "status",
+                _ => "apply",
             };
             world.out.push_str(&format!(
                 "ucdk {verb}\nprovider: {}\nmode: {}\n{text}",
@@ -133,6 +133,10 @@ fn execute(invocation: &Invocation, world: &mut World) -> Result<ExitClass, Exit
     let ledger = world.ledger.clone();
     let cell = world.cell.clone();
     let mut engine = Engine::new(world.cloud(invocation.provider), &ledger, cell);
+    if matches!(invocation.verb, Verb::Status) {
+        let outcome = engine.handle(Request::Status { desired });
+        return finish(outcome, invocation, world);
+    }
     let mode = match invocation.mode {
         Mode::Apply => EngineMode::Apply,
         Mode::Destroy => EngineMode::Destroy,
@@ -172,6 +176,12 @@ fn finish(outcome: Outcome, invocation: &Invocation, world: &mut World) -> Resul
         }
         Outcome::Done(report) => {
             world.out.push_str(&report_text(&report));
+            Ok(class)
+        }
+        Outcome::Status(objects) => {
+            world
+                .out
+                .push_str(&status_text(invocation.provider, &objects));
             Ok(class)
         }
         Outcome::Refused(why) => Err(Exit {

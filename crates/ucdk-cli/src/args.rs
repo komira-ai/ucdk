@@ -10,6 +10,7 @@ use crate::world::ProviderName;
 pub const USAGE: &str = "\
 usage: ucdk --version
        ucdk plan --provider=<fake|fake-limited> --input=<resources.pb> [--mode=<apply|destroy>] [--out=<plan file>]
+       ucdk status --provider=<fake|fake-limited> --input=<resources.pb>
        ucdk apply --provider=<fake|fake-limited> --input=<resources.pb> --plan=<plan file> --expect-plan-hash=<hash>
        ucdk destroy --provider=<fake|fake-limited> --input=<resources.pb> --plan=<plan file> --expect-plan-hash=<hash>
 ";
@@ -29,6 +30,8 @@ pub enum Verb {
     },
     Apply(Approval),
     Destroy(Approval),
+    /// Show what the ledger records and the provider holds; changes nothing.
+    Status,
 }
 
 /// What a plan is made for.
@@ -136,6 +139,10 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             };
             (values, mode)
         }
+        "status" => (
+            split_flags(flags, &["provider", "input"], &[])?,
+            Mode::Apply,
+        ),
         "apply" => (split_flags(flags, both, &[])?, Mode::Apply),
         "destroy" => (split_flags(flags, both, &[])?, Mode::Destroy),
         other => return Err(format!("`{other}` is not a command")),
@@ -144,6 +151,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         "plan" => Verb::Plan {
             out: values.get("out").cloned(),
         },
+        "status" => Verb::Status,
         "apply" => Verb::Apply(approval(&values)?),
         _ => Verb::Destroy(approval(&values)?),
     };
