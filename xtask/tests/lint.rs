@@ -160,12 +160,15 @@ fn lint_flags_hosts_and_addresses_outside_the_allow_list() {
         "[x](https://crates.io/crates/serde) and https://developercertificate.org/".to_owned(),
         "http://localhost:8080 and https://x.example.org/".to_owned(),
         "https://doc.rust-lang.org/std/".to_owned(),
+        "https://nodejs.org/dist/v26.12.1/node-v26.12.1-linux-x64.tar.gz".to_owned(),
         "versions 1.2.3 and 1.2.3.4.5 and 300.1.1.1 and a.b.c.d".to_owned(),
         "the language and .lang files".to_owned(),
         "plain text, no scheme://".to_owned(),
         "file:///a/b and HTTPS://Github.COM/x".to_owned(),
         // An attribute of an object, as in generated code, is not a host.
         join(&["if self.", "internal is not None:"]),
+        join(&["if (this.", "internal !== undefined) {"]),
+        join(&["this.internal = init.", "internal;"]),
     ];
     for text in &good {
         assert!(rules(text).is_empty(), "{text}");

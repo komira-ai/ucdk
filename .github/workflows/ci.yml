@@ -2,7 +2,8 @@
 # tested; a test in xtask holds this file to that (every `run:` line is exactly one verb).
 #   check    static gates: fmt, clippy, cargo-deny, SPDX headers, run lines, public lint, DCO
 #   coverage the tests once under llvm-cov; per-crate line and branch floor
-#   sdk      the Python SDK's tests (Linux x86-64); Python tests are allowed under sdk/python only
+#   sdk      the Python and TypeScript SDKs' tests (Linux x86-64), the TypeScript ones on the Node
+#            xtask pins and verifies; SDK tests are allowed under sdk/<language>/tests only
 name: ci
 
 on:

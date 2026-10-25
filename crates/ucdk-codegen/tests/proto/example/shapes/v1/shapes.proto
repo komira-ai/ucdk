@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // A fixture for the generator: every field shape the generator supports, comments to carry into
-// the docstrings, and names that need care in Python.
+// the doc comments, and names that need care in Python and in TypeScript.
 
 syntax = "proto3";
 
@@ -60,6 +60,7 @@ message Scalars {
     Empty a_empty = 35;
     Nest.Deep a_deep = 36;
     Scalars.Nested a_nested = 37;
+    Words a_words = 38;
   }
   // Its arms are on both sides of `nested`: the oneof is written at 40, before it.
   oneof other {
@@ -89,6 +90,12 @@ message Pair {
   string left = 1;
   int32 right = 2;
   Mode speed = 3;
+}
+
+// Fields named like words a TypeScript parameter may not be called.
+message Words {
+  string delete = 1;
+  string options = 2;
 }
 
 message Empty {}

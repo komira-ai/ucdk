@@ -62,8 +62,8 @@ pure workspace crates).
 | Repository checks | `xtask` | `cargo xtask check`, `coverage`, `fetch` | no |
 | API | `ucdk-api` | the `ucdk.api.v1` protobuf messages for everything that is not a resource (session config, requests, plan, report, findings, error; `StatusRequest` and `StatusResponse` for the engine's read-only status) and the code converting requests to the engine's requests and the engine's outcomes to messages (a plan only goes out: a caller sends the hash, never a plan); the single table from outcome to exit class that both the CLI and the SDKs use | no |
 | C ABI | `ucdk-capi` | the `cdylib`, the C header (`crates/ucdk-capi/include/ucdk.h`), panic containment, buffer ownership. The only crate in the workspace allowed `unsafe` | no |
-| SDKs | `sdk/python` (exists), `sdk/typescript` (**proposal**) | the loader, the session wrapper, and generated typed templates | n/a |
-| Generator | `ucdk-codegen` | compiles the protos in-process, reads the descriptors and returns the generated SDK sources as files (`cargo xtask gen-sdk` writes them; the `sdk-fresh` gate of `check` compares them with the committed ones). Python is the one target | no |
+| SDKs | `sdk/python` (exists), `sdk/typescript` (exists) | the loader, the session wrapper, and generated typed templates | n/a |
+| Generator | `ucdk-codegen` | compiles the protos in-process, reads the descriptors and returns the generated SDK sources as files (`cargo xtask gen-sdk` writes them; the `sdk-fresh` gate of `check` compares them with the committed ones). Python and TypeScript are the targets | no |
 
 The engine already states the seam this document builds on: the whole surface is one pair of
 plain enums, `Request` and `Outcome`, "not a wire format: a later shared library wraps exactly
@@ -290,7 +290,7 @@ reachable from the ABI.
   list on macOS), and a test reads the built library's exported symbol table and compares it with
   the header.
 
-## 6. How SDKs are generated (exists for Python: `ucdk-codegen`)
+## 6. How SDKs are generated (exists for Python and TypeScript: `ucdk-codegen`)
 
 ### 6.1 Input
 
@@ -305,7 +305,7 @@ no `protoc` and no per-language protobuf toolchain is needed to generate anythin
 | message classes and enums for both packages, with docs taken from the proto comments | the C ABI binding: load the library, check the version, call the nine functions |
 | binary encode and decode for those messages | the `Session` type: `open`, `load_catalog`, `plan`, `apply`, `destroy`, `status`, `close`, and the error type built from the status codes |
 | one typed template per resource kind (the fields of the `Resource.body` oneof): required fields as constructor arguments, optional ones as keywords, oneofs as separate named constructors (an image is `Image.digest(...)` or `Image.step_output(...)`, never a free-form dict) | locating the library (6.5) |
-| typed output references from the `exposes` option: `service.url` is a `Ref`, not a string | async wrapper (TypeScript) |
+| typed output references from the `exposes` option: `service.url` is a `Ref`, not a string | the worker thread and the promises (TypeScript) |
 | the portability marker per kind (`PORTABLE` or `CLOUD_BOUND`) as metadata | packaging metadata |
 
 The hand-written part does not grow when a resource is added. A test enforces that (10.4).
@@ -317,7 +317,12 @@ protobuf runtime dependency, no per-language protobuf generator and no version s
 of proto3 it writes code for is the one the protos use: strings, booleans, `int32`, `int64`,
 `uint32`, `uint64`, enums, messages, `repeated` strings and messages, `map<string, T>`, `oneof`
 and `optional`; any other field type is refused by name when the generator reads it (a new proto
-feature is a decision in `ucdk-codegen/src/python/types.rs`, not a field an SDK silently drops).
+feature is a decision in `ucdk-codegen/src/model.rs`, not a field an SDK silently drops). What
+the targets read from the descriptors (the field types, the order a message is written in, the
+resource kinds) is shared between them in `model.rs` and `kinds.rs`; what they write is not.
+TypeScript writes 32 bit integers as `number`s and 64 bit ones as `bigint`s, an enum as a constant
+object and its type, fields in camel case, and only syntax that is nothing but types, so that Node
+can run the files by stripping them.
 
 The bytes are the ones the Rust side writes, not merely valid protobuf: a message is written in
 field-number order except that a whole oneof sits where its lowest arm is (that is how prost
@@ -328,7 +333,7 @@ The contract test is `sdk/wire-golden`: for each case, a golden file of the byte
 messages encode to (written and held by `crates/ucdk-api/tests/sdk_golden.rs`, one case per
 message shape, with `manifest.txt` naming the message of each). Every SDK builds the same value by
 hand, must encode it to the same bytes and must decode the bytes to the same value
-(`sdk/python/tests/test_wire_golden.py`). `crates/ucdk-codegen/tests/golden_coverage.rs` fails
+(`sdk/python/tests/test_wire_golden.py`, `sdk/typescript/tests/wire_golden.test.ts`). `crates/ucdk-codegen/tests/golden_coverage.rs` fails
 unless the goldens set every field of every message of both packages.
 
 ### 6.4 What "adding a resource" costs
@@ -384,26 +389,35 @@ shape is added; and a provider still has to be written for the kind.
   Python: `Library(library_path)` and `Session(config, library_path=...)`; without a path the
   package's `_lib` directory is searched. The wheel layout itself is step 15.)
 - Python binds with `ctypes` (no compiled extension, so one pure-Python wheel plus a data file per
-  platform). TypeScript binds through Node's native addon interface or a pinned FFI package;
-  which one is decided in the TypeScript PR, with the rule that it supports running a blocking
-  call off the main thread.
+  platform). TypeScript binds with `node:ffi`, the FFI built into Node 26 (decided and built: no
+  native addon and no package, so the npm package is TypeScript source plus the library). It is
+  experimental in Node (a warning is printed once), so the SDK names the Node it needs
+  (`engines`, 26.12.1 or newer) and the tests run on a Node that `xtask` pins by version and
+  SHA-256. `node:ffi` has no struct types, so the one function that takes a struct by value,
+  `ucdk_buf_free(ucdk_buf)`, is declared as the two integer arguments the struct is passed as
+  on Linux x86-64 and on arm64 (a pointer and a `size_t`); the SDK is not for a platform where
+  that is not so.
 - Blocking calls: the Python SDK releases the GIL by construction under `ctypes`; the TypeScript
-  SDK runs each call on a worker thread and exposes a promise.
+  SDK (built) loads the library on a worker thread that belongs to the session, runs each call
+  there one at a time in the order made, and exposes promises. The worker keeps the process alive
+  only while a call is waiting for it.
 
 ### 6.6 Generated code in the repository (built)
 
-Generated SDK sources are **committed**, under `sdk/python/ucdk/generated/`. `cargo xtask gen-sdk`
+Generated SDK sources are **committed**, under `sdk/python/ucdk/generated/` and
+`sdk/typescript/src/generated/`. `cargo xtask gen-sdk`
 writes them (and removes a generated file the generator no longer writes); the `sdk-fresh` gate
 of `cargo xtask check` regenerates them in memory and fails on a file that differs, is missing, or
 is extra, so a proto or generator change shows in review as the diff of the SDK it changes, and no
 checkout ever builds an SDK from a stale tree. The repository's rule that nothing generated is
 committed still holds for the Rust types (`ucdk-proto/build.rs` writes them into the build
-directory); the reason it does not for an SDK is that a Python package is used from a checkout
-without a build step.
+directory); the reason it does not for an SDK is that a Python package and TypeScript source are
+used from a checkout without a build step.
 
 The generator's own output for a fixed proto (`crates/ucdk-codegen/tests/proto`, every supported
 field shape, comments, names that need care) is kept as golden files in
-`crates/ucdk-codegen/tests/golden`, held by a Rust test and loaded by a Python test.
+`crates/ucdk-codegen/tests/golden`, held by a Rust test and loaded by the Python and the TypeScript tests (the files of both
+targets are in one directory, since their paths differ).
 
 ## 7. Resources as protos (exists)
 
@@ -527,7 +541,7 @@ repository does today is a **proposal**.
 | `ucdk-api` (proposal) | message-to-value conversion in both directions; the outcome-to-exit table | round-trip tests; an exhaustive match so a new `Outcome` or `Refusal` variant fails to compile until it is mapped | a field dropped in conversion, an unmapped outcome |
 | `ucdk-capi` | the nine functions, called as C would | see 10.3 | ownership, panic, version and malformed-input defects |
 | SDKs | binding and generated code | see 10.4 | an SDK that disagrees with the core or with another SDK |
-| generator | output for fixture protos; the committed SDK; a kind added to `resource.proto` | golden output (`tests/generate.rs`, `templates.rs`, `golden_coverage.rs`), the `sdk-fresh` gate, and the fixture's golden loaded and run by the Python tests | generated code that does not load or encode wrongly, a refused-in-silence field type, a stale committed SDK |
+| generator | output for fixture protos; the committed SDK; a kind added to `resource.proto` | golden output (`tests/generate.rs`, `templates.rs`, `golden_coverage.rs`), the `sdk-fresh` gate, and the fixture's golden loaded and run by the Python and TypeScript tests | generated code that does not load or encode wrongly, a refused-in-silence field type, a stale committed SDK |
 
 ### 10.2 Crash and fault injection
 
@@ -555,35 +569,49 @@ again against the built `cdylib` loaded dynamically:
 - run under Miri for the ABI crate's pure-Rust path after merge, and under a sanitizer build
   after merge, since neither runs in the pull-request budget.
 
-### 10.4 SDK conformance (Python exists; the scenario files are shared with the CLI)
+### 10.4 SDK conformance (Python and TypeScript exist; the scenario files are shared with the CLI)
 
 The SDK tests are written in the SDK's language, because the point is to exercise the binding.
 This is an exception to "tests are Rust" in `CONTRIBUTING.md`, scoped to `sdk/<language>` and
 driven only through the `cargo xtask sdk-test` verb so the workflow still runs one verb per line.
-The Python SDK's tests are the standard library's `unittest` only: nothing is installed and no
-network is used.
+The Python SDK's tests are the standard library's `unittest` only, the TypeScript SDK's are
+Node's built-in `node:test` only: nothing is installed and no network is used (the pinned Node
+is fetched and verified by `xtask`, as the other tools are).
 
 - **Wire contract:** every golden message encodes to the same bytes in every SDK and decodes back
   (6.3).
 - **Verb contract:** the same scenario is run through each SDK and through the CLI; all must give
   the same plan hash, steps, report and status. As built, the scenario's data is what the CLI prints
   for it (`crates/ucdk-cli/tests/data`, checked by `crates/ucdk-cli/tests/scenario.rs`), and
-  `sdk/python/tests/test_scenarios.py` reads the same files, so there is one set of expected
+  `sdk/python/tests/test_scenarios.py` and `sdk/typescript/tests/scenarios.test.ts` read the same
+  files, so there is one set of expected
   values.
 - **End to end:** each SDK runs `plan`, `apply`, a second `plan` that shows no changes, and
   `destroy` against the fake provider through the real shared library (`cargo xtask sdk-test`
-  builds `ucdk-capi` first), and checks the refusals come back as data. The Python tests also hold
+  builds `ucdk-capi` first), and checks the refusals come back as data. Both SDKs' tests also hold
   the loader (a wrong major, an older minor, a file that is not the library), a closed session
   (refused by the SDK, and a closed handle refused by the library) and every status code's
-  exception.
+  error; Python's also holds the search of the package directory, which the TypeScript SDK does
+  not have yet (it takes `libraryPath` only, until the package layout of step 15).
 - **Generation:** the "hand-written part does not grow" check: adding a test-only message to a
   fixture proto changes generated files only.
 - **Coverage:** the 99% line and branch floor applies to the hand-written SDK source in each
   language, by that language's coverage tool, wired into `cargo xtask coverage`. **Not wired for
-  Python yet**: the standard library's `trace` measures lines only (the hand-written Python, 215
-  executable lines, is fully executed by the tests when measured by hand), and a branch tool would
-  be a package to install. Wiring a gate, and choosing the branch tool, is open.
+  Python or TypeScript yet**: the standard library's `trace` measures lines only (the hand-written
+  Python, 215 executable lines, is fully executed by the tests when measured by hand). Node's test
+  runner measures lines and branches with nothing to install (`node --test
+  --experimental-test-coverage`, threshold flags included, and it reads the worker thread too);
+  by hand the hand-written TypeScript (`src`, without `src/generated`) is at 99.0% of its lines
+  and 96.8% of its branches. What is not run is the path of a worker thread that ends with calls
+  waiting, a defence against a crash that no test can cause without a seam in the SDK, and the
+  refusal of a library of another ABI as the worker reports it (the SDK's ABI is a constant, and
+  the loader's own tests lower and raise it). Wiring a gate, and deciding whether to add that
+  seam, is open.
 - Static types: the generated code must pass the language's type checker in strict mode.
+  **Not run yet** for TypeScript: `tsc` is a package, and CI installs none. The sources are
+  written for `strict`, `erasableSyntaxOnly` and `verbatimModuleSyntax` (`sdk/typescript/tsconfig.json`)
+  and were checked with `tsc` by hand once; a gate waits for a way to get the compiler that
+  respects the no-package rule.
 
 ### 10.5 Real clouds
 
@@ -623,7 +651,7 @@ These are the decisions this document cannot make alone:
 ## 12. Implementation sequence (proposal)
 
 Each step is one pull request, keeps `cargo xtask check` and `cargo xtask coverage` green, and
-lists its tests by name. The first part ends with a working Python SDK; real clouds come after.
+lists its tests by name. The first part ends with working Python and TypeScript SDKs; real clouds come after.
 
 1. **This document.**
 2. **`ucdk-api` and the `ucdk.api.v1` protos.** Session config, plan, report, status, findings,
@@ -640,7 +668,8 @@ lists its tests by name. The first part ends with a working Python SDK; real clo
    exemption and its `unsafe-scope` gate in `cargo xtask check`; the nine functions; panic
    containment; the in-process ABI conformance tests of 10.3; a test that the checked-in header
    matches the exports; see 3.6 for what is not done).
-7. **`ucdk-codegen` and `cargo xtask gen-sdk`** (done: `crates/ucdk-codegen`, the Python target:
+7. **`ucdk-codegen` and `cargo xtask gen-sdk`** (done: `crates/ucdk-codegen`, the Python target
+   (the TypeScript target of step 10 came after, on the descriptor reading both share):
    message classes with their own encoders and decoders, typed resource templates and output
    references read from the options, `sdk/python/ucdk/generated` committed and held by the
    `sdk-fresh` gate; a fixture proto with golden output; the wire goldens in `sdk/wire-golden`,
@@ -653,8 +682,14 @@ lists its tests by name. The first part ends with a working Python SDK; real clo
    Not done: the platform wheel layout (step 15) and a Python coverage gate (10.4).
 9. **CONTRIBUTING and CI updates** for SDK tests and the third CI job (done with step 7: the
    scoped exception in `CONTRIBUTING.md`, `cargo xtask sdk-test`, the `sdk` job).
-10. **TypeScript target and SDK** (`sdk/typescript`): generator target, binding decision, worker
-    thread wrapper, same contract tests and the same scenario files.
+10. **TypeScript target and SDK** (`sdk/typescript`) (done: the generator target (messages with
+    their own encoders, typed templates and output references, `sdk/typescript/src/generated`
+    committed and held by the `sdk-fresh` gate); the binding with `node:ffi` and the ABI rule of
+    section 5, `Session` on a worker thread with promises, one error class per status code;
+    `cargo xtask sdk-test` runs the `node:test` tests on a Node it pins and verifies, and they hold
+    the same wire goldens, scenario files and refusals as Python's). **Milestone: plan, apply,
+    destroy through TypeScript against the fake provider, end to end, through the real library.**
+    Not done: the npm package layout (step 15), a coverage gate and a type-check gate (10.4).
 11. **Lease and fencing** with an injected clock (9, item 2), with the crash sweep extended.
 12. **Leak sweep**: a read-only comparison of the cell's stamped objects with the ledger, as a
     new verb in the engine, `ucdk-api`, the library (a minor ABI bump) and both SDKs.

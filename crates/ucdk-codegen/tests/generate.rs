@@ -7,8 +7,11 @@ mod common;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use common::{SHAPES, generate_shapes, pool_of, pool_with, refusal, root, shapes_pool, text_of};
-use ucdk_codegen::{Error, python};
+use common::{
+    SHAPES, generate_shapes, generate_shapes_ts, pool_of, pool_with, refusal, refusal_ts, root,
+    shapes_pool, text_of,
+};
+use ucdk_codegen::{Error, python, typescript};
 
 fn golden_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden/shapes")
@@ -30,13 +33,21 @@ fn names(dir: &Path) -> BTreeSet<String> {
     out
 }
 
-/// Rewrites the goldens. The Python test `test_shapes.py` loads them, so a change is read twice:
-/// as a diff, and as code that must still pass.
+/// Every file the fixture generates, for both targets: their paths are different (`ucdk/...` and
+/// `src/...`), so the goldens of both live in one directory.
+fn generated_goldens() -> Vec<ucdk_codegen::File> {
+    let mut files = generate_shapes();
+    files.extend(generate_shapes_ts());
+    files
+}
+
+/// Rewrites the goldens. The SDK tests (`test_shapes.py`, `shapes.test.ts`) load them, so a
+/// change is read twice: as a diff, and as code that must still pass.
 #[test]
 #[ignore = "writes the golden files; run on purpose"]
 fn write_goldens() {
     let dir = golden_dir();
-    for file in generate_shapes() {
+    for file in generated_goldens() {
         let path = dir.join(&file.path);
         std::fs::create_dir_all(path.parent().expect("a directory")).expect("create");
         std::fs::write(path, file.text).expect("write a golden");
@@ -45,16 +56,19 @@ fn write_goldens() {
 
 #[test]
 fn the_fixture_generates_the_golden_files() {
-    let files = generate_shapes();
+    let files = generated_goldens();
     for file in &files {
         let on_disk = std::fs::read_to_string(golden_dir().join(&file.path))
             .unwrap_or_else(|e| panic!("{} is missing: {e}", file.path));
         assert_eq!(on_disk, file.text, "{} differs from the golden", file.path);
     }
-    let generated: BTreeSet<String> = files.iter().map(|f| f.path.clone()).collect();
+    let mut generated: BTreeSet<String> = files.iter().map(|f| f.path.clone()).collect();
+    // Not generated: it makes the TypeScript golden a module for a type checker, which reads the
+    // `type` of the nearest `package.json` as Node does.
+    generated.insert("package.json".to_owned());
     assert_eq!(names(&golden_dir()), generated, "a golden is left over");
     // No `Resource` in the fixture, so no templates.
-    assert!(!generated.iter().any(|p| p.ends_with("resources.py")));
+    assert!(!generated.iter().any(|p| p.contains("resources.")));
 }
 
 #[test]
@@ -238,4 +252,201 @@ fn a_pool_of_an_inline_proto_generates() {
     let files = python::generate(&pool, &["test.proto"]).expect("generates");
     assert!(text_of(&files, "t.py").contains("class M(_wire.Message):"));
     assert!(text_of(&files, "__init__.py").contains("The generated part"));
+}
+
+// ---- the TypeScript target ------------------------------------------------------------------
+
+#[test]
+fn the_repository_protos_generate_a_typescript_module_per_package_and_the_templates() {
+    let files = ucdk_codegen::typescript_for(&root()).expect("the protos generate");
+    let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        [
+            "src/generated/wire.ts",
+            "src/generated/google_protobuf.ts",
+            "src/generated/ucdk_api_v1.ts",
+            "src/generated/ucdk_resource_v1.ts",
+            "src/generated/resources.ts",
+        ]
+    );
+    assert!(files.iter().all(|f| f.text.contains("Do not edit.")));
+    let resources = text_of(&files, "resources.ts");
+    assert!(resources.contains("export class Service extends Template {"));
+    assert!(resources.contains("export class Job extends Template {"));
+    assert!(
+        resources.contains("static readonly PORTABILITY = ucdk_resource_v1.Portability.PORTABLE;")
+    );
+    assert!(resources.contains(
+        "static readonly EXPOSES = [ucdk_resource_v1.Output.URL, ucdk_resource_v1.Output.HOST] as const;"
+    ));
+    assert!(resources.contains("static readonly EXPOSES = [] as const;"));
+    assert!(resources.contains("get url(): ucdk_resource_v1.Ref {"));
+    // Only the modules the templates use are imported.
+    assert!(resources.contains("import * as google_protobuf from \"./google_protobuf.ts\";"));
+    assert!(!resources.contains("ucdk_api_v1"));
+    let api = text_of(&files, "ucdk_api_v1.ts");
+    assert!(api.contains("import * as ucdk_resource_v1 from \"./ucdk_resource_v1.ts\";"));
+    assert!(api.contains("export class Outcome extends wire.Message {"));
+    // The enum values lose the name of their enum.
+    assert!(api.contains("  FAILED_NO_EFFECT: 4,"));
+    // The nested messages of the resource protos have flat names.
+    assert!(text_of(&files, "ucdk_resource_v1.ts").contains("export class Service_Public extends"));
+}
+
+#[test]
+fn the_typescript_wire_primitives_are_the_same_text_for_every_proto() {
+    let one = text_of(&generate_shapes_ts(), "wire.ts").to_owned();
+    let other = ucdk_codegen::typescript_for(&root()).expect("generates");
+    assert_eq!(text_of(&other, "wire.ts"), one);
+}
+
+#[test]
+fn without_comments_there_are_no_doc_comments() {
+    let pool = pool_with(&[], SHAPES, false);
+    let files = typescript::generate(&pool, &[SHAPES]).expect("generates");
+    let text = text_of(&files, "example_shapes_v1.ts");
+    assert!(!text.contains("Every kind of field."));
+    assert!(!text.contains("/** A string. */"));
+    assert!(text.contains("export class Scalars extends wire.Message {"));
+}
+
+#[test]
+fn typescript_enums_are_constant_objects_with_the_prefix_dropped_where_it_leaves_a_name() {
+    let files = generate_shapes_ts();
+    let text = text_of(&files, "example_shapes_v1.ts");
+    assert!(text.contains(
+        "  UNSPECIFIED: 0,\n  FAST: 1,\n  /** Carries no prefix. */\n  SLOW: 2,\n  /** What is left of the prefix is not a name. */\n  MODE_3D: 3,\n} as const;\nexport type Mode = (typeof Mode)[keyof typeof Mode];"
+    ));
+    // A digit inside the enum's name is part of its prefix.
+    assert!(text.contains("export const Http2Mode = {\n  UNSPECIFIED: 0,\n  ON: 1,"));
+    // A nested enum has a flat name.
+    assert!(text.contains("export const Scalars_Nested_Kind = {"));
+    // A comment cannot end itself.
+    assert!(text.contains("A second paragraph, with a \\ and \"\"\" in it."));
+}
+
+#[test]
+fn integers_of_64_bits_are_bigints_and_the_others_numbers() {
+    let files = generate_shapes_ts();
+    let text = text_of(&files, "example_shapes_v1.ts");
+    assert!(text.contains("  big: bigint;"));
+    assert!(text.contains("  ubig: bigint;"));
+    assert!(text.contains("  small: number;"));
+    assert!(text.contains("    this.big = init.big ?? 0n;"));
+    assert!(text.contains("          this.big = wire.int64(value);"));
+}
+
+#[test]
+fn a_member_the_class_keeps_gets_an_underscore_and_a_parameter_that_is_a_word_does_too() {
+    let files = generate_shapes_ts();
+    let text = text_of(&files, "example_shapes_v1.ts");
+    // `from` is a word in Python only; `encode` is a method of every message.
+    assert!(text.contains("  from?: string;"));
+    assert!(text.contains("  encode_?: string;"));
+    // As a property any word is a name, as a parameter it is not.
+    assert!(text.contains(
+        "static aWords(delete_: string, options_: string, fields: ScalarsInit = {}): Scalars {"
+    ));
+    assert!(text.contains(
+        "new Scalars({ ...fields, aWords: new Words({ delete: delete_, options: options_ }) })"
+    ));
+    // A message without fields needs no object.
+    assert!(text.contains("aEmpty: new Empty() })"));
+}
+
+#[test]
+fn a_oneof_is_written_where_its_lowest_arm_is_and_only_when_one_arm_is_set() {
+    let files = generate_shapes_ts();
+    let text = text_of(&files, "example_shapes_v1.ts");
+    let other = text.find("this.whichOther();").expect("the oneof");
+    let nested = text.find("wire.putMessage(out, 50,").expect("the field");
+    assert!(
+        other < nested,
+        "the oneof `other` (40, 60) is before field 50"
+    );
+    assert!(text.contains("wire.putBool(out, 60, this.oFlag);"));
+}
+
+#[test]
+fn typescript_refuses_what_python_refuses() {
+    for source in [
+        "message M { float f = 1; }",
+        "message M { map<int32, string> m = 1; }",
+        "message M { repeated int32 r = 1; }",
+    ] {
+        match refusal_ts(source) {
+            Error::Refused { subject, .. } => assert!(subject.starts_with("t.M."), "{subject}"),
+            other => panic!("not a refusal: {other:?}"),
+        }
+    }
+}
+
+fn refused_ts(source: &str, subject: &str, why: &str) {
+    match refusal_ts(source) {
+        Error::Refused { subject: s, why: w } => {
+            assert!(s.contains(subject), "{s}");
+            assert!(w.contains(why), "{w}");
+        }
+        other => panic!("not a refusal: {other:?}"),
+    }
+}
+
+#[test]
+fn a_field_named_like_a_method_a_oneof_makes_is_refused() {
+    // A oneof makes methods named for it.
+    refused_ts(
+        "message M { string which_o = 1; oneof o { string a = 2; } }",
+        "t.M",
+        "`whichO`",
+    );
+    refused_ts(
+        "message M { string clear_o = 1; oneof o { string a = 2; } }",
+        "t.M",
+        "`clearO`",
+    );
+}
+
+#[test]
+fn an_arm_named_like_a_member_of_every_class_constructor_is_refused() {
+    refused_ts(
+        "message M { oneof o { string name = 1; } }",
+        "t.M",
+        "static method",
+    );
+    refused_ts(
+        "message M { oneof o { string length = 1; } }",
+        "t.M",
+        "static method",
+    );
+}
+
+#[test]
+fn two_types_that_flatten_to_one_typescript_name_are_refused() {
+    refused_ts(
+        "message A { message B {} }\nmessage A_B {}",
+        "t.A_B",
+        "same TypeScript name",
+    );
+    refused_ts(
+        "message M {}\nmessage MInit {}",
+        "t.M",
+        "constructor's object",
+    );
+}
+
+#[test]
+fn the_typescript_target_names_a_root_file_that_is_not_in_the_pool() {
+    let pool = shapes_pool();
+    assert_eq!(
+        typescript::generate(&pool, &["nope.proto"]),
+        Err(Error::Missing("nope.proto".to_owned()))
+    );
+}
+
+#[test]
+fn a_pool_of_an_inline_proto_generates_typescript() {
+    let pool = pool_of("syntax = \"proto3\";\npackage t;\nmessage M { string s = 1; }");
+    let files = typescript::generate(&pool, &["test.proto"]).expect("generates");
+    assert!(text_of(&files, "t.ts").contains("export class M extends wire.Message {"));
 }

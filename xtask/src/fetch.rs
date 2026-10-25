@@ -27,6 +27,10 @@ pub struct Tool {
 /// The names of the pinned tools.
 pub const DENY: &str = "cargo-deny";
 pub const LLVM_COV: &str = "cargo-llvm-cov";
+/// The Node the TypeScript SDK's tests run on. `node:ffi`, which binds the C library without an
+/// addon or a package, is in Node 26; the version is pinned so that the SDK's tests do not move
+/// with the machine's Node.
+pub const NODE: &str = "node";
 
 /// The pinned tools.
 pub fn pinned() -> Vec<Tool> {
@@ -48,6 +52,12 @@ pub fn pinned() -> Vec<Tool> {
             "https://github.com/taiki-e/cargo-llvm-cov/releases/download/v0.9.1/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz",
             "b3f68e625481fed9b16444174f3fa5ebcdbde4a1878803a35eabe2dcefcdc41a",
             "cargo-llvm-cov",
+        ),
+        tool(
+            NODE,
+            "https://nodejs.org/dist/v26.12.1/node-v26.12.1-linux-x64.tar.gz",
+            "0fd1eb7770598f52a21995edf6ed35fc690400fa437c2386af329519e9143132",
+            "node-v26.12.1-linux-x64/bin/node",
         ),
     ]
 }

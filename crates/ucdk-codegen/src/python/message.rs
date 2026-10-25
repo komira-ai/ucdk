@@ -2,147 +2,19 @@
 //! One message as a Python class, and one enum as an `IntEnum`.
 //!
 //! A message class holds its fields as plain attributes, built by `__init__`, and encodes and
-//! decodes itself with the functions of `_wire.py`. The bytes it writes are the ones the Rust
-//! side (prost) writes, field for field:
-//!
-//! - a field is written in field-number order, except that a whole oneof sits where its lowest
-//!   arm number is (prost sorts its fields by their lowest tag, a oneof counting as one field);
-//! - a singular scalar is left out when it is the default, an `optional` one and a message when
-//!   it is `None`, and an arm of a oneof whenever it is set, default or not;
-//! - a map is written in key order, and an entry leaves out a key or a value that is the default.
+//! decodes itself with the functions of `_wire.py`, writing the bytes the Rust side writes (the
+//! rules are in `model`).
 
-use prost_reflect::{EnumDescriptor, FieldDescriptor, Kind, MessageDescriptor};
+use prost_reflect::{EnumDescriptor, MessageDescriptor};
 
-use super::types::{Scalar, member_name};
+use super::types::member_name;
+use crate::model::{self, Field, Scalar, Shape, Unit, fields_of};
 use crate::names::{docstring, ident, local_name};
 use crate::{Error, docs};
 
-/// How a field is held.
-#[derive(Clone)]
-pub enum Shape {
-    /// A scalar with no presence: the default means "not written".
-    Plain,
-    /// An `optional` scalar, or a message: `None` means "not written".
-    Optional,
-    /// An arm of a oneof: `None` means "not this arm".
-    Arm,
-    /// A `repeated` string or message.
-    Repeated,
-    /// A `map` with string keys and values of this type.
-    Map(Scalar),
-}
-
-#[derive(Clone)]
-pub struct Field {
-    /// The attribute name.
-    pub attr: String,
-    pub number: u32,
-    pub scalar: Scalar,
-    pub shape: Shape,
-    pub doc: Option<String>,
-}
-
-pub enum Unit {
-    Field(Field),
-    /// A oneof, with its arms in declaration order.
-    Oneof {
-        name: String,
-        arms: Vec<Field>,
-    },
-}
-
-impl Unit {
-    /// Where the unit is written: the lowest field number it holds.
-    fn order(&self) -> u32 {
-        match self {
-            Self::Field(f) => f.number,
-            Self::Oneof { arms, .. } => arms.iter().map(|a| a.number).min().unwrap_or(0),
-        }
-    }
-}
-
-fn field_doc(field: &FieldDescriptor) -> Option<String> {
-    docs::leading(
-        field.parent_message().parent_file_descriptor_proto(),
-        field.path(),
-    )
-}
-
-fn read_field(field: &FieldDescriptor, arm: bool) -> Result<Field, Error> {
-    let subject = field.full_name();
-    let kind = field.kind();
-    let (scalar, shape) = if let Kind::Message(entry) = &kind
-        && entry.is_map_entry()
-    {
-        let key = Scalar::of(&entry.map_entry_key_field().kind(), subject)?;
-        if !matches!(key, Scalar::Str) {
-            return Err(Error::refused(subject, "a map key must be a string"));
-        }
-        let value = Scalar::of(&entry.map_entry_value_field().kind(), subject)?;
-        (value.clone(), Shape::Map(value))
-    } else {
-        let shape = if arm {
-            Shape::Arm
-        } else if field.is_list() {
-            Shape::Repeated
-        } else if field.supports_presence() {
-            Shape::Optional
-        } else {
-            Shape::Plain
-        };
-        (Scalar::of(&kind, subject)?, shape)
-    };
-    if matches!(shape, Shape::Repeated) && !matches!(scalar, Scalar::Str | Scalar::Message(_)) {
-        return Err(Error::refused(
-            subject,
-            "a repeated field must hold strings or messages (packed scalars are not implemented)",
-        ));
-    }
-    Ok(Field {
-        attr: ident(field.name()),
-        number: field.number(),
-        scalar,
-        shape,
-        doc: field_doc(field),
-    })
-}
-
-/// The fields of `message` as units, in the order they are written.
+/// The fields of `message` as units, in the order they are written, named as Python names them.
 pub fn units(message: &MessageDescriptor) -> Result<Vec<Unit>, Error> {
-    let mut out: Vec<Unit> = Vec::new();
-    for field in message.fields() {
-        match field.containing_oneof().filter(|o| !o.is_synthetic()) {
-            None => out.push(Unit::Field(read_field(&field, false)?)),
-            Some(oneof) => {
-                let arm = read_field(&field, true)?;
-                let existing = out.iter_mut().find_map(|u| match u {
-                    Unit::Oneof { name, arms } if name == oneof.name() => Some(arms),
-                    _ => None,
-                });
-                match existing {
-                    Some(arms) => arms.push(arm),
-                    None => out.push(Unit::Oneof {
-                        name: oneof.name().to_owned(),
-                        arms: vec![arm],
-                    }),
-                }
-            }
-        }
-    }
-    out.sort_by_key(Unit::order);
-    Ok(out)
-}
-
-fn fields_of(units: &[Unit]) -> Vec<&Field> {
-    let mut all: Vec<&Field> = Vec::new();
-    for unit in units {
-        match unit {
-            Unit::Field(f) => all.push(f),
-            Unit::Oneof { arms, .. } => all.extend(arms),
-        }
-    }
-    all.sort_by_key(|f| f.number);
-    all
+    model::units(message, ident)
 }
 
 /// `name: type = default`, a parameter that takes the field.

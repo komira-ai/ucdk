@@ -1,50 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
-//! The field types the generator emits code for, and the Python each one becomes.
-//!
-//! The subset is the one the ucdk protos use: strings, booleans, 32 and 64 bit integers (not
-//! `sint`, `fixed` or floating point), enums and messages. Anything else is refused by name when
-//! the field is read, so a new proto feature is a decision in this file and not a field the SDK
-//! quietly drops.
+//! The Python each field type becomes (the types themselves are read in `model`).
 
-use prost_reflect::{EnumDescriptor, Kind, MessageDescriptor};
+use prost_reflect::EnumDescriptor;
 
-use crate::Error;
-use crate::names::{enum_member, local_name, module_of};
-
-/// A type a field, a oneof arm or a map value can have.
-#[derive(Clone)]
-pub enum Scalar {
-    Str,
-    Bool,
-    Int32,
-    Int64,
-    Uint32,
-    Uint64,
-    Enum(EnumDescriptor),
-    Message(MessageDescriptor),
-}
+use crate::model::Scalar;
+use crate::names::{enum_member, type_ref};
 
 impl Scalar {
-    /// The type of a field of kind `kind`; `subject` names the field in the refusal.
-    pub fn of(kind: &Kind, subject: &str) -> Result<Self, Error> {
-        Ok(match kind {
-            Kind::String => Self::Str,
-            Kind::Bool => Self::Bool,
-            Kind::Int32 => Self::Int32,
-            Kind::Int64 => Self::Int64,
-            Kind::Uint32 => Self::Uint32,
-            Kind::Uint64 => Self::Uint64,
-            Kind::Enum(e) => Self::Enum(e.clone()),
-            Kind::Message(m) => Self::Message(m.clone()),
-            other => {
-                return Err(Error::refused(
-                    subject,
-                    format!("the type {other:?} is not supported by the generator"),
-                ));
-            }
-        })
-    }
-
     /// The Python type, written as seen from `current`, the package of the module it is in.
     pub fn annotation(&self, current: &str) -> String {
         match self {
@@ -98,17 +60,6 @@ impl Scalar {
             Self::Enum(_) => format!("_wire.get_enum({}, {raw})", self.annotation(current)),
             Self::Message(_) => format!("{}.decode({raw})", self.annotation(current)),
         }
-    }
-}
-
-/// A type named `full_name` of `package`, as written in a module of package `current`: bare in
-/// its own module, qualified by the module it is imported from otherwise.
-pub fn type_ref(package: &str, full_name: &str, current: &str) -> String {
-    let name = local_name(full_name, package);
-    if package == current {
-        name
-    } else {
-        format!("{}.{name}", module_of(package))
     }
 }
 

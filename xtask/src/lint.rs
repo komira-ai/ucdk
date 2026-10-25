@@ -43,8 +43,9 @@ const MONTHS: [&str; 12] = [
 const HOME_PATHS: [&str; 3] = ["/home/", "/users/", "c:\\users"];
 
 /// Hosts a public file may link to; a subdomain of one is allowed too.
-const ALLOWED_HOSTS: [&str; 11] = [
+const ALLOWED_HOSTS: [&str; 12] = [
     "github.com",
+    "nodejs.org",
     "crates.io",
     "rust-lang.org",
     "docs.rs",
@@ -292,11 +293,15 @@ fn ipv4(line: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The names the generated SDKs call the object whose field they read: `self` in Python, `this`
+/// and the constructor's `init` in TypeScript.
+const RECEIVERS: [&str; 3] = ["self.", "this.", "init."];
+
 /// A name that ends in an internal suffix. `self.<name>` is an attribute of an object (the
-/// generated SDK has a field called `internal`), not a host.
+/// generated SDKs have a field called `internal`), not a host.
 fn suffix(line: &str) -> Option<String> {
     line.split(|c: char| !(c.is_ascii_alphanumeric() || ".-".contains(c)))
-        .filter(|t| !t.starts_with("self."))
+        .filter(|t| !RECEIVERS.iter().any(|r| t.starts_with(r)))
         .find(|t| INTERNAL_SUFFIXES.iter().any(|s| t.ends_with(s)))
         .map(str::to_owned)
 }
