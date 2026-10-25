@@ -3,14 +3,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use prost_reflect::{DynamicMessage, Value as Pb};
 use ucdk_proto::v1::r#ref::Output as Arm;
-use ucdk_proto::v1::resource::Body as Wire;
 use ucdk_proto::v1::{
-    Access, Image, Job, Output, Portability, Ref, Resource, ResourceList, SecretRef, Service, Size,
-    Uses, Value, image, value,
+    Access, Image, Output, Portability, Ref, SecretRef, Uses, Value, image, value,
 };
 use ucdk_provider::{DesiredField, FieldValue, Kind, OwnerLabel};
 
+use super::descriptor::{Catalog, FieldPlan, KindPlan, Shape, entries, scalar};
 use super::finding::{Finding, FindingKind};
 use super::lower::ValueRef;
 use super::render;
@@ -28,91 +28,34 @@ pub struct Spec {
     pub run_refs: Vec<ValueRef>,
     /// The resources whose run node this one's run node needs.
     pub run_deps: BTreeSet<String>,
-    pub extra: Extra,
+    pub roles: Vec<Role>,
 }
 
-/// The second role of a type: `public` for a service, `schedule` for a job. Its node is always
+/// A further role of a type (`public` for a service, `schedule` for a job). Its node is always
 /// emitted; `wanted` says whether the file turns it on.
-pub struct Extra {
-    pub role: &'static str,
+pub struct Role {
+    pub role: String,
     pub kind: Kind,
     pub fields: Vec<DesiredField>,
     pub wanted: bool,
 }
 
-#[derive(Clone, Copy)]
-enum Body<'a> {
-    Service(&'a Service),
-    Job(&'a Job),
-}
-
-impl<'a> Body<'a> {
-    fn of(resource: &'a Resource) -> Option<Self> {
-        match &resource.body {
-            Some(Wire::Service(s)) => Some(Self::Service(s)),
-            Some(Wire::Job(j)) => Some(Self::Job(j)),
-            None => None,
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::Service(_) => "service",
-            Self::Job(_) => "job",
-        }
-    }
-
-    /// The outputs the type exposes to a reference.
-    fn exposes(self) -> &'static [Output] {
-        match self {
-            Self::Service(_) => &[Output::Url, Output::Host],
-            Self::Job(_) => &[],
-        }
-    }
-
-    fn image(self) -> Option<&'a Image> {
-        match self {
-            Self::Service(s) => s.image.as_ref(),
-            Self::Job(j) => j.image.as_ref(),
-        }
-    }
-
-    fn args(self) -> &'a [String] {
-        match self {
-            Self::Service(s) => &s.args,
-            Self::Job(j) => &j.args,
-        }
-    }
-
-    fn env(self) -> &'a BTreeMap<String, Value> {
-        match self {
-            Self::Service(s) => &s.env,
-            Self::Job(j) => &j.env,
-        }
-    }
-
-    fn secret_env(self) -> &'a BTreeMap<String, SecretRef> {
-        match self {
-            Self::Service(s) => &s.secret_env,
-            Self::Job(j) => &j.secret_env,
-        }
-    }
-
-    fn size(self) -> Option<&'a Size> {
-        match self {
-            Self::Service(s) => s.size.as_ref(),
-            Self::Job(j) => j.size.as_ref(),
-        }
-    }
+/// A shared-shape message of the catalog's own package, from its dynamic form. The dynamic and
+/// the generated message come from one schema (the catalog checked the names), so the round
+/// trip through the wire cannot fail.
+fn typed<T: prost::Message + Default>(message: &DynamicMessage) -> T {
+    message
+        .transcode_to()
+        .expect("a shared shape of the catalog has the schema of its generated type")
 }
 
 /// What the checks of one resource know and collect.
 struct Reader<'a> {
     id: &'a str,
     /// Every resource of the list by id, with the outputs its type exposes.
-    exposes: &'a BTreeMap<&'a str, &'static [Output]>,
+    exposes: &'a BTreeMap<String, &'a [Output]>,
     /// The resources whose type is marked `CLOUD_BOUND`.
-    cloud_bound: &'a BTreeSet<&'a str>,
+    cloud_bound: &'a BTreeSet<String>,
     findings: Vec<Finding>,
     deps: BTreeSet<String>,
     refs: Vec<ValueRef>,
@@ -124,7 +67,7 @@ enum Read {
     Ref { resource: String, output: Output },
 }
 
-impl Reader<'_> {
+impl<'a> Reader<'a> {
     fn report(&mut self, field: &str, kind: FindingKind) {
         self.findings.push(Finding::new(self.id, field, kind));
     }
@@ -132,7 +75,7 @@ impl Reader<'_> {
     /// Resolves a reference to a resource of the list, recording the edge. An unbound target
     /// is a finding, and so is a target whose type is not portable: another resource's
     /// node cannot be bound to something only one cloud hosts.
-    fn bind(&mut self, field: &str, target: &Ref) -> Option<&'static [Output]> {
+    fn bind(&mut self, field: &str, target: &Ref) -> Option<&'a [Output]> {
         let found = self.exposes.get(target.resource.as_str()).copied();
         if found.is_some() && self.cloud_bound.contains(target.resource.as_str()) {
             let kind = FindingKind::NotPortable {
@@ -200,7 +143,7 @@ impl Reader<'_> {
         }
     }
 
-    fn image(&mut self, field: &str, image: Option<&Image>) -> Option<DesiredField> {
+    fn image(&mut self, field: &str, stem: &str, image: Option<&Image>) -> Option<DesiredField> {
         let Some(image) = image else {
             self.report(field, FindingKind::MissingImage);
             return None;
@@ -218,7 +161,7 @@ impl Reader<'_> {
         }
         match &image.source {
             Some(image::Source::Digest(digest)) if !digest.is_empty() => Some(DesiredField::new(
-                "image",
+                stem,
                 FieldValue::Text(format!("{digest}@{platform}")),
             )),
             Some(image::Source::Output(_)) => {
@@ -252,112 +195,170 @@ impl Reader<'_> {
         }
     }
 
-    /// The fields every workload shares, in the order they are checked.
-    fn common(&mut self, body: Body<'_>) -> Vec<DesiredField> {
-        let name = body.name();
+    /// The fields of the run node, one plan per field of the type's message, in the order the
+    /// message declares them.
+    fn fields(&mut self, kind: &KindPlan, body: &DynamicMessage) -> Vec<DesiredField> {
         let mut fields = Vec::new();
-        fields.extend(self.image(&format!("{name}.image"), body.image()));
-        fields.extend(
-            body.args().iter().enumerate().map(|(i, arg)| {
-                DesiredField::new(format!("arg.{i}"), FieldValue::Text(arg.clone()))
-            }),
-        );
-        for (key, wire) in body.env() {
-            match self.value(&format!("{name}.env.{key}"), wire) {
+        for plan in &kind.fields {
+            let name = format!("{}.{}", kind.name, plan.field.name());
+            let written = body.has_field(&plan.field);
+            let value = body.get_field(&plan.field);
+            match &plan.shape {
+                Shape::Image => {
+                    let image = value.as_message().filter(|_| written).map(typed::<Image>);
+                    fields.extend(self.image(&name, &plan.stem, image.as_ref()));
+                }
+                Shape::List => fields.extend(
+                    value
+                        .as_list()
+                        .unwrap_or_default()
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| DesiredField::new(format!("{}.{i}", plan.stem), scalar(v))),
+                ),
+                Shape::Env => self.env(kind, body, plan, &name, &value, &mut fields),
+                Shape::Secrets => {
+                    for (key, secret) in entries(&value) {
+                        let secret = secret
+                            .as_message()
+                            .map(typed::<SecretRef>)
+                            .unwrap_or_default();
+                        fields.push(DesiredField::new(
+                            format!("{}.{key}", plan.stem),
+                            FieldValue::Text(render::secret(&secret)),
+                        ));
+                    }
+                }
+                Shape::Scalar | Shape::Render(_) => {
+                    fields.push(render::single(plan, written, &value));
+                }
+            }
+        }
+        fields
+    }
+
+    /// A `map<string, Value>` field: literals become fields, output references become refs.
+    /// A key that is also in a `map<string, SecretRef>` field of the message is refused.
+    fn env(
+        &mut self,
+        kind: &KindPlan,
+        body: &DynamicMessage,
+        plan: &FieldPlan,
+        name: &str,
+        map: &Pb,
+        fields: &mut Vec<DesiredField>,
+    ) {
+        for (key, wire) in entries(map) {
+            let wire = wire.as_message().map(typed::<Value>).unwrap_or_default();
+            let node_field = format!("{}.{key}", plan.stem);
+            match self.value(&format!("{name}.{key}"), &wire) {
                 Some(Read::Text(t)) => {
-                    fields.push(DesiredField::new(format!("env.{key}"), FieldValue::Text(t)));
+                    fields.push(DesiredField::new(node_field, FieldValue::Text(t)));
                 }
                 Some(Read::Ref { resource, output }) => self.refs.push(ValueRef {
-                    field: format!("env.{key}"),
+                    field: node_field,
                     resource,
                     output,
                 }),
                 None => {}
             }
-            if body.secret_env().contains_key(key) {
-                self.report(&format!("{name}.env.{key}"), FindingKind::EnvSecretOverlap);
+            let also_secret = kind
+                .fields
+                .iter()
+                .filter(|other| matches!(other.shape, Shape::Secrets))
+                .any(|other| {
+                    entries(&body.get_field(&other.field))
+                        .iter()
+                        .any(|e| e.0 == key)
+                });
+            if also_secret {
+                self.report(&format!("{name}.{key}"), FindingKind::EnvSecretOverlap);
             }
         }
-        for (key, secret) in body.secret_env() {
-            let store = secret
-                .store
-                .as_ref()
-                .map_or_else(String::new, |s| format!("{s}/"));
-            let version = secret
-                .version
-                .as_ref()
-                .map_or_else(String::new, |v| format!("@{v}"));
-            fields.push(DesiredField::new(
-                format!("secret_env.{key}"),
-                FieldValue::Text(format!("{store}{}{version}", secret.name)),
-            ));
-        }
-        fields.push(render::size_field(body.size()));
-        fields
     }
-}
-
-/// How portable a type is, as the catalog marks it: both v1 types (`service`, `job`) are
-/// `PORTABLE`.
-pub fn catalog_portability(_type_name: &str) -> Portability {
-    Portability::Portable
 }
 
 /// Reads the list: every finding if anything is wrong, else the resources in dependency
 /// order. `portability` says how portable each type is, by its name.
 pub fn read(
-    list: &ResourceList,
+    catalog: &Catalog,
+    list: &DynamicMessage,
     portability: impl Fn(&str) -> Portability,
 ) -> Result<Vec<Spec>, Vec<Finding>> {
     let mut findings = Vec::new();
-    let mut cloud_bound: BTreeSet<&str> = BTreeSet::new();
-    let mut exposes: BTreeMap<&str, &'static [Output]> = BTreeMap::new();
-    let mut typed = Vec::new();
-    for resource in &list.resource {
-        let id = resource.id.as_str();
-        if OwnerLabel::new(id).is_err() {
-            findings.push(Finding::new(id, "", FindingKind::BadId));
-        } else if exposes.contains_key(id) {
-            findings.push(Finding::new(id, "", FindingKind::DuplicateId));
-        } else if let Some(body) = Body::of(resource) {
-            exposes.insert(id, body.exposes());
-            if portability(body.name()) == Portability::CloudBound {
-                cloud_bound.insert(id);
+    let mut cloud_bound: BTreeSet<String> = BTreeSet::new();
+    let mut exposes: BTreeMap<String, &[Output]> = BTreeMap::new();
+    let mut typed_resources = Vec::new();
+    let resources = list.get_field(&catalog.resources);
+    for resource in resources
+        .as_list()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(Pb::as_message)
+    {
+        let id = resource
+            .get_field(&catalog.id)
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        let found = catalog.kinds.iter().find_map(|k| {
+            let body = resource.get_field(&k.arm);
+            body.as_message()
+                .filter(|_| resource.has_field(&k.arm))
+                .map(|b| (k, b.clone()))
+        });
+        if OwnerLabel::new(&id).is_err() {
+            findings.push(Finding::new(&id, "", FindingKind::BadId));
+        } else if exposes.contains_key(&id) {
+            findings.push(Finding::new(&id, "", FindingKind::DuplicateId));
+        } else if let Some((kind, body)) = found {
+            exposes.insert(id.clone(), &kind.exposes);
+            if portability(&kind.name) == Portability::CloudBound {
+                cloud_bound.insert(id.clone());
             }
-            typed.push((resource, body));
+            typed_resources.push((id, resource, kind, body));
         } else {
-            findings.push(Finding::new(id, "", FindingKind::MissingBody));
+            findings.push(Finding::new(&id, "", FindingKind::MissingBody));
             exposes.insert(id, &[]);
         }
     }
 
     let mut specs = Vec::new();
-    for (resource, body) in typed {
+    for (id, resource, kind, body) in typed_resources {
         let mut reader = Reader {
-            id: &resource.id,
+            id: &id,
             exposes: &exposes,
             cloud_bound: &cloud_bound,
             findings: Vec::new(),
             deps: BTreeSet::new(),
             refs: Vec::new(),
         };
-        let mut run_fields = reader.common(body);
-        for (index, uses) in resource.uses.iter().enumerate() {
-            reader.uses(index, uses);
+        let run_fields = reader.fields(kind, &body);
+        let uses = resource.get_field(&catalog.uses);
+        for (index, wire) in uses
+            .as_list()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(Pb::as_message)
+            .enumerate()
+        {
+            reader.uses(index, &typed::<Uses>(wire));
         }
-        let (own, extra) = match body {
-            Body::Service(service) => render::service(service),
-            Body::Job(job) => render::job(job),
-        };
-        run_fields.extend(own);
-        findings.append(&mut reader.findings);
+        let roles = render::roles(kind, &body);
+        let Reader {
+            findings: found,
+            refs,
+            deps,
+            ..
+        } = reader;
+        findings.extend(found);
         specs.push(Spec {
-            id: resource.id.clone(),
-            kind: Kind::new(body.name()),
+            id,
+            kind: Kind::new(&kind.name),
             run_fields,
-            run_refs: reader.refs,
-            run_deps: reader.deps,
-            extra,
+            run_refs: refs,
+            run_deps: deps,
+            roles,
         });
     }
 

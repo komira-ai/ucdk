@@ -1,99 +1,82 @@
 // SPDX-License-Identifier: Apache-2.0
-//! The fields each type lowers to. The catalog's versioned defaults are written out where the
-//! author wrote nothing, so that writing a default is not a change and a console edit of a
-//! modelled field is drift.
+//! The value of one lowered field, and the extra nodes of a type, from the plans the descriptor
+//! gave. The catalog's versioned defaults are the `fallback` options in `resource.proto`: they
+//! are written out where the author wrote nothing, so that writing a default is not a change
+//! and a console edit of a modelled field is drift.
 
-use ucdk_proto::v1::{Job, Service, Size, job, service};
+use prost_reflect::{DynamicMessage, Value as Pb};
+use ucdk_proto::v1::SecretRef;
 use ucdk_provider::{DesiredField, FieldValue, Kind};
 
-use super::read::Extra;
+use super::descriptor::{FieldPlan, KindPlan, Piece, Shape, scalar, scalar_text};
+use super::read::Role;
 
-/// The service port when the author wrote none.
-const DEFAULT_PORT: i64 = 8080;
-const DEFAULT_SIZE: &str = "1000m/512MB";
-const DEFAULT_SCALE: &str = "0..10";
-const DEFAULT_REQUEST_TIMEOUT: &str = "60s0n";
-const DEFAULT_JOB_TIMEOUT: &str = "600s0n";
-
+/// The role name of a service's second node, as `resource.proto` declares it.
 pub const ROLE_PUBLIC: &str = "public";
+/// The role name of a job's second node, as `resource.proto` declares it.
 pub const ROLE_SCHEDULE: &str = "schedule";
 
-fn text(name: &str, value: impl Into<String>) -> DesiredField {
-    DesiredField::new(name, FieldValue::Text(value.into()))
+/// A secret as `[store/]name[@version]`.
+pub fn secret(secret: &SecretRef) -> String {
+    let store = secret
+        .store
+        .as_ref()
+        .map_or_else(String::new, |s| format!("{s}/"));
+    let version = secret
+        .version
+        .as_ref()
+        .map_or_else(String::new, |v| format!("@{v}"));
+    format!("{store}{}{version}", secret.name)
 }
 
-fn int(name: &str, value: i64) -> DesiredField {
-    DesiredField::new(name, FieldValue::Int(value))
-}
-
-pub fn size_field(size: Option<&Size>) -> DesiredField {
-    let rendered = size.map_or_else(
-        || DEFAULT_SIZE.to_owned(),
-        |s| format!("{}m/{}MB", s.cpu_millis, s.memory_mb),
-    );
-    text("size", rendered)
-}
-
-/// A duration as `<seconds>s<nanos>n`, or the default when the author wrote none.
-fn duration(wrote: Option<(i64, i32)>, default: &str) -> String {
-    wrote.map_or_else(|| default.to_owned(), |(s, n)| format!("{s}s{n}n"))
-}
-
-/// The fields of a service's run node, and its public node.
-pub fn service(svc: &Service) -> (Vec<DesiredField>, Extra) {
-    let scale = svc.scale.as_ref().map_or_else(
-        || DEFAULT_SCALE.to_owned(),
-        |s| format!("{}..{}", s.min.unwrap_or(0), s.max),
-    );
-    let timeout = svc.request_timeout.as_ref().map(|d| (d.seconds, d.nanos));
-    let fields = vec![
-        int(
-            "port",
-            if svc.port == 0 {
-                DEFAULT_PORT
-            } else {
-                i64::from(svc.port)
-            },
+/// The field of a scalar or templated plan: the fallback if the field was not written and there
+/// is one, else the value (a template filled in from the message).
+pub fn single(plan: &FieldPlan, written: bool, value: &Pb) -> DesiredField {
+    let lowered = match (&plan.fallback, written, &plan.shape) {
+        (Some(fallback), false, _) => fallback.clone(),
+        (_, _, Shape::Render(pieces)) => FieldValue::Text(
+            value
+                .as_message()
+                .map_or_else(String::new, |m| fill(pieces, m)),
         ),
-        text("scale", scale),
-        text("health_path", svc.health_path.clone()),
-        text(
-            "request_timeout",
-            duration(timeout, DEFAULT_REQUEST_TIMEOUT),
-        ),
-        int("max_concurrency", i64::from(svc.max_concurrency)),
-    ];
-    let public = Extra {
-        role: ROLE_PUBLIC,
-        kind: Kind::new(ROLE_PUBLIC),
-        fields: Vec::new(),
-        wanted: matches!(svc.exposure, Some(service::Exposure::Public(_))),
+        _ => scalar(value),
     };
-    (fields, public)
+    DesiredField::new(&plan.stem, lowered)
 }
 
-/// The fields of a job's run node, and its schedule node.
-pub fn job(job: &Job) -> (Vec<DesiredField>, Extra) {
-    let timeout = job.timeout.as_ref().map(|d| (d.seconds, d.nanos));
-    let fields = vec![
-        int("max_retries", i64::from(job.max_retries.unwrap_or(0))),
-        text("timeout", duration(timeout, DEFAULT_JOB_TIMEOUT)),
-    ];
-    let (schedule_fields, wanted) = match &job.trigger {
-        Some(job::Trigger::Schedule(s)) => (
-            vec![
-                text("cron", s.cron.clone()),
-                text("timezone", s.timezone.clone()),
-            ],
-            true,
-        ),
-        _ => (Vec::new(), false),
-    };
-    let schedule = Extra {
-        role: ROLE_SCHEDULE,
-        kind: Kind::new(ROLE_SCHEDULE),
-        fields: schedule_fields,
-        wanted,
-    };
-    (fields, schedule)
+fn fill(pieces: &[Piece], message: &DynamicMessage) -> String {
+    pieces
+        .iter()
+        .map(|piece| match piece {
+            Piece::Text(text) => text.clone(),
+            Piece::Field(field) => scalar_text(&message.get_field(field)),
+        })
+        .collect()
+}
+
+/// The extra nodes of a type: one per role, wanted when the role's field is written.
+pub fn roles(kind: &KindPlan, body: &DynamicMessage) -> Vec<Role> {
+    kind.roles
+        .iter()
+        .map(|plan| {
+            let wanted = body.has_field(&plan.arm);
+            let arm = body.get_field(&plan.arm);
+            let fields = arm
+                .as_message()
+                .filter(|_| wanted)
+                .map(|m| {
+                    plan.fields
+                        .iter()
+                        .map(|f| DesiredField::new(f.name(), scalar(&m.get_field(f))))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Role {
+                role: plan.role.clone(),
+                kind: Kind::new(&plan.role),
+                fields,
+                wanted,
+            }
+        })
+        .collect()
 }

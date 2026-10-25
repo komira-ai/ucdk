@@ -18,6 +18,10 @@ prost = "0.14"
 prost-build = "0.14"
 # The well-known protobuf types (Duration) the generated code refers to.
 prost-types = "0.14"
+# Reflection over the catalog's descriptors: the planner lowers a resource by reading its message
+# and field options, so a new resource type needs no lowering code. Already in the tree through
+# protox, which re-exports it.
+prost-reflect = "0.16"
 # A protobuf compiler in pure Rust, so no protoc binary is needed to build or test.
 protox = "0.10"
 # Parses the pull-request event file the platform provides to CI.

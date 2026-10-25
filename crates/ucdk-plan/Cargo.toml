@@ -13,6 +13,8 @@ publish.workspace = true
 pure = true
 
 [dependencies]
+prost.workspace = true
+prost-reflect.workspace = true
 sha2.workspace = true
 ucdk-proto = { path = "../ucdk-proto" }
 ucdk-provider = { path = "../ucdk-provider" }
@@ -23,3 +25,5 @@ workspace = true
 [dev-dependencies]
 # The Duration type of the generated request-timeout fields.
 prost-types.workspace = true
+# Compiles the test protos that declare resource types the catalog has never seen.
+protox.workspace = true

@@ -84,6 +84,42 @@ extend google.protobuf.MessageOptions {
   repeated Output exposes = 50002;
 }
 
+// How a field lowers to the fields of the node a resource becomes. The planner reads these
+// from the descriptor, so a new type is a message with these options and a provider that
+// hosts it; no lowering code names a type. A field's SHAPE (its protobuf type) decides what it
+// lowers to:
+//   * `Image`                       the `image` check (digest, platform), one text field
+//   * `repeated string`             one text field per element, `<name>.<index>`
+//   * `map<string, Value>`          one text field per key, `<name>.<key>`, or a reference to
+//                                   another resource's output; a key also in a
+//                                   `map<string, SecretRef>` field of the message is refused
+//   * `map<string, SecretRef>`      one text field per key, `<name>.<key>`, holding
+//                                   `[store/]name[@version]`
+//   * `string`, `uint32`, `int32`, `int64`
+//                                   one text or integer field
+//   * any other message             one text field, built from the `render` template
+// A field not of these shapes, and not marked `unlowered` or `role`, is refused when the
+// catalog is read.
+extend google.protobuf.FieldOptions {
+  // The node field name (or the prefix before `.<index>` or `.<key>`) when it is not the
+  // field's own name: `args` lowers to `arg.0`, `arg.1`.
+  string node_name = 50011;
+  // For a message-typed field: the text of the node field, with `{name}` replaced by the value
+  // of the message's scalar field `name` (an unset one reads as its zero value).
+  string render = 50012;
+  // The value when the field is not written (for an integer: its text, which must parse). A
+  // written zero is a value: only a field with presence (`optional`, a message) can tell it
+  // from "not written", and a field without it takes the fallback on zero.
+  string fallback = 50013;
+  // On a message-typed field: the field is not a field of the run node but a second node of
+  // this role, `<resource>/<role>`. The node is always emitted; it is wanted when the field
+  // is written, and its fields are the scalar fields of the field's message, by name.
+  string role = 50014;
+  // The field changes no node field (the choice it makes is made by a sibling that has a
+  // `role`).
+  bool unlowered = 50015;
+}
+
 // ---- references ----------------------------------------------------------------
 
 // What a produced value IS, never whose attribute it is. 3 and 4 are held
@@ -232,21 +268,22 @@ message Service {
   option (exposes) = HOST;
 
   Image image = 1;
-  uint32 port = 2;
-  repeated string args = 3;
+  uint32 port = 2 [(fallback) = "8080"];
+  repeated string args = 3 [(node_name) = "arg"];
   map<string, Value> env = 4;
-  Size size = 5;
-  Scale scale = 6;
+  Size size = 5 [(render) = "{cpu_millis}m/{memory_mb}MB", (fallback) = "1000m/512MB"];
+  Scale scale = 6 [(render) = "{min}..{max}", (fallback) = "0..10"];
   string health_path = 7;
   // Behaviours, not products: an adapter reports a finding when the
   // cloud's ceiling is lower.
-  google.protobuf.Duration request_timeout = 8;
+  google.protobuf.Duration request_timeout = 8
+      [(render) = "{seconds}s{nanos}n", (fallback) = "60s0n"];
   uint32 max_concurrency = 9;
 
   // "A public URL" is an arm, not a gateway resource.
   oneof exposure {
-    Public public = 10;
-    Internal internal = 11;
+    Public public = 10 [(role) = "public"];
+    Internal internal = 11 [(unlowered) = true];
   }
 
   // Secrets this service receives by reference, keyed by environment
@@ -266,12 +303,12 @@ message Job {
   option (portability) = PORTABLE;
 
   Image image = 1;
-  repeated string args = 2;
-  Size size = 3;
+  repeated string args = 2 [(node_name) = "arg"];
+  Size size = 3 [(render) = "{cpu_millis}m/{memory_mb}MB", (fallback) = "1000m/512MB"];
   // Presence: an explicit 0 ("never retry") is told apart from "not
   // written" (the versioned default).
   optional uint32 max_retries = 4;
-  google.protobuf.Duration timeout = 5;
+  google.protobuf.Duration timeout = 5 [(render) = "{seconds}s{nanos}n", (fallback) = "600s0n"];
   // Plain values only, as on `Service.env`: a literal, a parameter or
   // another resource's output. Secrets go in `secret_env`.
   map<string, Value> env = 6;
@@ -281,8 +318,8 @@ message Job {
   // 8 is held for a `source` that may be a non-image artifact.
 
   oneof trigger {
-    OnDemand on_demand = 10;
-    Schedule schedule = 11;
+    OnDemand on_demand = 10 [(unlowered) = true];
+    Schedule schedule = 11 [(role) = "schedule"];
   }
 
   message OnDemand {}
