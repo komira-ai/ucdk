@@ -125,17 +125,14 @@ pub fn lower_specs(specs: Vec<Spec>) -> Lowered {
             deps,
             wanted: true,
         });
-        nodes.push(PlanNode {
-            node: node(
-                &spec.id,
-                spec.extra.role,
-                spec.extra.kind,
-                spec.extra.fields,
-            ),
-            refs: Vec::new(),
-            deps: BTreeSet::from([run]),
-            wanted: spec.extra.wanted,
-        });
+        for role in spec.roles {
+            nodes.push(PlanNode {
+                node: node(&spec.id, &role.role, role.kind, role.fields),
+                refs: Vec::new(),
+                deps: BTreeSet::from([run.clone()]),
+                wanted: role.wanted,
+            });
+        }
     }
     Lowered { nodes }
 }

@@ -600,7 +600,10 @@ dependencies = [
 name = "ucdk-plan"
 version = "0.0.0"
 dependencies = [
+ "prost",
+ "prost-reflect",
  "prost-types",
+ "protox",
  "sha2",
  "ucdk-proto",
  "ucdk-provider",

@@ -16,8 +16,8 @@ so a reader can check it.
   (`crates/ucdk-proto/proto/ucdk/resource/v1/resource.proto`). Everything that crosses the
   library boundary is protobuf bytes.
 - **Each SDK is generated from those protos.** Adding a resource to a cloud means adding a proto
-  message and a provider implementation; no SDK source is written by hand for it (see 6.4 for
-  the one place in the core that is not data-driven yet).
+  message and a provider implementation; no SDK source is written by hand for it, and neither is
+  any lowering code (see 6.4).
 - **One state per environment.** The ledger of what a run owns is stored in the environment it
   deploys into, not on the machine that runs the tool.
 
@@ -292,20 +292,48 @@ Recommendation: **B**, with one cross-language contract test: for each golden me
 bytes, and decodes the golden bytes back to the same value. If B proves too costly in review, A
 is the fallback and the contract test is unchanged.
 
-### 6.4 What "adding a resource" costs today, honestly
+### 6.4 What "adding a resource" costs
 
-The stated goal is "a proto and a provider implementation, nothing else". The code today does not
-yet meet that: **lowering is hand-written per kind**. `ucdk-plan/src/catalog/read.rs` matches on
-`Body::Service` and `Body::Job` and `render.rs` has one function per kind to turn them into
-`DesiredField`s. A new proto message therefore also needs lowering code in `ucdk-plan` today.
+A proto message with options, and a provider that hosts the kind. Nothing else on the planning
+side. Lowering is driven by the descriptors (`ucdk-plan/src/catalog/descriptor.rs`, built once
+into a `Catalog` from the resource list message, which `ucdk-proto` embeds as `DESCRIPTOR_SET`):
 
-Proposal: make lowering descriptor-driven. A kind's fields are read from the message by
-reflection over the same descriptor the generator uses, using field options in `resource.proto`
-for what is not implied (which fields are references, which are secrets, which form the
-identity). Then a new resource is: a message in a `.proto`, field options on it, and a provider
-that implements the kind. The existing `portability` and `exposes` message options show the
-pattern. This is a prerequisite step of the sequence (section 12, step 4), done on `service` and
-`job` first with the existing plan goldens unchanged as the proof.
+- The kinds are the arms of the `body` oneof of the resource message. An arm's field name is the
+  kind (`service`, `job`) and its message is the type.
+- Message options: `portability` (required; `UNSET` is refused when the catalog is read) and
+  `exposes` (the outputs a `Ref` may ask for).
+- A field's **shape**, its protobuf type, decides how it lowers, so no option says "this is a
+  reference" or "this is a secret": `Image` is the checked image, `repeated string` is one node
+  field per element (`<name>.<index>`), `map<string, Value>` is one node field per key or a
+  reference to another resource's output, `map<string, SecretRef>` is one node field per key
+  holding `[store/]name[@version]` (and a key also in a value map of the same message is refused),
+  `string`, `uint32`, `int32` and `int64` are one field, and any other message is one text field
+  built from a template. A field of any other type is refused when the catalog is read, not
+  skipped. So are options that cannot apply: `render` off a message field, `role` on a map or
+  together with `unlowered` or `node_name`, an integer `fallback` outside its field's type, a role
+  name that is not one lower-case word of letters and digits (or is `run`), and two roles, or two
+  node field names (empty, containing `.`, or equal), that collide.
+- Field options say only what the type cannot: `node_name` (the node field name when it is not the
+  field's), `render` (the template of a message-typed field, `{cpu_millis}m/{memory_mb}MB`),
+  `fallback` (the versioned default written where the author wrote nothing), `role` (on a
+  message-typed arm: a second node `<resource>/<role>`, always emitted, wanted when the arm is
+  written, with the arm message's scalar fields as its fields) and `unlowered` (a choice that
+  changes no node field). A message field that is not written and has no `fallback` renders
+  its template with every placeholder as zero or empty. `service` and `job` use exactly these; their defaults and role names are
+  in `resource.proto`.
+
+The shapes themselves (`Image`, `Value`, `SecretRef`, `Uses`, and the rendering of scalars) are
+code, because they carry semantics a template cannot (the platform check, the output
+reference, the secret text). That code is per shape and shared by every kind; adding a kind does
+not touch it, and adding a shape (a new `Ref` field, say) is a change to the planner that every
+kind then gets. The proof of "no code per kind" is `tests/descriptor_lowering.rs`: a `Queue` type
+declared only in `tests/proto/queue.proto` validates, lowers, plans, hashes and exposes `HOST`,
+while the existing plan-hash goldens and every other plan test run unchanged against the built-in
+catalog, which is read from `resource.proto` the same way.
+
+Not covered, and said so: a kind whose lowering needs a new shape (a bare `Ref` field that is a
+dependency and not a value, a repeated message, a bool) is refused by `Catalog::new` until the
+shape is added; and a provider still has to be written for the kind.
 
 ### 6.5 How an SDK finds and loads the library
 
@@ -329,12 +357,12 @@ output for a fixed small proto (a checked-in fixture) is committed as a golden, 
 change shows up as a diff in review. This follows the repo's existing rule that nothing generated
 is committed (`ucdk-proto/build.rs`).
 
-## 7. Resources as protos (exists, with the gap in 6.4)
+## 7. Resources as protos (exists)
 
 `ucdk.resource.v1` defines `Resource { id, uses, oneof body { Service, Job } }`, `ResourceList`,
 `Ref` (a resource and one of its outputs, standard or named), `Value` (literal, parameter or
 ref), `Image` (a step output or a digest, plus platform), `SecretRef`, and the message options
-`portability` and `exposes`. The lowering produces, for each resource, a `run` node and one extra
+`portability` and `exposes` and the field options of 6.4. The lowering, read from those, produces, for each resource, a `run` node and one extra
 node of the type's other role. Plan hashes are computed over the lowered nodes, so a change to
 lowering is a change to hashes and is gated by goldens.
 
@@ -440,7 +468,7 @@ repository does today is a **proposal**.
 |---|---|---|---|
 | `ucdk-proto` | wire bytes of every message; descriptor shape | golden bytes (`tests/wire.rs`), descriptor tests (`tests/descriptor.rs`); proposed: breaking-change check against the last release's descriptor set | a renumbered or retyped field that silently changes what old callers send |
 | `ucdk-provider` | the model: names, ids, stamps, digests | unit tests; the kit has its own self-test where a deliberately nonconforming stub must fail each scenario (`tests/kit_self_test.rs`) | a kit scenario that cannot fail |
-| `ucdk-plan` | validation findings, lowering, ordering, plan and its hash | unit and golden tests (`tests/catalog.rs`, `graph.rs`, `plan.rs`, `hash_text.rs`) | a changed hash, a missed cycle or dangling reference, a foreign object not refused |
+| `ucdk-plan` | validation findings, lowering, ordering, plan and its hash | unit and golden tests (`tests/catalog.rs`, `descriptor_lowering.rs`, `graph.rs`, `plan.rs`, `hash_text.rs`) | a changed hash, a missed cycle or dangling reference, a foreign object not refused |
 | providers | the trait contract | `kit::run_all` on each provider; fake: fault injection (`fail_at_call`, `read_lag`, `ambiguous_success`, `foreign`, `race_next`, `create_failed`, `converging_reads`) | create that does not stamp atomically, an ambiguous result treated as failure, a delete of a foreign object |
 | `ucdk-ledger` | CAS semantics, record encoding | unit tests; a conformance suite (`tests/conformance.rs`) run on both implementations; file-format and crash tests (`tests/file.rs`) | lost update, stale write accepted, a torn or altered file read as a ledger |
 | `ucdk-engine` | apply, destroy, resume, rollback, outputs, status | integration tests over the fake with call logs (`tests/apply.rs`, `crash.rs`, `delete.rs`, `outputs.rs`, `status.rs`); the crash sweeps and rollback scenarios run on the memory and the file ledger | a mutation before its intent is recorded, a record dropped after a failed read, a delete of an object that is not ours |
@@ -532,8 +560,7 @@ These are the decisions this document cannot make alone:
    runtime.
 4. **The first real cloud's order** after the fake, and the live-account and spend rules for
    section 10.5.
-5. **Descriptor-driven lowering** (6.4) changes where kind knowledge lives; confirm it is wanted
-   before more kinds are added by hand.
+5. **Descriptor-driven lowering** (6.4) is built; kinds are added as a message with options.
 
 ## 12. Implementation sequence (proposal)
 
@@ -547,8 +574,9 @@ lists its tests by name. The first part ends with a working Python SDK; real clo
 3. **File ledger** (done: `FileLedger`, the ledger conformance suite, the engine's crash and rollback
    scenarios run on both ledgers). The CLI `--state` flag moves to the first provider whose
    objects outlive the process (9.1).
-4. **Descriptor-driven lowering** for `service` and `job`, with the existing plan hashes and
-   goldens unchanged as the proof; the kind-specific `match` in `catalog` is gone.
+4. **Descriptor-driven lowering** (done: `Catalog`, read from the descriptors; the existing plan
+   hashes and goldens pass unchanged; the kind-specific `match` in `catalog` is gone, and
+   `tests/descriptor_lowering.rs` lowers a kind declared only in a test proto).
 5. **Read-only status in the engine** (`Request::Status`) and the CLI `status` verb.
 6. **`ucdk-capi`: the `cdylib` and the generated C header.** The per-crate `unsafe` exemption and
    its check in `cargo xtask check`; the eight functions; panic containment; ABI conformance
