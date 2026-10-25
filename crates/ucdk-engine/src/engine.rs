@@ -80,6 +80,21 @@ impl<'a> Engine<'a> {
             .collect()
     }
 
+    /// The wanted nodes of `view` whose kind the provider does not host.
+    fn unhosted(&self, view: &Lowered) -> Vec<(NodePath, Kind)> {
+        view.nodes()
+            .iter()
+            .filter(|n| n.wanted && !self.provider.hosts(n.node.kind()))
+            .map(|n| (n.node.path().clone(), n.node.kind().clone()))
+            .collect()
+    }
+
+    /// The refusal for a view that wants a kind the provider does not host, if it does.
+    pub(crate) fn refuse_unhosted(&self, view: &Lowered) -> Option<Outcome> {
+        let unhosted = self.unhosted(view);
+        (!unhosted.is_empty()).then_some(Outcome::Refused(Refusal::UnhostedKinds(unhosted)))
+    }
+
     /// Handles one request.
     pub fn handle(&mut self, request: Request) -> Outcome {
         match request {
@@ -106,6 +121,9 @@ impl<'a> Engine<'a> {
     }
 
     fn plan_of(&mut self, view: &Lowered) -> Outcome {
+        if let Some(refused) = self.refuse_unhosted(view) {
+            return refused;
+        }
         let embedded = self.unapplicable(view);
         if !embedded.is_empty() {
             return Outcome::Refused(Refusal::UnsupportedStampMode(embedded));
@@ -120,6 +138,9 @@ impl<'a> Engine<'a> {
     }
 
     fn run(&mut self, view: &Lowered, approved: &Plan, hash: &PlanHash, rollback: bool) -> Outcome {
+        if let Some(refused) = self.refuse_unhosted(view) {
+            return refused;
+        }
         if approved.hash() != hash {
             return Outcome::Refused(Refusal::PlanHashMismatch {
                 approved: hash.clone(),

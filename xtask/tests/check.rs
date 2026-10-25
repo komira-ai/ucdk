@@ -23,6 +23,14 @@ fn project(name: &str) -> PathBuf {
         "xtask/src/lib.rs",
         "// SPDX-License-Identifier: Apache-2.0\n",
     );
+    let inherits = "[lints]\nworkspace = true\n";
+    write(&root, "crates/c/Cargo.toml", inherits);
+    write(&root, "xtask/Cargo.toml", inherits);
+    write(
+        &root,
+        "Cargo.toml",
+        "[workspace.lints.rust]\nunsafe_code = \"forbid\"\n",
+    );
     write(
         &root,
         ".github/workflows/ci.yml",
@@ -44,7 +52,7 @@ fn failed(gates: &[xtask::check::Gate]) -> Vec<&str> {
         .collect()
 }
 
-const STATIC_GATES: [&str; 12] = [
+const STATIC_GATES: [&str; 13] = [
     "tools",
     "tree",
     "fmt",
@@ -55,6 +63,7 @@ const STATIC_GATES: [&str; 12] = [
     "main-rs",
     "purity",
     "direction",
+    "unsafe-scope",
     "public-lint tree",
     "public-lint pull request text",
 ];
@@ -105,7 +114,7 @@ fn check_runs_every_gate_even_after_one_fails() {
         "{text}"
     );
     assert!(
-        text.ends_with("== xtask check: 2 of 12 gates failed\n"),
+        text.ends_with("== xtask check: 2 of 13 gates failed\n"),
         "{text}"
     );
     assert_eq!(
@@ -145,7 +154,7 @@ fn a_pull_request_adds_the_sign_off_and_commit_message_gates() {
         ..Fake::default()
     };
     let gates = run(&root, &unsigned, &pull_request("base1"), None);
-    assert_eq!(names(&gates)[12..], ["dco", "commit-message lint"]);
+    assert_eq!(names(&gates)[13..], ["dco", "commit-message lint"]);
     assert_eq!(failed(&gates), ["dco"]);
     assert!(
         unsigned
@@ -181,7 +190,7 @@ fn a_pull_request_without_a_base_or_with_an_unreadable_range_fails() {
     let root = project("check-pr-errors");
     let gates = run(&root, &Fake::default(), &pull_request(""), None);
     assert_eq!(failed(&gates), ["dco"]);
-    assert_eq!(gates[12].1[0].rule, "dco-no-base");
+    assert_eq!(gates[13].1[0].rule, "dco-no-base");
 
     let broken = Fake {
         fail_on: vec!["git log"],
@@ -189,7 +198,7 @@ fn a_pull_request_without_a_base_or_with_an_unreadable_range_fails() {
     };
     let gates = run(&root, &broken, &pull_request("base1"), None);
     assert_eq!(failed(&gates), ["dco"]);
-    assert_eq!(gates[12].1[0].rule, "git");
+    assert_eq!(gates[13].1[0].rule, "git");
 }
 
 #[test]

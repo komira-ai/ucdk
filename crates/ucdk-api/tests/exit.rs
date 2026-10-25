@@ -84,6 +84,7 @@ fn every_refusal_is_refused() {
             now: hash('b'),
         },
         Refusal::UnsupportedStampMode(vec![path("web/run")]),
+        Refusal::UnhostedKinds(vec![(path("web/run"), ucdk_provider::Kind::job())]),
     ];
     for refusal in refusals {
         assert_eq!(

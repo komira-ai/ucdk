@@ -8,8 +8,8 @@ so a reader can check it.
 
 ## 1. The model in one page
 
-- **One core**, written in Rust, built once as a shared library (`libucdk.so` on Linux,
-  `libucdk.dylib` on macOS) with a small, stable C ABI.
+- **One core**, written in Rust, built once as a shared library (`libucdk_capi.so` on Linux,
+  `libucdk_capi.dylib` on macOS) with a small, stable C ABI.
 - **Thin SDKs** in any language (Python and TypeScript first) load that library and call it.
   An SDK holds no planning, ordering, ledger or provider logic.
 - **Resources are protobuf messages**: the `ucdk.resource.v1` protos
@@ -25,9 +25,9 @@ so a reader can check it.
   Python SDK     TypeScript SDK     (other SDKs)          ucdk CLI
        \               |               /                      |
         \              |              /                       |
-         +---- C ABI (libucdk, protobuf bytes) ----+          |
+         +---- C ABI (libucdk_capi, protobuf bytes) ----+          |
                        |                                      |
-                  ucdk-capi  (proposal; the only crate with unsafe code)
+                  ucdk-capi  (the only crate with unsafe code)
                        |                                      |
                   ucdk-api   (protobuf <-> engine values, one exit-code table)
                        |______________________________________|
@@ -61,7 +61,7 @@ pure workspace crates).
 | Host: CLI | `ucdk-cli` | `plan`, `apply`, `destroy` against the fake, as a library (`run(args, &mut World) -> u8`) with a three-line `main.rs` | no |
 | Repository checks | `xtask` | `cargo xtask check`, `coverage`, `fetch` | no |
 | API | `ucdk-api` | the `ucdk.api.v1` protobuf messages for everything that is not a resource (session config, requests, plan, report, findings, error; `StatusRequest` and `StatusResponse` for the engine's read-only status) and the code converting requests to the engine's requests and the engine's outcomes to messages (a plan only goes out: a caller sends the hash, never a plan); the single table from outcome to exit class that both the CLI and the SDKs use | no |
-| C ABI | `ucdk-capi` (**proposal**) | the `cdylib`, the C header, panic containment, buffer ownership. The only crate in the workspace allowed `unsafe` | no |
+| C ABI | `ucdk-capi` | the `cdylib`, the C header (`crates/ucdk-capi/include/ucdk.h`), panic containment, buffer ownership. The only crate in the workspace allowed `unsafe` | no |
 | SDKs | `sdk/python`, `sdk/typescript` (**proposal**) | the loader, the session wrapper, and generated typed templates | n/a |
 | Generator | `ucdk-codegen` (**proposal**) | reads the descriptor set and writes the generated SDK sources | no |
 
@@ -70,7 +70,7 @@ plain enums, `Request` and `Outcome`, "not a wire format: a later shared library
 this seam and nothing else" (`crates/ucdk-engine/src/lib.rs`). The C ABI is that wrapper. It adds
 no behaviour; any behaviour an SDK user can reach is one the CLI test suite can reach.
 
-## 3. The C ABI (proposal)
+## 3. The C ABI (exists: `ucdk-capi`)
 
 ### 3.1 Principles
 
@@ -109,7 +109,7 @@ int32_t ucdk_status      (ucdk_session *s, const uint8_t *req, size_t req_len, u
 void    ucdk_buf_free(ucdk_buf buf);
 ```
 
-That is eight symbols. The five verbs share one signature on purpose: a binding is written once.
+That is nine symbols. The five verbs share one signature on purpose: a binding is written once.
 
 What each verb is, in terms of what exists:
 
@@ -177,7 +177,42 @@ reasoning the engine relies on ("this call returned `Unknown`, so observe"). If 
 provider is wanted later, it is a second, separate ABI with the same buffer conventions, versioned
 independently (section 8.3). It is not a function-pointer table added to this one.
 
-## 4. Memory ownership and error model across the boundary (proposal)
+### 3.6 As built, and what is left
+
+`crates/ucdk-capi` builds as `cdylib` and `rlib` (the tests call the same functions in-process).
+Where the code is more specific than the text above:
+
+- **Nine functions, not eight.** `abi_version`, `session_open`, `session_close`, the five verbs
+  and `buf_free`. The header is hand-maintained; `tests/header.rs` compares it with the exports
+  (names, order, signatures, constants and the buffer layout), and checks that each name
+  resolves, by a linker declaration, to the function of that name.
+- **`ucdk_load_catalog`** takes a `ResourceList` and answers `ucdk.api.v1.CatalogResponse` (the
+  lowered nodes in dependency order with kind, wanted flag and dependencies, or the findings
+  that refuse the list). The other four verbs answer `ucdk.api.v1.Outcome`.
+- **Sessions.** `SessionConfig.provider` is `fake` or `fake-limited`; `ledger_kind` is empty or
+  `memory`, or `file` with `ledger_location`; `cell` is empty (a local cell) or `machine/cell/uid`;
+  `provider_options` must be empty and `credentials` a known value. Anything else the library
+  lacks is `UCDK_ABI`. A ledger that cannot be opened (held by another session, a missing
+  directory) is `UCDK_INTERNAL`.
+- **Handles are numbers.** A `ucdk_session *` carries a number from a counter that only grows,
+  and the library keeps the map from open numbers to sessions. A closed, twice-closed or
+  never-opened handle is refused (`UCDK_INVALID_ARGUMENT`), and stays refused when the allocator
+  reuses an address or a later session opens; nothing reads through the pointer. A close during a
+  call is safe: the call keeps its session alive and, if it holds the last count, drops it inside
+  its `catch_unwind`.
+- **Busy and poisoned.** A call takes the session's lock without waiting (`UCDK_BUSY`). A panic
+  inside a call leaves the lock poisoned, and every later call on that session is `UCDK_PANIC`
+  until it is closed.
+- **Freeing a buffer twice is undefined**, as 4.1 says; it is not detected. A zeroed buffer, or one
+  with a zero length, is ignored.
+- **Not done.** The library does not check an SDK's version: the loader rule of section 5 is the
+  SDK's. The `UCDK_ABI` refusal of a different major (10.3) therefore has no library side yet. A
+  version script is not used (a Rust `cdylib` exports only its `#[no_mangle]` functions, but the
+  built library's symbol table is not read). The built `cdylib` loaded dynamically, Miri and the
+  sanitizer builds of 10.3 are not run: they are after-merge suites, outside the pull-request
+  budget.
+
+## 4. Memory ownership and error model across the boundary (exists)
 
 ### 4.1 Ownership rules
 
@@ -229,7 +264,7 @@ path) and returns `UCDK_PANIC`. Panics in a destructor, and a panic while the pa
 being built, abort the process by Rust's own rule; the tests in 10.3 pin that this path is not
 reachable from the ABI.
 
-## 5. ABI versioning and compatibility (proposal)
+## 5. ABI versioning and compatibility (partly exists)
 
 - **Two numbers.** `ucdk_abi_version()` returns `(major << 16) | minor`. The generated header
   defines `UCDK_ABI_MAJOR` and `UCDK_ABI_MINOR`. Adding a function or a verb bumps the minor;
@@ -267,7 +302,7 @@ no `protoc` and no per-language protobuf toolchain is needed to generate anythin
 
 | Generated, never edited | Hand-written, small and fixed |
 |---|---|
-| message classes and enums for both packages, with docs taken from the proto comments | the C ABI binding: load the library, check the version, call the eight functions |
+| message classes and enums for both packages, with docs taken from the proto comments | the C ABI binding: load the library, check the version, call the nine functions |
 | binary encode and decode for those messages | the `Session` type: `open`, `load_catalog`, `plan`, `apply`, `destroy`, `status`, `close`, and the error type built from the status codes |
 | one typed template per resource kind (the fields of the `Resource.body` oneof): required fields as constructor arguments, optional ones as keywords, oneofs as separate named constructors (an image is `Image.digest(...)` or `Image.step_output(...)`, never a free-form dict) | locating the library (6.5) |
 | typed output references from the `exposes` option: `service.url` is a `Ref`, not a string | async wrapper (TypeScript) |
@@ -367,9 +402,12 @@ node of the type's other role. Plan hashes are computed over the lowered nodes, 
 lowering is a change to hashes and is gated by goldens.
 
 A kind that is only available on one cloud is `CLOUD_BOUND`; the portable ones are mapped by each
-provider. A provider reports which kinds it hosts; the CLI today refuses a plan for a kind the
-chosen provider does not host (`refused: kind job is not hosted by fake-limited`), and the same
-refusal is a response field in the SDKs.
+provider. A provider reports which kinds it hosts (`Provider::hosts`); the engine refuses a plan,
+apply or status whose list wants a kind the chosen provider does not host, before any provider
+call or ledger write (`Refusal::UnhostedKinds`, `ucdk.api.v1.UnhostedKinds`, exit class refused).
+The command line prints it as `refused: kind job is not hosted by fake-limited (nightly/run)` with
+exit code 3, and the C ABI and the SDKs get it as a response field. A destroy is not refused for
+it: it wants nothing.
 
 ## 8. Providers (exists as a Rust trait; loadable providers are a proposal)
 
@@ -474,7 +512,7 @@ repository does today is a **proposal**.
 | `ucdk-engine` | apply, destroy, resume, rollback, outputs, status | integration tests over the fake with call logs (`tests/apply.rs`, `crash.rs`, `delete.rs`, `outputs.rs`, `status.rs`, `read_status.rs`); the crash sweeps and rollback scenarios run on the memory and the file ledger | a mutation before its intent is recorded, a record dropped after a failed read, a delete of an object that is not ours |
 | `ucdk-cli` | arguments, exit codes, plan text, end to end | in-process runs over a `World` (`tests/cli.rs`, `e2e.rs`, `status.rs`, `status_verb.rs`) with plan-text goldens | wrong exit class, a drifting plan text |
 | `ucdk-api` (proposal) | message-to-value conversion in both directions; the outcome-to-exit table | round-trip tests; an exhaustive match so a new `Outcome` or `Refusal` variant fails to compile until it is mapped | a field dropped in conversion, an unmapped outcome |
-| `ucdk-capi` (proposal) | the eight functions, called as C would | see 10.3 | ownership, panic, version and malformed-input defects |
+| `ucdk-capi` | the nine functions, called as C would | see 10.3 | ownership, panic, version and malformed-input defects |
 | SDKs (proposal) | binding and generated code | see 10.4 | an SDK that disagrees with the core or with another SDK |
 | generator (proposal) | output for fixture protos | golden output; compile or import check per language | generated code that does not load or encode wrongly |
 
@@ -488,7 +526,7 @@ without both stamp and record. The same sweep is run again for each real provide
 (8.2). Proposed additions when the lease exists: advance the injected clock past the lease time
 between the two runs and assert the old holder's write is refused as fenced.
 
-### 10.3 ABI conformance (proposal)
+### 10.3 ABI conformance (in-process part exists)
 
 Run from Rust, in-process, against the exported functions (so they count toward coverage) and
 again against the built `cdylib` loaded dynamically:
@@ -578,9 +616,10 @@ lists its tests by name. The first part ends with a working Python SDK; real clo
    hashes and goldens pass unchanged; the kind-specific `match` in `catalog` is gone, and
    `tests/descriptor_lowering.rs` lowers a kind declared only in a test proto).
 5. **Read-only status in the engine** (done: `Request::Status` reads the ledger and observes each recorded and each wanted object, with no ledger write and no provider mutation; `ucdk.api.v1` `StatusRequest` and `StatusResponse`, exit class done or failed with no effect; `ucdk status --provider --input`).
-6. **`ucdk-capi`: the `cdylib` and the generated C header.** The per-crate `unsafe` exemption and
-   its check in `cargo xtask check`; the eight functions; panic containment; ABI conformance
-   tests (10.3); symbol-table check; version rules.
+6. **`ucdk-capi`: the `cdylib` and the C header** (done: `crates/ucdk-capi`; the per-crate `unsafe`
+   exemption and its `unsafe-scope` gate in `cargo xtask check`; the nine functions; panic
+   containment; the in-process ABI conformance tests of 10.3; a test that the checked-in header
+   matches the exports; see 3.6 for what is not done).
 7. **`ucdk-codegen` and `cargo xtask gen-sdk`.** Descriptor reading, a fixture proto with golden
    output, the Python target.
 8. **Python SDK** (`sdk/python`): loader, `Session`, generated templates, platform wheel layout;

@@ -39,6 +39,10 @@ use crate::stamp::{Stamp, StampMode};
 ///   `list_owned` return the extra labels exactly as written (a provider never drops them);
 /// - `observe` with a hint finds the object by its physical id, whatever it is now called.
 pub trait Provider: Send {
+    /// Whether the provider hosts the kind. The engine refuses a run that wants a kind the
+    /// provider does not host, before it reads or writes anything.
+    fn hosts(&self, kind: &Kind) -> bool;
+
     /// Whether the kind's objects carry data. A stateful kind is kept by default.
     fn state_class(&self, kind: &Kind) -> StateClass;
 

@@ -2,7 +2,9 @@
 //! The engine's values to response messages.
 
 use ucdk_engine::{EngineError, Failure, ObjectStatus, Outcome, Refusal, Report, Standing, State};
-use ucdk_plan::{Action, Conflict, ConflictKind, Finding, FindingKind, Plan, Retained, Step};
+use ucdk_plan::{
+    Action, Conflict, ConflictKind, Finding, FindingKind, Lowered, Plan, Retained, Step,
+};
 
 use ucdk_provider::Status;
 
@@ -153,6 +155,15 @@ impl From<&Refusal> for v1::Refusal {
                     now: now.to_string(),
                 })
             }
+            Refusal::UnhostedKinds(list) => v1::refusal::Reason::UnhostedKinds(v1::UnhostedKinds {
+                kinds: list
+                    .iter()
+                    .map(|(path, kind)| v1::UnhostedKind {
+                        path: path.to_string(),
+                        kind: kind.as_str().to_owned(),
+                    })
+                    .collect(),
+            }),
             Refusal::UnsupportedStampMode(paths) => {
                 v1::refusal::Reason::UnsupportedStampMode(v1::UnsupportedStampMode {
                     paths: paths.iter().map(ToString::to_string).collect(),
@@ -276,5 +287,31 @@ impl From<&ObjectStatus> for v1::ObjectStatus {
             standing: standing as i32,
             outputs: object.outputs.clone(),
         }
+    }
+}
+
+/// The response to loading a resource list: the lowered nodes in dependency order, or the
+/// findings that refuse it.
+pub fn catalog_response(lowered: Result<Lowered, Vec<Finding>>) -> v1::CatalogResponse {
+    match lowered {
+        Ok(lowered) => v1::CatalogResponse {
+            nodes: lowered
+                .nodes()
+                .iter()
+                .map(|n| v1::CatalogNode {
+                    path: n.node.path().to_string(),
+                    kind: n.node.kind().as_str().to_owned(),
+                    wanted: n.wanted,
+                    deps: n.deps.iter().map(ToString::to_string).collect(),
+                })
+                .collect(),
+            findings: Vec::new(),
+            exit: v1::ExitClass::Done as i32,
+        },
+        Err(findings) => v1::CatalogResponse {
+            nodes: Vec::new(),
+            findings: findings.iter().map(v1::Finding::from).collect(),
+            exit: v1::ExitClass::Refused as i32,
+        },
     }
 }

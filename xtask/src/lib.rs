@@ -18,6 +18,7 @@ pub mod purity;
 pub mod runlines;
 pub mod spdx;
 pub mod tree;
+pub mod unsafe_scope;
 
 /// One thing a check refuses.
 #[derive(Debug, Clone, PartialEq, Eq)]

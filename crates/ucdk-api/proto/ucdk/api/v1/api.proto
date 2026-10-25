@@ -190,6 +190,28 @@ message Findings {
   repeated Finding findings = 1;
 }
 
+// One node a resource list lowers to.
+message CatalogNode {
+  // `<resource id>/<role>`.
+  string path = 1;
+  string kind = 2;
+  // False for a role the list turns off: the node stays so that its leftovers are found.
+  bool wanted = 3;
+  // The paths of the nodes that must exist first.
+  repeated string deps = 4;
+}
+
+// What loading a resource list found: the nodes in dependency order, or the findings that
+// refuse the list. Reads nothing and changes nothing.
+message CatalogResponse {
+  // Empty when the list is refused.
+  repeated CatalogNode nodes = 1;
+  // Empty when the list lowers.
+  repeated Finding findings = 2;
+  // DONE, or REFUSED when there are findings.
+  ExitClass exit = 3;
+}
+
 message Conflicts {
   repeated Conflict conflicts = 1;
 }
@@ -210,6 +232,16 @@ message UnsupportedStampMode {
   repeated string paths = 1;
 }
 
+// A wanted object whose kind the provider does not host.
+message UnhostedKind {
+  string path = 1;
+  string kind = 2;
+}
+
+message UnhostedKinds {
+  repeated UnhostedKind kinds = 1;
+}
+
 // Why a run was refused whole, before anything was changed.
 message Refusal {
   oneof reason {
@@ -219,6 +251,7 @@ message Refusal {
     PlanHashMismatch plan_hash_mismatch = 4;
     PlanChanged plan_changed = 5;
     UnsupportedStampMode unsupported_stamp_mode = 6;
+    UnhostedKinds unhosted_kinds = 8;
   }
   string message = 7;
 }

@@ -8,7 +8,7 @@ use std::fs;
 use prost::Message as _;
 use ucdk_api::exit_class;
 use ucdk_api::v1::ExitClass;
-use ucdk_engine::{Engine, Mode as EngineMode, Outcome, Report, Request};
+use ucdk_engine::{Engine, Mode as EngineMode, Outcome, Refusal, Report, Request};
 use ucdk_plan::{Lowered, lower};
 use ucdk_proto::v1::ResourceList;
 
@@ -88,48 +88,11 @@ fn check_saved(invocation: &Invocation, approval: &Approval) -> Result<(), Exit>
     }
 }
 
-/// One line for each wanted node whose kind the provider does not host.
-fn unhosted(invocation: &Invocation, desired: &Lowered, world: &mut World) -> BTreeSet<String> {
-    let cloud = world.cloud(invocation.provider);
-    desired
-        .nodes()
-        .iter()
-        .filter(|n| n.wanted && !cloud.hosts(n.node.kind()))
-        .map(|n| {
-            format!(
-                "refused: kind {} is not hosted by {} ({})",
-                n.node.kind().as_str(),
-                invocation.provider.as_str(),
-                n.node.path()
-            )
-        })
-        .collect()
-}
-
 fn execute(invocation: &Invocation, world: &mut World) -> Result<ExitClass, Exit> {
     let desired = read_input(&invocation.input)?;
     if let Verb::Apply(approval) | Verb::Destroy(approval) = &invocation.verb {
         check_saved(invocation, approval)?;
     }
-    if invocation.mode == Mode::Apply {
-        let lines = unhosted(invocation, &desired, world);
-        if !lines.is_empty() {
-            let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
-            // Only a plan, a status or an apply gets here: a destroy plans against no wanted node.
-            let verb = match invocation.verb {
-                Verb::Plan { .. } => "plan",
-                Verb::Status => "status",
-                _ => "apply",
-            };
-            world.out.push_str(&format!(
-                "ucdk {verb}\nprovider: {}\nmode: {}\n{text}",
-                invocation.provider.as_str(),
-                invocation.mode.as_str(),
-            ));
-            return Ok(ExitClass::Refused);
-        }
-    }
-
     let ledger = world.ledger.clone();
     let cell = world.cell.clone();
     let mut engine = Engine::new(world.cloud(invocation.provider), &ledger, cell);
@@ -182,6 +145,32 @@ fn finish(outcome: Outcome, invocation: &Invocation, world: &mut World) -> Resul
             world
                 .out
                 .push_str(&status_text(invocation.provider, &objects));
+            Ok(class)
+        }
+        Outcome::Refused(Refusal::UnhostedKinds(unhosted)) => {
+            // The refusal is the run's whole answer: it goes to standard output, one line for
+            // each node, under the header of the command that was refused.
+            let verb = match invocation.verb {
+                Verb::Plan { .. } => "plan",
+                Verb::Status => "status",
+                Verb::Apply(_) | Verb::Destroy(_) => "apply",
+            };
+            let lines: BTreeSet<String> = unhosted
+                .iter()
+                .map(|(path, kind)| {
+                    format!(
+                        "refused: kind {} is not hosted by {} ({path})",
+                        kind.as_str(),
+                        invocation.provider.as_str()
+                    )
+                })
+                .collect();
+            let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+            world.out.push_str(&format!(
+                "ucdk {verb}\nprovider: {}\nmode: {}\n{text}",
+                invocation.provider.as_str(),
+                invocation.mode.as_str(),
+            ));
             Ok(class)
         }
         Outcome::Refused(why) => Err(Exit {

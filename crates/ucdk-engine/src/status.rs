@@ -16,6 +16,9 @@ impl Engine<'_> {
     /// the provider. It calls `Ledger::read` and `Provider::observe` and nothing else, so it
     /// can run beside a run that is changing the world: it reports what it saw.
     pub(crate) fn status_of(&mut self, desired: &Lowered) -> Outcome {
+        if let Some(refused) = self.refuse_unhosted(desired) {
+            return refused;
+        }
         match self.status_entries(desired) {
             Ok(entries) => Outcome::Status(entries),
             // Nothing is changed by a status, so a failure to read it is never a partial run.

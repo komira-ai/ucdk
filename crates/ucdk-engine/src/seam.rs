@@ -72,6 +72,9 @@ pub enum Refusal {
     /// The file holds nodes of a kind that carries no stamp of its own, which the engine does
     /// not apply yet.
     UnsupportedStampMode(Vec<NodePath>),
+    /// The file wants nodes of a kind the provider does not host: every one is listed with its
+    /// kind. Nothing was read or written.
+    UnhostedKinds(Vec<(NodePath, Kind)>),
 }
 
 impl fmt::Display for Refusal {
@@ -94,6 +97,13 @@ impl fmt::Display for Refusal {
                 short(now),
                 short(approved)
             ),
+            Self::UnhostedKinds(list) => {
+                let list: Vec<String> = list
+                    .iter()
+                    .map(|(path, kind)| format!("kind {} is not hosted ({path})", kind.as_str()))
+                    .collect();
+                write!(f, "refused: {}", list.join("; "))
+            }
             Self::UnsupportedStampMode(paths) => {
                 let list: Vec<String> = paths.iter().map(ToString::to_string).collect();
                 write!(
