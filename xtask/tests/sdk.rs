@@ -146,10 +146,17 @@ fn sdk_test_runs_the_python_tests_in_the_sdk_directory() {
     let fake = Fake::default();
     let (findings, examined) = test(&root, &fake);
     assert!(findings.is_empty());
-    assert_eq!(examined, "2 test files under sdk/python/tests");
+    assert_eq!(
+        examined,
+        "2 test files under sdk/python/tests, against the library built from ucdk-capi"
+    );
+    // The library is built first, and the tests run in the SDK directory.
     assert_eq!(
         *fake.log.borrow(),
-        ["python3 -B -m unittest discover -s tests -t ."]
+        [
+            "cargo build --locked -p ucdk-capi",
+            "python3 -B -m unittest discover -s tests -t ."
+        ]
     );
 
     let failing = Fake {
@@ -159,6 +166,16 @@ fn sdk_test_runs_the_python_tests_in_the_sdk_directory() {
     let (findings, _) = test(&root, &failing);
     assert_eq!(findings.len(), 1);
     assert_eq!(findings[0].rule, "sdk-test");
+
+    // A library that does not build is not followed by tests that cannot load it.
+    let unbuilt = Fake {
+        fail_on: vec!["cargo build"],
+        ..Fake::default()
+    };
+    let (findings, _) = test(&root, &unbuilt);
+    assert_eq!(findings.len(), 1);
+    assert!(findings[0].subject.starts_with("cargo build"));
+    assert_eq!(*unbuilt.log.borrow(), ["cargo build --locked -p ucdk-capi"]);
 }
 
 #[test]
@@ -168,7 +185,10 @@ fn the_sdk_test_verb_reports_a_verdict() {
     let (code, text) = cli::run(&strings(&["sdk-test"]), &|_| None, &Fake::default(), &root);
     assert_eq!(
         (code, text.as_str()),
-        (0, "== sdk-test: ok (1 test file under sdk/python/tests)\n")
+        (
+            0,
+            "== sdk-test: ok (1 test file under sdk/python/tests, against the library built from ucdk-capi)\n"
+        )
     );
     let failing = Fake {
         fail_on: vec!["unittest"],

@@ -62,7 +62,7 @@ pure workspace crates).
 | Repository checks | `xtask` | `cargo xtask check`, `coverage`, `fetch` | no |
 | API | `ucdk-api` | the `ucdk.api.v1` protobuf messages for everything that is not a resource (session config, requests, plan, report, findings, error; `StatusRequest` and `StatusResponse` for the engine's read-only status) and the code converting requests to the engine's requests and the engine's outcomes to messages (a plan only goes out: a caller sends the hash, never a plan); the single table from outcome to exit class that both the CLI and the SDKs use | no |
 | C ABI | `ucdk-capi` | the `cdylib`, the C header (`crates/ucdk-capi/include/ucdk.h`), panic containment, buffer ownership. The only crate in the workspace allowed `unsafe` | no |
-| SDKs | `sdk/python`, `sdk/typescript` (**proposal**) | the loader, the session wrapper, and generated typed templates | n/a |
+| SDKs | `sdk/python` (exists), `sdk/typescript` (**proposal**) | the loader, the session wrapper, and generated typed templates | n/a |
 | Generator | `ucdk-codegen` | compiles the protos in-process, reads the descriptors and returns the generated SDK sources as files (`cargo xtask gen-sdk` writes them; the `sdk-fresh` gate of `check` compares them with the committed ones). Python is the one target | no |
 
 The engine already states the seam this document builds on: the whole surface is one pair of
@@ -206,7 +206,7 @@ Where the code is more specific than the text above:
 - **Freeing a buffer twice is undefined**, as 4.1 says; it is not detected. A zeroed buffer, or one
   with a zero length, is ignored.
 - **Not done.** The library does not check an SDK's version: the loader rule of section 5 is the
-  SDK's. The `UCDK_ABI` refusal of a different major (10.3) therefore has no library side yet. A
+  SDK's (the Python loader does it, `sdk/python/ucdk/_library.py`). The `UCDK_ABI` refusal of a different major (10.3) therefore has no library side yet. A
   version script is not used (a Rust `cdylib` exports only its `#[no_mangle]` functions, but the
   built library's symbol table is not read). The built `cdylib` loaded dynamically, Miri and the
   sanitizer builds of 10.3 are not run: they are after-merge suites, outside the pull-request
@@ -380,7 +380,9 @@ shape is added; and a provider still has to be written for the kind.
   an optional per-platform package for TypeScript, covering Linux x86-64, Linux arm64 and macOS
   arm64. The loader looks in the package directory first.
 - An explicit `library_path` argument to the constructor overrides it (for tests and for a
-  vendored build). There is no environment-variable lookup: configuration is arguments.
+  vendored build). There is no environment-variable lookup: configuration is arguments. (Built for
+  Python: `Library(library_path)` and `Session(config, library_path=...)`; without a path the
+  package's `_lib` directory is searched. The wheel layout itself is step 15.)
 - Python binds with `ctypes` (no compiled extension, so one pure-Python wheel plus a data file per
   platform). TypeScript binds through Node's native addon interface or a pinned FFI package;
   which one is decided in the TypeScript PR, with the rule that it supports running a blocking
@@ -524,7 +526,7 @@ repository does today is a **proposal**.
 | `ucdk-cli` | arguments, exit codes, plan text, end to end | in-process runs over a `World` (`tests/cli.rs`, `e2e.rs`, `status.rs`, `status_verb.rs`) with plan-text goldens | wrong exit class, a drifting plan text |
 | `ucdk-api` (proposal) | message-to-value conversion in both directions; the outcome-to-exit table | round-trip tests; an exhaustive match so a new `Outcome` or `Refusal` variant fails to compile until it is mapped | a field dropped in conversion, an unmapped outcome |
 | `ucdk-capi` | the nine functions, called as C would | see 10.3 | ownership, panic, version and malformed-input defects |
-| SDKs (proposal) | binding and generated code | see 10.4 | an SDK that disagrees with the core or with another SDK |
+| SDKs | binding and generated code | see 10.4 | an SDK that disagrees with the core or with another SDK |
 | generator | output for fixture protos; the committed SDK; a kind added to `resource.proto` | golden output (`tests/generate.rs`, `templates.rs`, `golden_coverage.rs`), the `sdk-fresh` gate, and the fixture's golden loaded and run by the Python tests | generated code that does not load or encode wrongly, a refused-in-silence field type, a stale committed SDK |
 
 ### 10.2 Crash and fault injection
@@ -553,7 +555,7 @@ again against the built `cdylib` loaded dynamically:
 - run under Miri for the ABI crate's pure-Rust path after merge, and under a sanitizer build
   after merge, since neither runs in the pull-request budget.
 
-### 10.4 SDK conformance (Python: wire contract and generated code exist)
+### 10.4 SDK conformance (Python exists; the scenario files are shared with the CLI)
 
 The SDK tests are written in the SDK's language, because the point is to exercise the binding.
 This is an exception to "tests are Rust" in `CONTRIBUTING.md`, scoped to `sdk/<language>` and
@@ -563,17 +565,24 @@ network is used.
 
 - **Wire contract:** every golden message encodes to the same bytes in every SDK and decodes back
   (6.3).
-- **Verb contract:** the same scenario files (a list of resources, a provider config, expected
-  plan hash and report) are run through each SDK and through the CLI; all must give the same
-  plan hash and the same report. The scenarios live in the repo once, as data.
+- **Verb contract:** the same scenario is run through each SDK and through the CLI; all must give
+  the same plan hash, steps, report and status. As built, the scenario's data is what the CLI prints
+  for it (`crates/ucdk-cli/tests/data`, checked by `crates/ucdk-cli/tests/scenario.rs`), and
+  `sdk/python/tests/test_scenarios.py` reads the same files, so there is one set of expected
+  values.
 - **End to end:** each SDK runs `plan`, `apply`, a second `plan` that shows no changes, and
-  `destroy` against the fake provider through the real shared library, then checks the ledger
-  and the fake's call log.
+  `destroy` against the fake provider through the real shared library (`cargo xtask sdk-test`
+  builds `ucdk-capi` first), and checks the refusals come back as data. The Python tests also hold
+  the loader (a wrong major, an older minor, a file that is not the library), a closed session
+  (refused by the SDK, and a closed handle refused by the library) and every status code's
+  exception.
 - **Generation:** the "hand-written part does not grow" check: adding a test-only message to a
   fixture proto changes generated files only.
 - **Coverage:** the 99% line and branch floor applies to the hand-written SDK source in each
-  language, by that language's coverage tool, wired into `cargo xtask coverage`. The tool choice
-  is made in each SDK's first PR.
+  language, by that language's coverage tool, wired into `cargo xtask coverage`. **Not wired for
+  Python yet**: the standard library's `trace` measures lines only (the hand-written Python, 215
+  executable lines, is fully executed by the tests when measured by hand), and a branch tool would
+  be a package to install. Wiring a gate, and choosing the branch tool, is open.
 - Static types: the generated code must pass the language's type checker in strict mode.
 
 ### 10.5 Real clouds
@@ -637,9 +646,11 @@ lists its tests by name. The first part ends with a working Python SDK; real clo
    `sdk-fresh` gate; a fixture proto with golden output; the wire goldens in `sdk/wire-golden`,
    written by `ucdk-api/tests/sdk_golden.rs` and checked by `sdk/python/tests`; the scoped
    Python-test exception, `cargo xtask sdk-test` and the third CI job of step 9 came with it).
-8. **Python SDK** (`sdk/python`): loader, `Session`, generated templates, platform wheel layout;
-   `cargo xtask sdk-test`; the wire contract and verb contract tests. **Milestone: plan, apply,
-   destroy through Python against the fake provider, end to end, through the real library.**
+8. **Python SDK** (`sdk/python`) (done: the loader with the version rule of section 5, `Session`,
+   the errors, the generated templates; `cargo xtask sdk-test` builds the library and runs the
+   wire contract and verb contract tests, which read the CLI's scenario data). **Milestone: plan,
+   apply, destroy through Python against the fake provider, end to end, through the real library.**
+   Not done: the platform wheel layout (step 15) and a Python coverage gate (10.4).
 9. **CONTRIBUTING and CI updates** for SDK tests and the third CI job (done with step 7: the
    scoped exception in `CONTRIBUTING.md`, `cargo xtask sdk-test`, the `sdk` job).
 10. **TypeScript target and SDK** (`sdk/typescript`): generator target, binding decision, worker

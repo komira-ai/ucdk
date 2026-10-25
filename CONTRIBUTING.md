@@ -32,8 +32,9 @@ one verb per job, and you can run the same verbs locally.
 - `cargo xtask gen-sdk`: writes the generated SDK sources (`sdk/python/ucdk/generated`) from the
   protos with `ucdk-codegen`. Run it after changing a `.proto` file or the generator, and commit
   the result; the `sdk-fresh` gate of `check` fails on a stale file.
-- `cargo xtask sdk-test`: runs the Python SDK's tests (`sdk/python/tests`) with the standard
-  library's `unittest`; the pull-request workflow runs it as the `sdk` job.
+- `cargo xtask sdk-test`: builds the shared library (`cargo build -p ucdk-capi`), then runs the
+  Python SDK's tests (`sdk/python/tests`) against it with the standard library's `unittest`; the
+  pull-request workflow runs it as the `sdk` job.
 - `cargo xtask fetch`: installs the pinned tools (cargo-deny, cargo-llvm-cov). Each is a release
   binary downloaded from a fixed URL and verified against a SHA-256 pin, and checked again before
   each use; `check` fetches only cargo-deny and `coverage` only cargo-llvm-cov, and they do this

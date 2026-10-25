@@ -103,27 +103,32 @@ pub fn check_fresh(root: &Path) -> (Vec<Finding>, usize) {
     (findings, files.len())
 }
 
-/// `cargo xtask sdk-test`: the Python tests of the Python SDK, with the standard library's
-/// `unittest` (no package is installed, nothing is fetched). Returns the findings and what was
-/// examined. Python tests are allowed under `sdk/python` and nowhere else.
+/// `cargo xtask sdk-test`: builds the C library the SDK loads, then runs the Python tests of the
+/// Python SDK with the standard library's `unittest` (no package is installed, nothing is
+/// fetched). Returns the findings and what was examined. Python tests are allowed under
+/// `sdk/python` and nowhere else.
 pub fn test(root: &Path, runner: &dyn Runner) -> (Vec<Finding>, String) {
     let dir = root.join(PYTHON_DIR);
     let files = test_files(&dir);
     let examined = format!(
-        "{} test file{} under {PYTHON_DIR}/tests",
+        "{} test file{} under {PYTHON_DIR}/tests, against the library built from ucdk-capi",
         files.len(),
         if files.len() == 1 { "" } else { "s" }
     );
+    // The tests load `target/debug/libucdk_capi.<so|dylib>`; the SDK itself is given its path.
+    let build = Cmd::new("cargo", &["build", "--locked", "-p", "ucdk-capi"], root);
     // `-B`: no bytecode files in the tree.
     let run = Cmd::new(
         "python3",
         &["-B", "-m", "unittest", "discover", "-s", "tests", "-t", "."],
         &dir,
     );
-    match runner.run(&run) {
-        Ok(_) => (Vec::new(), examined),
-        Err(e) => (vec![Finding::new("sdk-test", run.to_string(), e)], examined),
+    for cmd in [build, run] {
+        if let Err(e) = runner.run(&cmd) {
+            return (vec![Finding::new("sdk-test", cmd.to_string(), e)], examined);
+        }
     }
+    (Vec::new(), examined)
 }
 
 /// The `test_*.py` files of the SDK's tests directory.
