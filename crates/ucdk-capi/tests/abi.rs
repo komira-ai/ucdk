@@ -700,3 +700,73 @@ fn an_apply_over_a_foreign_object_is_refused_as_data() {
     );
     close(session);
 }
+
+fn job_of(id: &str) -> ucdk_proto::v1::Resource {
+    let mut resource = service_of(id, 80);
+    let Some(ucdk_proto::v1::resource::Body::Service(service)) = resource.body.take() else {
+        panic!("a service");
+    };
+    resource.body = Some(ucdk_proto::v1::resource::Body::Job(ucdk_proto::v1::Job {
+        image: service.image,
+        ..ucdk_proto::v1::Job::default()
+    }));
+    resource
+}
+
+/// Proves: a list holding a kind the provider does not host is refused whole through the ABI,
+/// for plan and for apply under a hash a hosting provider gave it, and nothing is created, not
+/// even the hosted resource that sorts first. Catches an apply that creates the hosted objects
+/// and stops at the unhosted one.
+#[test]
+fn a_list_with_an_unhosted_kind_is_refused_before_any_write() {
+    // `a-svc` is hosted and sorts before `z-job`, which `fake-limited` does not host.
+    let list = list_of(vec![service_of("a-svc", 80), job_of("z-job")]);
+    let mut hosting = Both::new();
+    let hash = planned_hash(&hosting.plan(&list, Mode::Apply));
+    close(hosting.session);
+
+    let mut config = fake_config();
+    config.provider = "fake-limited".to_owned();
+    let opened = open(&config);
+    assert_eq!(opened.status, OK);
+    let session = opened.session;
+    let refused = |reply: Reply| {
+        assert_eq!(reply.status, OK);
+        let answer = Outcome::decode(reply.bytes.as_slice()).expect("an outcome");
+        assert_eq!(answer.exit, ExitClass::Refused as i32, "{answer:?}");
+        match answer.result {
+            Some(outcome::Result::Refused(why)) => match why.reason {
+                Some(v1::refusal::Reason::UnhostedKinds(kinds)) => kinds,
+                other => panic!("not an unhosted refusal: {other:?}"),
+            },
+            other => panic!("not refused: {other:?}"),
+        }
+    };
+    let plan = PlanRequest {
+        resources: Some(list.clone()),
+        mode: Mode::Apply as i32,
+    };
+    let kinds = refused(call(ucdk_plan, session, &plan.encode_to_vec()));
+    assert_eq!(kinds.kinds.len(), 1);
+    assert_eq!(kinds.kinds[0].path, "z-job/run");
+    assert_eq!(kinds.kinds[0].kind, "job");
+
+    let apply = ApplyRequest {
+        resources: Some(list),
+        plan_hash: hash,
+        rollback: false,
+    };
+    refused(call(ucdk_apply, session, &apply.encode_to_vec()));
+
+    let only_hosted = StatusRequest {
+        resources: Some(list_of(vec![service_of("a-svc", 80)])),
+    };
+    let reply = call(ucdk_status, session, &only_hosted.encode_to_vec());
+    let answer = Outcome::decode(reply.bytes.as_slice()).expect("an outcome");
+    assert_eq!(
+        standings(&answer),
+        [v1::Standing::NotApplied as i32],
+        "nothing was created"
+    );
+    close(session);
+}

@@ -196,6 +196,23 @@ fn a_refusal_names_its_reason_and_keeps_its_text() {
         panic!("wrong reason");
     };
     assert_eq!(m.paths, ["a/run", "b/run"]);
+
+    let wire = refusal_of(&Refusal::UnhostedKinds(vec![(
+        path("nightly/run"),
+        ucdk_provider::Kind::job(),
+    )]));
+    let Some(refusal::Reason::UnhostedKinds(m)) = wire.reason else {
+        panic!("wrong reason");
+    };
+    assert_eq!(m.kinds.len(), 1);
+    assert_eq!(
+        (m.kinds[0].path.as_str(), m.kinds[0].kind.as_str()),
+        ("nightly/run", "job")
+    );
+    assert_eq!(
+        wire.message,
+        "refused: kind job is not hosted (nightly/run)"
+    );
 }
 
 #[test]

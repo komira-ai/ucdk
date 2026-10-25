@@ -234,6 +234,10 @@ struct Relapse<'f> {
 }
 
 impl Provider for Relapse<'_> {
+    fn hosts(&self, kind: &Kind) -> bool {
+        Provider::hosts(&*self.fake, kind)
+    }
+
     fn state_class(&self, kind: &Kind) -> StateClass {
         self.fake.state_class(kind)
     }

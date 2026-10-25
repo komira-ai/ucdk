@@ -155,6 +155,15 @@ impl From<&Refusal> for v1::Refusal {
                     now: now.to_string(),
                 })
             }
+            Refusal::UnhostedKinds(list) => v1::refusal::Reason::UnhostedKinds(v1::UnhostedKinds {
+                kinds: list
+                    .iter()
+                    .map(|(path, kind)| v1::UnhostedKind {
+                        path: path.to_string(),
+                        kind: kind.as_str().to_owned(),
+                    })
+                    .collect(),
+            }),
             Refusal::UnsupportedStampMode(paths) => {
                 v1::refusal::Reason::UnsupportedStampMode(v1::UnsupportedStampMode {
                     paths: paths.iter().map(ToString::to_string).collect(),

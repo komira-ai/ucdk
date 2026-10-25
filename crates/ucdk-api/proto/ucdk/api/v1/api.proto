@@ -232,6 +232,16 @@ message UnsupportedStampMode {
   repeated string paths = 1;
 }
 
+// A wanted object whose kind the provider does not host.
+message UnhostedKind {
+  string path = 1;
+  string kind = 2;
+}
+
+message UnhostedKinds {
+  repeated UnhostedKind kinds = 1;
+}
+
 // Why a run was refused whole, before anything was changed.
 message Refusal {
   oneof reason {
@@ -241,6 +251,7 @@ message Refusal {
     PlanHashMismatch plan_hash_mismatch = 4;
     PlanChanged plan_changed = 5;
     UnsupportedStampMode unsupported_stamp_mode = 6;
+    UnhostedKinds unhosted_kinds = 8;
   }
   string message = 7;
 }

@@ -178,6 +178,10 @@ impl Stub {
 }
 
 impl Provider for Stub {
+    fn hosts(&self, kind: &Kind) -> bool {
+        kind != &Kind::job() || self.flaws.hosts_unsupported
+    }
+
     fn state_class(&self, _: &Kind) -> StateClass {
         if self.flaws.declarations_drift && !self.objects.is_empty() {
             StateClass::Stateful

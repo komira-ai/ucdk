@@ -417,6 +417,10 @@ impl Fake {
 }
 
 impl Provider for Fake {
+    fn hosts(&self, kind: &Kind) -> bool {
+        Fake::hosts(self, kind)
+    }
+
     fn state_class(&self, kind: &Kind) -> StateClass {
         if self.config.stateful.contains(kind) {
             StateClass::Stateful
