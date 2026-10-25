@@ -155,6 +155,11 @@ export const ErrorCode = {
   OUTPUT_UNKNOWN: 7,
   /** The request was not the expected message, or named a hash that is not one. */
   INVALID_REQUEST: 8,
+  /**
+   * The run's ledger lease lapsed or was taken over, so the ledger refused its write and the
+   * run stopped. The next run resolves what this one left.
+   */
+  LEASE_LOST: 9,
 } as const;
 export type ErrorCode = (typeof ErrorCode)[keyof typeof ErrorCode];
 
@@ -1326,6 +1331,70 @@ export class UnhostedKinds extends wire.Message {
   }
 }
 
+export interface LeaseHeldInit {
+  /** The identity the other run took the lease as. */
+  holder?: string;
+  /**
+   * At most this many milliseconds until the lease can be taken, if that run died without
+   * releasing it.
+   */
+  remainingMs?: bigint;
+}
+
+/**
+ * Another run holds the ledger's lease. Nothing was read or written; try again when that run
+ * has ended.
+ */
+export class LeaseHeld extends wire.Message {
+  /** The identity the other run took the lease as. */
+  holder: string;
+  /**
+   * At most this many milliseconds until the lease can be taken, if that run died without
+   * releasing it.
+   */
+  remainingMs: bigint;
+
+  constructor(init: LeaseHeldInit = {}) {
+    super();
+    this.holder = init.holder ?? "";
+    this.remainingMs = init.remainingMs ?? 0n;
+  }
+
+  protected encodeInto(out: wire.Out): void {
+    if (this.holder !== "") {
+      wire.putString(out, 1, this.holder);
+    }
+    if (this.remainingMs !== 0n) {
+      wire.putVarintField(out, 2, this.remainingMs);
+    }
+  }
+
+  /** Reads the fields of `data` into this message; unknown fields are dropped. */
+  mergeFrom(data: Uint8Array): void {
+    for (const { number, value } of wire.readFields(data)) {
+      switch (number) {
+        case 1: {
+          this.holder = wire.str(value);
+          break;
+        }
+        case 2: {
+          this.remainingMs = wire.uint64(value);
+          break;
+        }
+        default:
+          break;
+      }
+    }
+  }
+
+  /** The message the bytes hold; unknown fields are dropped. */
+  static decode(data: Uint8Array): LeaseHeld {
+    const message = new LeaseHeld();
+    message.mergeFrom(data);
+    return message;
+  }
+}
+
 export interface RefusalInit {
   findings?: Findings;
   conflicts?: Conflicts;
@@ -1335,6 +1404,7 @@ export interface RefusalInit {
   unsupportedStampMode?: UnsupportedStampMode;
   message?: string;
   unhostedKinds?: UnhostedKinds;
+  leaseHeld?: LeaseHeld;
 }
 
 /** Why a run was refused whole, before anything was changed. */
@@ -1347,6 +1417,7 @@ export class Refusal extends wire.Message {
   unsupportedStampMode: UnsupportedStampMode | undefined;
   message: string;
   unhostedKinds: UnhostedKinds | undefined;
+  leaseHeld: LeaseHeld | undefined;
 
   constructor(init: RefusalInit = {}) {
     super();
@@ -1358,11 +1429,12 @@ export class Refusal extends wire.Message {
     this.unsupportedStampMode = init.unsupportedStampMode;
     this.message = init.message ?? "";
     this.unhostedKinds = init.unhostedKinds;
+    this.leaseHeld = init.leaseHeld;
   }
 
   /** The name of the arm of `reason` that is set, or undefined. */
-  whichReason(): "findings" | "conflicts" | "emptyScope" | "planHashMismatch" | "planChanged" | "unsupportedStampMode" | "unhostedKinds" | undefined {
-    return wire.which(this, ["findings", "conflicts", "emptyScope", "planHashMismatch", "planChanged", "unsupportedStampMode", "unhostedKinds"]);
+  whichReason(): "findings" | "conflicts" | "emptyScope" | "planHashMismatch" | "planChanged" | "unsupportedStampMode" | "unhostedKinds" | "leaseHeld" | undefined {
+    return wire.which(this, ["findings", "conflicts", "emptyScope", "planHashMismatch", "planChanged", "unsupportedStampMode", "unhostedKinds", "leaseHeld"]);
   }
 
   private clearReason(): void {
@@ -1373,6 +1445,7 @@ export class Refusal extends wire.Message {
     this.planChanged = undefined;
     this.unsupportedStampMode = undefined;
     this.unhostedKinds = undefined;
+    this.leaseHeld = undefined;
   }
 
   static findings(findings: Findings, fields: RefusalInit = {}): Refusal {
@@ -1403,6 +1476,10 @@ export class Refusal extends wire.Message {
     return new Refusal({ ...fields, unhostedKinds });
   }
 
+  static leaseHeld(holder: string, remainingMs: bigint, fields: RefusalInit = {}): Refusal {
+    return new Refusal({ ...fields, leaseHeld: new LeaseHeld({ holder, remainingMs }) });
+  }
+
   protected encodeInto(out: wire.Out): void {
     this.whichReason();
     if (this.findings !== undefined) {
@@ -1419,6 +1496,8 @@ export class Refusal extends wire.Message {
       wire.putMessage(out, 6, this.unsupportedStampMode);
     } else if (this.unhostedKinds !== undefined) {
       wire.putMessage(out, 8, this.unhostedKinds);
+    } else if (this.leaseHeld !== undefined) {
+      wire.putMessage(out, 9, this.leaseHeld);
     }
     if (this.message !== "") {
       wire.putString(out, 7, this.message);
@@ -1487,6 +1566,14 @@ export class Refusal extends wire.Message {
           const message = current ?? new UnhostedKinds();
           message.mergeFrom(wire.bytesOf(value));
           this.unhostedKinds = message;
+          break;
+        }
+        case 9: {
+          const current = this.leaseHeld;
+          this.clearReason();
+          const message = current ?? new LeaseHeld();
+          message.mergeFrom(wire.bytesOf(value));
+          this.leaseHeld = message;
           break;
         }
         default:

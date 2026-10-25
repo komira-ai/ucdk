@@ -9,7 +9,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -19,6 +19,7 @@ import { Internal } from "../src/errors.ts";
 import {
   DATA,
   IMAGE,
+  LEDGER_GOLDEN,
   objectsOf,
   openSession,
   pair,
@@ -228,4 +229,41 @@ test("a ledger in a directory that is not there cannot be opened", () =>
       openSession("fake", { ledgerKind: "file", ledgerLocation: join(directory, "no", "ledger") }),
       Internal,
     );
+  }));
+
+// ---- the ledger's lease --------------------------------------------------------------------
+
+test("an apply on a ledger another holder has leased is refused as data", () =>
+  inTemporaryDirectory(async (directory) => {
+    const wanted = pair();
+    const location = join(directory, "ledger");
+    copyFileSync(join(LEDGER_GOLDEN, "leased.ucdk"), location);
+    await using session = await openSession("fake", { ledgerKind: "file", ledgerLocation: location });
+    // Reading is not writing: the plan and the status are answered.
+    const plan = await session.plan(wanted);
+    assert.equal(plan.whichResult(), "planned");
+    assert.equal((await session.status(wanted)).exit, api.ExitClass.DONE);
+    const applied = await session.apply(wanted, plan.planned?.hash as string);
+    assert.equal(applied.exit, api.ExitClass.REFUSED);
+    assert.equal(applied.whichResult(), "refused");
+    assert.equal(applied.refused?.whichReason(), "leaseHeld");
+    assert.equal(applied.refused?.leaseHeld?.holder, "ci-7");
+    assert.ok((applied.refused?.leaseHeld?.remainingMs ?? 0n) > 0n);
+    assert.match(applied.refused?.message ?? "", /leased to ci-7/);
+    // Nothing was created or recorded.
+    const status = await session.status(wanted);
+    assert.ok(status.status?.objects.every((o) => o.record === undefined && o.live === undefined));
+  }));
+
+test("an apply on a ledger whose holder lapsed takes over and goes through", () =>
+  inTemporaryDirectory(async (directory) => {
+    const wanted = pair();
+    const location = join(directory, "ledger");
+    copyFileSync(join(LEDGER_GOLDEN, "lapsed.ucdk"), location);
+    await using session = await openSession("fake", { ledgerKind: "file", ledgerLocation: location });
+    const plan = await session.plan(wanted);
+    const applied = await session.apply(wanted, plan.planned?.hash as string);
+    assert.equal(applied.exit, api.ExitClass.DONE);
+    assert.equal(applied.whichResult(), "done");
+    assert.deepEqual(applied.done?.created, readReport("apply_fake.txt").created);
   }));

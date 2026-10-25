@@ -12,6 +12,7 @@ use common::{
     open_bytes, open_fake, service_of, take,
 };
 use prost::Message as _;
+use std::time::Duration;
 use ucdk_api::catalog_response;
 use ucdk_api::v1::{
     self, ApplyRequest, CatalogResponse, DestroyRequest, ErrorCode, ExitClass, Mode, Outcome,
@@ -23,7 +24,8 @@ use ucdk_capi::{
     ucdk_destroy, ucdk_load_catalog, ucdk_plan, ucdk_session_close, ucdk_session_open, ucdk_status,
 };
 use ucdk_engine::{Engine, Request};
-use ucdk_ledger::MemoryLedger;
+
+use ucdk_ledger::{FileLedger, Ledger as _, ManualClock, MemoryLedger};
 use ucdk_plan::lower;
 use ucdk_proto::v1::ResourceList;
 use ucdk_provider::kit;
@@ -769,6 +771,84 @@ fn a_list_with_an_unhosted_kind_is_refused_before_any_write() {
         "nothing was created"
     );
     close(session);
+}
+
+/// A file ledger in a fresh directory of its own that `holder` leased for `ttl` before the
+/// session opens it, on `clock`.
+fn file_ledger_leased_by(
+    name: &str,
+    holder: &str,
+    ttl: Duration,
+    clock: Arc<dyn ucdk_ledger::Clock>,
+) -> String {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let location = dir.join("ledger").to_string_lossy().into_owned();
+    let ledger = FileLedger::open_with_clock(&location, clock).expect("open");
+    ledger.acquire(holder, ttl).expect("acquire");
+    location
+}
+
+/// The outcome of planning `list` and applying it under that plan's hash through a session on
+/// the file ledger at `location`.
+fn apply_through_the_abi(location: &str, list: &ResourceList) -> Outcome {
+    let mut config = fake_config();
+    config.ledger_kind = "file".to_owned();
+    config.ledger_location = location.to_owned();
+    let opened = open(&config);
+    assert_eq!(opened.status, OK);
+    let session = opened.session;
+    let plan = PlanRequest {
+        resources: Some(list.clone()),
+        mode: Mode::Apply as i32,
+    };
+    let planned = call(ucdk_plan, session, &plan.encode_to_vec());
+    let hash = planned_hash(&Outcome::decode(planned.bytes.as_slice()).expect("an outcome"));
+    let apply = ApplyRequest {
+        resources: Some(list.clone()),
+        plan_hash: hash,
+        rollback: false,
+    };
+    let reply = call(ucdk_apply, session, &apply.encode_to_vec());
+    assert_eq!(reply.status, OK);
+    close(session);
+    Outcome::decode(reply.bytes.as_slice()).expect("an outcome")
+}
+
+/// Proves: an apply through the ABI on a ledger whose lease another holder has is refused as
+/// data (the refusal names the holder, the exit class is REFUSED), the same as the command
+/// line's, and creates nothing; once that holder's lease has lapsed, the same call is let in.
+/// Catches an ABI that reports the lease as a status code, or one that ignores a lease on file.
+#[test]
+fn an_apply_on_a_ledger_leased_to_another_holder_is_refused_as_data_until_it_lapses() {
+    let list = list_of(vec![service_of("a-svc", 80)]);
+    let live = file_ledger_leased_by(
+        "abi-leased",
+        "ci-7",
+        Duration::from_secs(3600),
+        Arc::new(ucdk_ledger::SystemClock) as Arc<dyn ucdk_ledger::Clock>,
+    );
+    let answer = apply_through_the_abi(&live, &list);
+    assert_eq!(answer.exit, ExitClass::Refused as i32, "{answer:?}");
+    let Some(outcome::Result::Refused(why)) = answer.result else {
+        panic!("not refused: {answer:?}");
+    };
+    let Some(v1::refusal::Reason::LeaseHeld(held)) = why.reason else {
+        panic!("not a lease refusal: {why:?}");
+    };
+    assert_eq!(held.holder, "ci-7");
+    assert!(held.remaining_ms > 0);
+
+    // A holder that died long ago: its lease was granted in 1970 by a clock at 1 s.
+    let dead = file_ledger_leased_by(
+        "abi-lapsed",
+        "ci-7",
+        Duration::from_secs(60),
+        Arc::new(ManualClock::at(1_000)),
+    );
+    let answer = apply_through_the_abi(&dead, &list);
+    assert_eq!(answer.exit, ExitClass::Done as i32, "{answer:?}");
 }
 
 /// Proves: a handle stays refused after it is closed even when a later session is opened, so a

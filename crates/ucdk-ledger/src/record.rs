@@ -3,7 +3,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::time::Duration;
 
+use crate::lease::{Fence, Lease, LeaseError};
 use ucdk_provider::{Kind, NodePath, OwnerLabel, PhysicalId, Produced};
 
 /// Who owns a node, as a path: every segment of the node's path above its role. For `app/run`
@@ -169,6 +171,14 @@ pub enum LedgerError {
     Stale,
     /// The ledger could not be reached: nothing was written.
     Unavailable(String),
+    /// The fence is not the current lease's: a newer holder has been granted the lease, or the
+    /// lease was released. Nothing was written, and the holder must stop.
+    Fenced,
+    /// The fence is the current lease's, but the lease has lapsed. Nothing was written; the
+    /// holder acquires again, and gets a new fence, before it writes.
+    LeaseLapsed,
+    /// A write without a fence while another holder's lease is live. Nothing was written.
+    Leased { holder: String },
 }
 
 impl fmt::Display for LedgerError {
@@ -176,18 +186,47 @@ impl fmt::Display for LedgerError {
         match self {
             Self::Stale => f.write_str("the ledger changed since it was read"),
             Self::Unavailable(why) => write!(f, "the ledger is unavailable: {why}"),
+            Self::Fenced => f.write_str(
+                "the lease was taken over or released: this writer is fenced out of the ledger",
+            ),
+            Self::LeaseLapsed => f.write_str("the lease lapsed before this write"),
+            Self::Leased { holder } => write!(f, "the ledger is leased to {holder}"),
         }
     }
 }
 
 impl std::error::Error for LedgerError {}
 
-/// A ledger: one document with compare-and-swap writes. Methods take `&self` so that two
-/// engines can hold one ledger; an implementation does its own locking.
+/// A ledger: one document with compare-and-swap writes and a lease. Methods take `&self` so that
+/// two engines can hold one ledger; an implementation does its own locking.
+///
+/// A writer that takes part in the lease acquires it and writes with [`Ledger::write_fenced`];
+/// the lease and its fence are in [`crate::lease`]. [`Ledger::write`] is for a document nobody
+/// leases: it is refused while another holder's lease is live.
 pub trait Ledger: Send + Sync {
     /// The document as it is now.
     fn read(&self) -> Result<Snapshot, LedgerError>;
 
-    /// Applies `change` if the document is still at `expected`, and returns the new token.
+    /// Applies `change` if the document is still at `expected` and no lease is live, and
+    /// returns the new token.
     fn write(&self, expected: &Token, change: Change) -> Result<Token, LedgerError>;
+
+    /// Applies `change` if the document is still at `expected` and `fence` is the live lease's.
+    fn write_fenced(
+        &self,
+        fence: Fence,
+        expected: &Token,
+        change: Change,
+    ) -> Result<Token, LedgerError>;
+
+    /// Grants the lease to `holder` for `ttl`, with a fence higher than every earlier grant's.
+    /// It does not change the document's token.
+    fn acquire(&self, holder: &str, ttl: Duration) -> Result<Lease, LeaseError>;
+
+    /// Extends the lease of `fence` to `ttl` from now. Refused when the fence is not the current
+    /// one or the lease has lapsed.
+    fn renew(&self, fence: Fence, ttl: Duration) -> Result<Lease, LedgerError>;
+
+    /// Gives the lease of `fence` back, so another holder may take it at once.
+    fn release(&self, fence: Fence) -> Result<(), LedgerError>;
 }

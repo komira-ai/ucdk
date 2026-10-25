@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The file ledger: the document in one file, replaced atomically on every write.
 
-use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
-use ucdk_provider::NodePath;
-
+use crate::doc::Doc;
 use crate::format::{self, FormatError, MAJOR, MINOR};
-use crate::record::{Change, Ledger, LedgerError, Record, Snapshot, Token};
+use crate::lease::{Clock, Fence, Lease, LeaseError, SystemClock};
+use crate::record::{Change, Ledger, LedgerError, Snapshot, Token};
 
 /// Why a file ledger was not opened. Nothing is written in any of these cases.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,14 +64,14 @@ struct Document {
     /// The format minor the file was written with. A build refuses to rewrite a file with a
     /// newer minor than its own, because it would drop the tags it does not know.
     minor: u32,
-    version: u64,
-    records: BTreeMap<NodePath, Record>,
+    doc: Doc,
 }
 
 #[derive(Debug)]
 struct Inner {
     path: PathBuf,
     document: Mutex<Document>,
+    clock: Arc<dyn Clock>,
     /// Holds the advisory lock on `<path>.lock` until the last handle is dropped.
     _lock: File,
 }
@@ -81,7 +81,10 @@ struct Inner {
 ///
 /// Opening takes an advisory lock, so a second open of the same path (here or in another
 /// process) is refused while the first handle, or a clone of it, is alive. The lock is not a
-/// lease: it does not expire, and it does not stop a process that ignores it. A write is
+/// lease: it does not expire, and it does not stop a process that ignores it. The lease is in the
+/// document (see [`crate::lease`]): it expires, and a write under a fence that is not the
+/// current one is refused, so a writer that lost the lease cannot write whatever it holds. A
+/// lease change is a write of the file too, but does not move the version. A write is
 /// whole-document: the new document is written to a file in the same directory and flushed,
 /// that file replaces the ledger by rename, and the directory is flushed, so a reader sees the
 /// old document or the new one and never a mixture. The file is readable by its owner only.
@@ -121,8 +124,7 @@ fn load(path: &Path) -> Result<Option<Document>, OpenError> {
     match format::decode(&bytes) {
         Ok(parsed) => Ok(Some(Document {
             minor: parsed.minor,
-            version: parsed.version,
-            records: parsed.records,
+            doc: parsed.doc,
         })),
         Err(FormatError::Corrupt { line, why }) => Err(OpenError::Corrupt {
             path: path.to_owned(),
@@ -146,6 +148,18 @@ impl FileLedger {
     /// [`OpenError`] when the ledger is open elsewhere, the file is corrupt or newer than this
     /// build reads, or the file system refuses.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, OpenError> {
+        Self::open_with_clock(path, Arc::new(SystemClock))
+    }
+
+    /// [`FileLedger::open`], with leases timed by `clock`.
+    ///
+    /// # Errors
+    ///
+    /// As [`FileLedger::open`].
+    pub fn open_with_clock(
+        path: impl AsRef<Path>,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self, OpenError> {
         let path = path.as_ref().to_owned();
         let lock_path = sibling(&path, ".lock");
         let lock = private_file()
@@ -166,13 +180,13 @@ impl FileLedger {
         }
         let document = load(&path)?.unwrap_or_else(|| Document {
             minor: MINOR,
-            version: 0,
-            records: BTreeMap::new(),
+            doc: Doc::default(),
         });
         Ok(Self {
             inner: Arc::new(Inner {
                 path,
                 document: Mutex::new(document),
+                clock,
                 _lock: lock,
             }),
         })
@@ -195,63 +209,108 @@ impl FileLedger {
     }
 }
 
-impl Ledger for FileLedger {
-    fn read(&self) -> Result<Snapshot, LedgerError> {
-        let document = self
-            .inner
+impl FileLedger {
+    fn document(&self) -> MutexGuard<'_, Document> {
+        self.inner
             .document
             .lock()
-            .expect("the lock is never poisoned");
-        Ok(Snapshot {
-            token: Token(document.version),
-            records: document.records.clone(),
-        })
+            .expect("the lock is never poisoned")
     }
 
-    fn write(&self, expected: &Token, change: Change) -> Result<Token, LedgerError> {
-        let mut document = self
-            .inner
-            .document
-            .lock()
-            .expect("the lock is never poisoned");
-        if expected.0 != document.version {
-            return Err(LedgerError::Stale);
-        }
+    /// Stores `next` as the document, if the file can be rewritten by this build, and keeps it
+    /// in `document` once it is stored. On failure the write may or may not have landed: take
+    /// the file as the truth, when there is one and it can be read, so the next write is
+    /// compared against what is there.
+    fn persist(&self, document: &mut Document, next: Doc) -> Result<(), String> {
         if document.minor > MINOR {
-            return Err(LedgerError::Unavailable(format!(
+            return Err(format!(
                 "{}: written by a newer build (format {MAJOR}.{}, this build writes {MAJOR}.{MINOR}); \
                  rewriting it would drop what this build does not know",
                 self.inner.path.display(),
                 document.minor
-            )));
+            ));
         }
-        let mut records = document.records.clone();
-        match change {
-            Change::Put(record) => {
-                records.insert(record.path.clone(), record);
-            }
-            Change::Remove(path) => {
-                records.remove(&path);
-            }
-        }
-        let version = document.version + 1;
-        match self.store(&format::encode(version, &records)) {
+        match self.store(&format::encode(&next)) {
             Ok(()) => {
-                document.version = version;
-                document.records = records;
-                Ok(Token(version))
+                document.doc = next;
+                Ok(())
             }
             Err(e) => {
-                // The rename may have landed before the failure. Take the file as the truth,
-                // when there is one and it can be read, so the next write is compared against what is there.
                 if let Ok(Some(disk)) = load(&self.inner.path) {
                     *document = disk;
                 }
-                Err(LedgerError::Unavailable(format!(
+                Err(format!(
                     "{}: the write failed ({e}); it may or may not have landed",
                     self.inner.path.display()
-                )))
+                ))
             }
         }
+    }
+
+    fn put(
+        &self,
+        fence: Option<Fence>,
+        expected: &Token,
+        change: Change,
+    ) -> Result<Token, LedgerError> {
+        let mut document = self.document();
+        document.doc.admit(self.inner.clock.now_millis(), fence)?;
+        if expected.0 != document.doc.version {
+            return Err(LedgerError::Stale);
+        }
+        let mut next = document.doc.clone();
+        let version = next.apply(change);
+        self.persist(&mut document, next)
+            .map_err(LedgerError::Unavailable)?;
+        Ok(Token(version))
+    }
+}
+
+impl Ledger for FileLedger {
+    fn read(&self) -> Result<Snapshot, LedgerError> {
+        let document = self.document();
+        Ok(Snapshot {
+            token: Token(document.doc.version),
+            records: document.doc.records.clone(),
+        })
+    }
+
+    fn write(&self, expected: &Token, change: Change) -> Result<Token, LedgerError> {
+        self.put(None, expected, change)
+    }
+
+    fn write_fenced(
+        &self,
+        fence: Fence,
+        expected: &Token,
+        change: Change,
+    ) -> Result<Token, LedgerError> {
+        self.put(Some(fence), expected, change)
+    }
+
+    fn acquire(&self, holder: &str, ttl: Duration) -> Result<Lease, LeaseError> {
+        let mut document = self.document();
+        let mut next = document.doc.clone();
+        let lease = next.acquire(self.inner.clock.now_millis(), holder, ttl)?;
+        self.persist(&mut document, next)
+            .map_err(LeaseError::Unavailable)?;
+        Ok(lease)
+    }
+
+    fn renew(&self, fence: Fence, ttl: Duration) -> Result<Lease, LedgerError> {
+        let mut document = self.document();
+        let mut next = document.doc.clone();
+        let lease = next.renew(self.inner.clock.now_millis(), fence, ttl)?;
+        self.persist(&mut document, next)
+            .map_err(LedgerError::Unavailable)?;
+        Ok(lease)
+    }
+
+    fn release(&self, fence: Fence) -> Result<(), LedgerError> {
+        let mut document = self.document();
+        let mut next = document.doc.clone();
+        next.release(fence)?;
+        self.persist(&mut document, next)
+            .map_err(LedgerError::Unavailable)
     }
 }

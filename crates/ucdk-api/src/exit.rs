@@ -36,7 +36,8 @@ pub fn exit_class(outcome: &Outcome) -> ExitClass {
             | Refusal::PlanHashMismatch { .. }
             | Refusal::PlanChanged { .. }
             | Refusal::UnsupportedStampMode(_)
-            | Refusal::UnhostedKinds(_) => ExitClass::Refused,
+            | Refusal::UnhostedKinds(_)
+            | Refusal::LeaseHeld { .. } => ExitClass::Refused,
         },
         Outcome::Failed(failure) => failure_class(failure),
     }

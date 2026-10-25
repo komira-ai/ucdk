@@ -213,6 +213,16 @@ fn a_refusal_names_its_reason_and_keeps_its_text() {
         wire.message,
         "refused: kind job is not hosted (nightly/run)"
     );
+
+    let wire = refusal_of(&Refusal::LeaseHeld {
+        holder: "ci-7".to_owned(),
+        remaining: std::time::Duration::from_millis(95_250),
+    });
+    let Some(refusal::Reason::LeaseHeld(m)) = wire.reason else {
+        panic!("wrong reason");
+    };
+    assert_eq!((m.holder.as_str(), m.remaining_ms), ("ci-7", 95_250));
+    assert!(wire.message.contains("leased to ci-7"), "{}", wire.message);
 }
 
 #[test]
@@ -343,6 +353,7 @@ fn every_engine_error_has_its_own_code_and_its_text() {
         ),
         (EngineError::Ledger(LedgerError::Stale), ErrorCode::Ledger),
         (EngineError::LedgerBusy, ErrorCode::LedgerBusy),
+        (EngineError::LeaseLost, ErrorCode::LeaseLost),
         (EngineError::NotOurs(path("a/run")), ErrorCode::NotOurs),
         (
             EngineError::StillPresent(path("a/run")),

@@ -3,7 +3,6 @@
 
 use std::collections::BTreeSet;
 
-use ucdk_ledger::lease::{Epoch, Lease, LeaseError};
 use ucdk_ledger::{Change, Ledger, LedgerError, MemoryLedger, Origin, OwnerPath, Record, State};
 use ucdk_provider::{Kind, NodePath, PhysicalId};
 
@@ -132,37 +131,4 @@ fn errors_read_as_sentences() {
         LedgerError::Unavailable("down".to_owned()).to_string(),
         "the ledger is unavailable: down"
     );
-}
-
-/// The lease is an interface: this implementation only shows the trait can be implemented and
-/// used through a trait object.
-struct Fixed;
-
-impl Lease for Fixed {
-    fn acquire(&self, holder: &str) -> Result<Epoch, LeaseError> {
-        if holder == "taken" {
-            Err(LeaseError::Held {
-                holder: "other".to_owned(),
-            })
-        } else {
-            Ok(Epoch(1))
-        }
-    }
-
-    fn release(&self, epoch: Epoch) -> Result<(), LeaseError> {
-        if epoch > Epoch(1) {
-            Err(LeaseError::Unavailable("unknown epoch".to_owned()))
-        } else {
-            Ok(())
-        }
-    }
-}
-
-#[test]
-fn the_lease_trait_is_usable_as_an_object() {
-    let lease: &dyn Lease = &Fixed;
-    assert_eq!(lease.acquire("me"), Ok(Epoch(1)));
-    assert!(lease.acquire("taken").is_err());
-    assert_eq!(lease.release(Epoch(1)), Ok(()));
-    assert!(lease.release(Epoch(2)).is_err());
 }

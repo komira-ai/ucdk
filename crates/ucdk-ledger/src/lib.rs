@@ -13,9 +13,11 @@
 //! identity. It is not pure (it is state, and a real one does I/O), so it sits above the pure
 //! crates and below the engine.
 //!
-//! [`lease::Lease`] is an interface only: it names what a holder of the cell will need once
-//! lease time and fencing exist, and nothing implements it yet.
+//! A ledger also keeps a lease ([`lease`]): a holder takes it with an identity and an expiry and
+//! gets a [`Fence`] that only goes up, and a write under a fence that is not the current one is
+//! refused with [`LedgerError::Fenced`], so a stalled holder cannot write after another took over.
 
+mod doc;
 mod file;
 mod format;
 pub mod lease;
@@ -23,5 +25,6 @@ mod memory;
 mod record;
 
 pub use file::{FileLedger, OpenError};
+pub use lease::{Clock, Fence, Lease, LeaseError, MAX_CLOCK_SKEW, ManualClock, SystemClock};
 pub use memory::MemoryLedger;
 pub use record::{Change, Ledger, LedgerError, Origin, OwnerPath, Record, Snapshot, State, Token};

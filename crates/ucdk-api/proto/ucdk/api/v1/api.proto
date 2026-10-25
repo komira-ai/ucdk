@@ -242,6 +242,16 @@ message UnhostedKinds {
   repeated UnhostedKind kinds = 1;
 }
 
+// Another run holds the ledger's lease. Nothing was read or written; try again when that run
+// has ended.
+message LeaseHeld {
+  // The identity the other run took the lease as.
+  string holder = 1;
+  // At most this many milliseconds until the lease can be taken, if that run died without
+  // releasing it.
+  uint64 remaining_ms = 2;
+}
+
 // Why a run was refused whole, before anything was changed.
 message Refusal {
   oneof reason {
@@ -252,6 +262,7 @@ message Refusal {
     PlanChanged plan_changed = 5;
     UnsupportedStampMode unsupported_stamp_mode = 6;
     UnhostedKinds unhosted_kinds = 8;
+    LeaseHeld lease_held = 9;
   }
   string message = 7;
 }
@@ -350,6 +361,9 @@ enum ErrorCode {
   ERROR_CODE_OUTPUT_UNKNOWN = 7;
   // The request was not the expected message, or named a hash that is not one.
   ERROR_CODE_INVALID_REQUEST = 8;
+  // The run's ledger lease lapsed or was taken over, so the ledger refused its write and the
+  // run stopped. The next run resolves what this one left.
+  ERROR_CODE_LEASE_LOST = 9;
 }
 
 // Why a step failed. `message` is for a person and is not parsed.

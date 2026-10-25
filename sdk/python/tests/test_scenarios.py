@@ -8,6 +8,7 @@ the command line must agree on the plan hash, the steps, the report and the stat
 """
 
 import os
+import shutil
 import tempfile
 import unittest
 
@@ -17,6 +18,7 @@ from ucdk.errors import Internal
 from .support import (
     DATA,
     IMAGE,
+    LEDGER_GOLDEN,
     objects_of,
     open_session,
     pair,
@@ -199,6 +201,47 @@ class FileLedger(unittest.TestCase):
                 open_session(
                     ledger_kind="file", ledger_location=os.path.join(directory, "no", "ledger")
                 )
+
+
+class Lease(unittest.TestCase):
+    """The ledger's lease: a run that another holder's lease excludes is refused as data."""
+
+    def copy_of(self, directory, golden):
+        location = os.path.join(directory, "ledger")
+        shutil.copy(LEDGER_GOLDEN / golden, location)
+        return location
+
+    def test_an_apply_on_a_ledger_another_holder_has_leased_is_refused_as_data(self):
+        wanted = pair()
+        with tempfile.TemporaryDirectory() as directory:
+            location = self.copy_of(directory, "leased.ucdk")
+            with open_session(ledger_kind="file", ledger_location=location) as session:
+                # Reading is not writing: the plan and the status are answered.
+                plan = session.plan(wanted)
+                self.assertEqual(plan.which_result(), "planned")
+                self.assertEqual(session.status(wanted).exit, api.ExitClass.DONE)
+                applied = session.apply(wanted, plan.planned.hash)
+                self.assertEqual(applied.exit, api.ExitClass.REFUSED)
+                self.assertEqual(applied.which_result(), "refused")
+                self.assertEqual(applied.refused.which_reason(), "lease_held")
+                self.assertEqual(applied.refused.lease_held.holder, "ci-7")
+                self.assertGreater(applied.refused.lease_held.remaining_ms, 0)
+                self.assertIn("leased to ci-7", applied.refused.message)
+                # Nothing was created or recorded.
+                self.assertTrue(
+                    all(o.record is None and o.live is None for o in session.status(wanted).status.objects)
+                )
+
+    def test_an_apply_on_a_ledger_whose_holder_lapsed_takes_over_and_goes_through(self):
+        wanted = pair()
+        with tempfile.TemporaryDirectory() as directory:
+            location = self.copy_of(directory, "lapsed.ucdk")
+            with open_session(ledger_kind="file", ledger_location=location) as session:
+                plan = session.plan(wanted)
+                applied = session.apply(wanted, plan.planned.hash)
+        self.assertEqual(applied.exit, api.ExitClass.DONE)
+        self.assertEqual(applied.which_result(), "done")
+        self.assertEqual(applied.done.created, read_report("apply_fake.txt")["created"])
 
 
 if __name__ == "__main__":

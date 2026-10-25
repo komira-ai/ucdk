@@ -4,6 +4,8 @@
 //! ```text
 //! ucdk-ledger 1.0
 //! version 7
+//! fence 3
+//! lease worker-1 1767225600000
 //! record app/run
 //! kind service
 //! name app-run
@@ -21,6 +23,8 @@
 //! (a minor adds tags, never changes one). The `end` line carries the number of records and
 //! an FNV-1a checksum of every byte before it, so a document cut short or changed by a byte is
 //! refused rather than read. The checksum guards against accidents, not against an attacker.
+//! `fence` is the fence of the last lease granted and `lease` (absent when none is held) its holder
+//! and the millisecond it lapses; both come before the first record and were added in 1.1.
 //! The owner of a record is not written: it is the owner path of the record's node path.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -28,12 +32,13 @@ use std::fmt::Write as _;
 
 use ucdk_provider::{Kind, NodePath, PhysicalId};
 
+use crate::doc::{Doc, Held};
 use crate::record::{Origin, OwnerPath, Record, State};
 
 /// The major version this build writes and reads. A change of layout raises it.
 pub(crate) const MAJOR: u32 = 1;
 /// The minor version this build writes. A minor only adds tags.
-pub(crate) const MINOR: u32 = 0;
+pub(crate) const MINOR: u32 = 1;
 
 const MAGIC: &str = "ucdk-ledger";
 
@@ -41,8 +46,7 @@ const MAGIC: &str = "ucdk-ledger";
 #[derive(Debug)]
 pub(crate) struct Parsed {
     pub(crate) minor: u32,
-    pub(crate) version: u64,
-    pub(crate) records: BTreeMap<NodePath, Record>,
+    pub(crate) doc: Doc,
 }
 
 /// Why a document was not read.
@@ -119,10 +123,17 @@ fn state_text(state: State) -> &'static str {
     }
 }
 
-/// The document for `records` at `version`, as the bytes of a file.
-pub(crate) fn encode(version: u64, records: &BTreeMap<NodePath, Record>) -> String {
-    let mut out = format!("{MAGIC} {MAJOR}.{MINOR}\nversion {version}\n");
-    for record in records.values() {
+/// The document, as the bytes of a file.
+pub(crate) fn encode(doc: &Doc) -> String {
+    let mut out = format!(
+        "{MAGIC} {MAJOR}.{MINOR}\nversion {}\nfence {}\n",
+        doc.version, doc.fence
+    );
+    if let Some(held) = &doc.lease {
+        // Writing to a string cannot fail.
+        let _ = writeln!(out, "lease {} {}", escape(&held.holder), held.expires_at);
+    }
+    for record in doc.records.values() {
         let mut line = |text: String| {
             out.push_str(&text);
             out.push('\n');
@@ -144,7 +155,7 @@ pub(crate) fn encode(version: u64, records: &BTreeMap<NodePath, Record>) -> Stri
     }
     let sum = checksum(out.as_bytes());
     // Writing to a string cannot fail.
-    let _ = writeln!(out, "end {} {sum:016x}", records.len());
+    let _ = writeln!(out, "end {} {sum:016x}", doc.records.len());
     out
 }
 
@@ -292,6 +303,8 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Parsed, FormatError> {
     }
 
     let mut version = None;
+    let mut fence = 0;
+    let mut lease = None;
     let mut records = BTreeMap::new();
     let mut pending: Option<Pending<'_>> = None;
     for (index, raw) in body.iter().enumerate().skip(1) {
@@ -312,6 +325,17 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Parsed, FormatError> {
         } else if tag == "version" {
             let parsed = line.one()?.parse::<u64>();
             version = Some(parsed.or_else(|_| corrupt(number, "the version is not a number"))?);
+        } else if tag == "fence" {
+            fence = line
+                .one()?
+                .parse::<u64>()
+                .or_else(|_| corrupt(number, "the fence is not a number"))?;
+        } else if tag == "lease" {
+            let [holder, expires] = line.tokens::<2>()?;
+            let expires_at = expires
+                .parse::<u64>()
+                .or_else(|_| corrupt(number, "the lease expiry is not a number"))?;
+            lease = Some(Held { holder, expires_at });
         }
     }
     if let Some(done) = pending.take() {
@@ -325,8 +349,12 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Parsed, FormatError> {
     }
     Ok(Parsed {
         minor,
-        version,
-        records,
+        doc: Doc {
+            version,
+            fence,
+            lease,
+            records,
+        },
     })
 }
 

@@ -164,6 +164,12 @@ impl From<&Refusal> for v1::Refusal {
                     })
                     .collect(),
             }),
+            Refusal::LeaseHeld { holder, remaining } => {
+                v1::refusal::Reason::LeaseHeld(v1::LeaseHeld {
+                    holder: holder.clone(),
+                    remaining_ms: u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX),
+                })
+            }
             Refusal::UnsupportedStampMode(paths) => {
                 v1::refusal::Reason::UnsupportedStampMode(v1::UnsupportedStampMode {
                     paths: paths.iter().map(ToString::to_string).collect(),
@@ -247,6 +253,7 @@ impl From<&EngineError> for v1::Error {
         let code = match error {
             EngineError::Provider(_) => v1::ErrorCode::Provider,
             EngineError::Ledger(_) => v1::ErrorCode::Ledger,
+            EngineError::LeaseLost => v1::ErrorCode::LeaseLost,
             EngineError::LedgerBusy => v1::ErrorCode::LedgerBusy,
             EngineError::NotOurs(_) => v1::ErrorCode::NotOurs,
             EngineError::StillPresent(_) => v1::ErrorCode::StillPresent,

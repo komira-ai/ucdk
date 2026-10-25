@@ -2,8 +2,9 @@
 //! The engine: observe, plan, check the approval, then carry the steps out.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
-use ucdk_ledger::{Change, Ledger, LedgerError, Record, State};
+use ucdk_ledger::{Change, Fence, LeaseError, Ledger, LedgerError, Record, State};
 use ucdk_plan::{
     Action, LedgerToken, LiveState, Lowered, Observed, Plan, PlanHash, PlanNode, ROLE_RUN,
     Record as PlanRecord, Refused, Seen, Step, plan,
@@ -19,13 +20,27 @@ use crate::seam::{Failure, Mode, Outcome, Refusal, Report, Request};
 /// How many times a ledger write that finds the document changed is read and tried again.
 const WRITE_ATTEMPTS: usize = 5;
 
+/// How long a run's lease lasts, and how long a run may spend on one step before it must renew:
+/// the run renews at the start of every step, so a single step (its provider calls and the
+/// ledger writes around them) has this long. A step that outlasts it ends the run at its next
+/// ledger write, as a lost lease, and the next run resolves what it left.
+pub const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(600);
+
 /// The reconciler. It borrows the provider and the ledger it works on: one trait object each.
 /// It works in one cell: every stamp it writes carries the cell's identity, and an object
 /// that carries another cell's is not ours.
+///
+/// An apply or a destroy takes the ledger's lease for its whole run, writes under the lease's
+/// fence, and gives the lease back when it ends. A plan or a status takes none.
 pub struct Engine<'a> {
     pub(crate) provider: &'a mut dyn Provider,
     pub(crate) ledger: &'a dyn Ledger,
     pub(crate) cell: CellIdentity,
+    /// Who the lease is taken as: what another run is told when it is refused.
+    holder: String,
+    ttl: Duration,
+    /// The fence of the run in progress; [`Fence::NONE`] outside a run, which no write passes.
+    fence: Fence,
 }
 
 /// The resource whose `run` node is at `path`, or none for any other role: a resource's
@@ -52,7 +67,24 @@ impl<'a> Engine<'a> {
             provider,
             ledger,
             cell,
+            holder: format!("ucdk-{}", std::process::id()),
+            ttl: DEFAULT_LEASE_TTL,
+            fence: Fence::NONE,
         }
+    }
+
+    /// The identity the run's lease is taken as. The default names the process.
+    #[must_use]
+    pub fn with_holder(mut self, holder: impl Into<String>) -> Self {
+        self.holder = holder.into();
+        self
+    }
+
+    /// How long the run's lease lasts before it is renewed (at every step).
+    #[must_use]
+    pub fn with_lease_ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = ttl;
+        self
     }
 
     /// Whether the object carries the stamp of the node at `path` in this cell, and is the
@@ -151,6 +183,26 @@ impl<'a> Engine<'a> {
         if !embedded.is_empty() {
             return Outcome::Refused(Refusal::UnsupportedStampMode(embedded));
         }
+        let lease = match self.ledger.acquire(&self.holder, self.ttl) {
+            Ok(lease) => lease,
+            Err(LeaseError::Held { holder, remaining }) => {
+                return Outcome::Refused(Refusal::LeaseHeld { holder, remaining });
+            }
+            Err(LeaseError::Unavailable(why)) => {
+                let error = EngineError::Ledger(LedgerError::Unavailable(why));
+                return failed(Report::default(), None, error);
+            }
+        };
+        self.fence = lease.fence;
+        let outcome = self.run_leased(view, hash, rollback);
+        // A release that fails leaves the lease to lapse on its own.
+        let _ = self.ledger.release(lease.fence);
+        self.fence = Fence::NONE;
+        outcome
+    }
+
+    /// The run itself, under the lease taken in [`Engine::run`].
+    fn run_leased(&mut self, view: &Lowered, hash: &PlanHash, rollback: bool) -> Outcome {
         let observed = match self.observe_all(view) {
             Ok(observed) => observed,
             Err(error) => return failed(Report::default(), None, error),
@@ -170,7 +222,8 @@ impl<'a> Engine<'a> {
         let mut report = Report::default();
         for step in fresh.steps() {
             if let Err(error) = self.step(&nodes, step, &mut report) {
-                if rollback {
+                // A run that lost its lease deletes nothing more: the new holder owns the cell.
+                if rollback && error != EngineError::LeaseLost {
                     self.roll_back(&mut report);
                 }
                 return failed(report, Some(step.path.clone()), error);
@@ -185,6 +238,7 @@ impl<'a> Engine<'a> {
         step: &Step,
         report: &mut Report,
     ) -> Result<(), EngineError> {
+        self.ledger.renew(self.fence, self.ttl)?;
         match &step.action {
             // A node that reads an output is resolved here, in dependency order, after the
             // producer's step has confirmed its record and written the output.
@@ -273,7 +327,10 @@ impl<'a> Engine<'a> {
     pub(crate) fn commit(&self, change: &Change) -> Result<(), EngineError> {
         for _ in 0..WRITE_ATTEMPTS {
             let snapshot = self.ledger.read()?;
-            match self.ledger.write(&snapshot.token, change.clone()) {
+            match self
+                .ledger
+                .write_fenced(self.fence, &snapshot.token, change.clone())
+            {
                 Err(LedgerError::Stale) => {}
                 other => return Ok(other.map(|_| ())?),
             }

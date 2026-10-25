@@ -7,9 +7,13 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use ucdk_engine::{Engine, Mode, Outcome, Report, Request};
-use ucdk_ledger::{Change, FileLedger, Ledger, LedgerError, MemoryLedger, Record, Snapshot, Token};
+use ucdk_ledger::{
+    Change, Clock, Fence, FileLedger, Lease, LeaseError, Ledger, LedgerError, MemoryLedger, Record,
+    Snapshot, Token,
+};
 use ucdk_plan::{Lowered, Plan, lower};
 use ucdk_proto::v1::resource::Body;
 use ucdk_proto::v1::{Access, Image, Ref, Resource, ResourceList, Service, Uses, image, service};
@@ -313,14 +317,19 @@ pub enum Backend {
 }
 
 impl Backend {
-    /// A new, empty ledger of this kind.
+    /// A new, empty ledger of this kind, on the wall clock.
     pub fn ledger(self) -> AnyLedger {
+        self.ledger_on(Arc::new(ucdk_ledger::SystemClock))
+    }
+
+    /// A new, empty ledger of this kind, whose leases are timed by `clock`.
+    pub fn ledger_on(self, clock: Arc<dyn Clock>) -> AnyLedger {
         match self {
-            Self::Memory => AnyLedger::Memory(MemoryLedger::new()),
+            Self::Memory => AnyLedger::Memory(MemoryLedger::with_clock(clock)),
             Self::File => {
                 let dir = Scratch::new();
-                let ledger =
-                    FileLedger::open(dir.0.join("ledger.ucdk")).expect("open the file ledger");
+                let ledger = FileLedger::open_with_clock(dir.0.join("ledger.ucdk"), clock)
+                    .expect("open the file ledger");
                 AnyLedger::File(ledger, Arc::new(dir))
             }
         }
@@ -369,6 +378,39 @@ impl Ledger for AnyLedger {
             Self::File(ledger, _) => ledger.write(expected, change),
         }
     }
+
+    fn write_fenced(
+        &self,
+        fence: Fence,
+        expected: &Token,
+        change: Change,
+    ) -> Result<Token, LedgerError> {
+        match self {
+            Self::Memory(ledger) => ledger.write_fenced(fence, expected, change),
+            Self::File(ledger, _) => ledger.write_fenced(fence, expected, change),
+        }
+    }
+
+    fn acquire(&self, holder: &str, ttl: Duration) -> Result<Lease, LeaseError> {
+        match self {
+            Self::Memory(ledger) => ledger.acquire(holder, ttl),
+            Self::File(ledger, _) => ledger.acquire(holder, ttl),
+        }
+    }
+
+    fn renew(&self, fence: Fence, ttl: Duration) -> Result<Lease, LedgerError> {
+        match self {
+            Self::Memory(ledger) => ledger.renew(fence, ttl),
+            Self::File(ledger, _) => ledger.renew(fence, ttl),
+        }
+    }
+
+    fn release(&self, fence: Fence) -> Result<(), LedgerError> {
+        match self {
+            Self::Memory(ledger) => ledger.release(fence),
+            Self::File(ledger, _) => ledger.release(fence),
+        }
+    }
 }
 
 // ---- a ledger that can be made to fail -------------------------------------------------------
@@ -382,6 +424,8 @@ pub struct FlakyLedger {
     fail_write_at: AtomicU64,
     fail_reads: AtomicBool,
     always_stale: AtomicBool,
+    keep_lease: AtomicBool,
+    fail_acquire: AtomicBool,
 }
 
 impl FlakyLedger {
@@ -390,13 +434,47 @@ impl FlakyLedger {
     }
 
     pub fn on(backend: Backend) -> Self {
+        Self::over(backend.ledger())
+    }
+
+    /// A flaky ledger of `backend` whose leases are timed by `clock`.
+    pub fn timed(backend: Backend, clock: Arc<dyn Clock>) -> Self {
+        Self::over(backend.ledger_on(clock))
+    }
+
+    fn over(inner: AnyLedger) -> Self {
         Self {
-            inner: backend.ledger(),
+            inner,
             writes: AtomicU64::default(),
             fail_write_at: AtomicU64::default(),
             fail_reads: AtomicBool::default(),
             always_stale: AtomicBool::default(),
+            keep_lease: AtomicBool::default(),
+            fail_acquire: AtomicBool::default(),
         }
+    }
+
+    /// Counts a write, and fails it as the test has asked.
+    fn gate(&self) -> Result<(), LedgerError> {
+        let n = self.writes.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.fail_write_at.load(Ordering::SeqCst) == n {
+            return Err(LedgerError::Unavailable("the write was lost".to_owned()));
+        }
+        if self.always_stale.load(Ordering::SeqCst) {
+            return Err(LedgerError::Stale);
+        }
+        Ok(())
+    }
+
+    /// Makes every acquire fail as unavailable.
+    pub fn fail_acquire(&self, on: bool) {
+        self.fail_acquire.store(on, Ordering::SeqCst);
+    }
+
+    /// Makes a release do nothing, as when the process died before it could: the lease stays
+    /// until it lapses.
+    pub fn keep_lease(&self, on: bool) {
+        self.keep_lease.store(on, Ordering::SeqCst);
     }
 
     pub fn writes(&self) -> u64 {
@@ -426,14 +504,36 @@ impl Ledger for FlakyLedger {
     }
 
     fn write(&self, expected: &Token, change: Change) -> Result<Token, LedgerError> {
-        let n = self.writes.fetch_add(1, Ordering::SeqCst) + 1;
-        if self.fail_write_at.load(Ordering::SeqCst) == n {
-            return Err(LedgerError::Unavailable("the write was lost".to_owned()));
-        }
-        if self.always_stale.load(Ordering::SeqCst) {
-            return Err(LedgerError::Stale);
-        }
+        self.gate()?;
         self.inner.write(expected, change)
+    }
+
+    fn write_fenced(
+        &self,
+        fence: Fence,
+        expected: &Token,
+        change: Change,
+    ) -> Result<Token, LedgerError> {
+        self.gate()?;
+        self.inner.write_fenced(fence, expected, change)
+    }
+
+    fn acquire(&self, holder: &str, ttl: Duration) -> Result<Lease, LeaseError> {
+        if self.fail_acquire.load(Ordering::SeqCst) {
+            return Err(LeaseError::Unavailable("the lease is down".to_owned()));
+        }
+        self.inner.acquire(holder, ttl)
+    }
+
+    fn renew(&self, fence: Fence, ttl: Duration) -> Result<Lease, LedgerError> {
+        self.inner.renew(fence, ttl)
+    }
+
+    fn release(&self, fence: Fence) -> Result<(), LedgerError> {
+        if self.keep_lease.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        self.inner.release(fence)
     }
 }
 

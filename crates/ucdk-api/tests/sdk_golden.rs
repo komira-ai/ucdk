@@ -21,7 +21,7 @@ use prost_types::Duration;
 use ucdk_api::v1::{
     ApplyRequest, Blocked, CatalogNode, CatalogResponse, Conflict, ConflictKind, Conflicts,
     CredentialSource, DestroyRequest, EmptyScope, Error, ErrorCode, ExitClass, Failure, Finding,
-    FindingKind, Findings, LiveStatus, Mode, ObjectStatus, Outcome, Plan, PlanChanged,
+    FindingKind, Findings, LeaseHeld, LiveStatus, Mode, ObjectStatus, Outcome, Plan, PlanChanged,
     PlanHashMismatch, PlanRequest, RecordState, Refusal, Report, RetainReason, Retained,
     RetainedObject, RollbackFailure, SessionConfig, Standing, StatusRequest, StatusResponse, Step,
     StepAction, UnhostedKind, UnhostedKinds, UnsupportedStampMode, outcome, refusal,
@@ -398,7 +398,7 @@ fn cases() -> Vec<Case> {
                 },
             )),
         ),
-        // The one arm numbered above the message field: written first, as prost writes it.
+        // The arms numbered above the message field: written first, as prost writes them.
         case(
             "outcome_refused_unhosted_kinds",
             "ucdk.api.v1.Outcome",
@@ -407,6 +407,14 @@ fn cases() -> Vec<Case> {
                     path: text("batch/run"),
                     kind: text("job"),
                 }],
+            })),
+        ),
+        case(
+            "outcome_refused_lease_held",
+            "ucdk.api.v1.Outcome",
+            &refused(refusal::Reason::LeaseHeld(LeaseHeld {
+                holder: text("ci-7"),
+                remaining_ms: 95_000,
             })),
         ),
         case(

@@ -186,6 +186,9 @@ def cases():
         "outcome_refused_unsupported_stamp_mode": refused(
             unsupported_stamp_mode=api.UnsupportedStampMode(paths=["web/run"])
         ),
+        "outcome_refused_lease_held": refused(
+            lease_held=api.LeaseHeld(holder="ci-7", remaining_ms=95000)
+        ),
         "outcome_refused_unhosted_kinds": refused(
             unhosted_kinds=api.UnhostedKinds(
                 kinds=[api.UnhostedKind(path="batch/run", kind="job")]
