@@ -92,7 +92,7 @@ impl<'a> Engine<'a> {
     /// The refusal for a view that wants a kind the provider does not host, if it does.
     pub(crate) fn refuse_unhosted(&self, view: &Lowered) -> Option<Outcome> {
         let unhosted = self.unhosted(view);
-        (!unhosted.is_empty()).then(|| Outcome::Refused(Refusal::UnhostedKinds(unhosted)))
+        (!unhosted.is_empty()).then_some(Outcome::Refused(Refusal::UnhostedKinds(unhosted)))
     }
 
     /// Handles one request.

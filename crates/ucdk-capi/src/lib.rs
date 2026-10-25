@@ -4,7 +4,7 @@
 //!
 //! This crate adds no behaviour. A session wraps the engine's one seam, `Engine::handle`, over
 //! the `ucdk.api.v1` messages of `ucdk-api`; whatever a caller can do through the library the
-//! command line's tests can do through the engine. Eight functions cross the boundary, all
+//! command line's tests can do through the engine. Nine functions cross the boundary, all
 //! carrying protobuf bytes, none taking a callback; see the header for the contract and
 //! `docs/architecture.md` (sections 3 to 5) for why.
 //!

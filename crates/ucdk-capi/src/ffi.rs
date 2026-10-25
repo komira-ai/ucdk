@@ -6,19 +6,21 @@
 //! - **Nothing unwinds out.** The body of each runs inside `catch_unwind`; a caught panic is
 //!   answered with `PANIC`. The panic poisons the session: the call held the session's lock, so
 //!   every later call on it is refused (see [`Session::call`]).
-//! - **A handle is looked up, never trusted.** A `ucdk_session *` is the address of a leaked
-//!   [`Arc`], and the library keeps the set of addresses that are open. A call finds its session
-//!   through that set, so a handle that was closed, closed twice, or never opened is refused
-//!   instead of dereferenced, and a call in flight keeps its session alive past a close.
+//! - **A handle is a number, looked up and never trusted.** A `ucdk_session *` carries a number
+//!   from a counter that only grows, and the library keeps the map from open numbers to sessions.
+//!   A call finds its session there, so a handle that was closed, closed twice, or never opened is
+//!   refused, even after the allocator has reused an address; nothing reads through the pointer.
+//!   A call in flight keeps its session alive past a close.
 //! - **The library allocates what it hands out.** A response is a boxed slice whose pointer and
 //!   length go to the caller; [`ucdk_buf_free`] is the only way it is released.
 //! - **Request bytes are borrowed.** The slice lives for the call; nothing keeps the pointer.
 //! - **Outputs are zeroed first.** On any failure `*out` is empty or an `Error` message.
 
 use std::any::Any;
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::session::{Session, Verb, error_bytes};
@@ -61,40 +63,36 @@ impl Buf {
     }
 }
 
-/// The addresses of the sessions that are open, each the address of an `Arc<Session>` that
-/// `into_handle` leaked and `ucdk_session_close` takes back.
-static OPEN: Mutex<BTreeSet<usize>> = Mutex::new(BTreeSet::new());
+/// The sessions that are open, by the number their handle carries.
+static OPEN: Mutex<BTreeMap<usize, Arc<Session>>> = Mutex::new(BTreeMap::new());
 
-fn open_set() -> MutexGuard<'static, BTreeSet<usize>> {
-    // The set holds plain numbers and no code runs while it is locked, so a poisoned lock
-    // still holds a whole set.
+/// The number the next handle carries. It only grows, so a number is never handed out twice and
+/// a handle that was closed stays refused whatever a later session or the allocator does.
+static NEXT: AtomicUsize = AtomicUsize::new(1);
+
+fn open_set() -> MutexGuard<'static, BTreeMap<usize, Arc<Session>>> {
+    // The map is only inserted into and removed from, and no code of ours runs while it is
+    // locked, so a poisoned lock still holds a whole map.
     OPEN.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The handle as a pointer: a number, never an address, so nothing ever reads through it.
+fn handle_of(number: usize) -> *mut SessionHandle {
+    ptr::without_provenance_mut(number)
 }
 
 /// Registers `session` and returns the handle a C caller passes back; `ucdk_session_close`
 /// releases it. This is what `ucdk_session_open` does after it has built the session, and what a
 /// Rust host or a test with a provider of its own calls.
 pub fn into_handle(session: Session) -> *mut SessionHandle {
-    let raw = Arc::into_raw(Arc::new(session));
-    open_set().insert(raw as usize);
-    raw.cast_mut().cast::<SessionHandle>()
+    let number = NEXT.fetch_add(1, Ordering::Relaxed);
+    open_set().insert(number, Arc::new(session));
+    handle_of(number)
 }
 
-/// The session behind `handle`, if it is open. Sound for any pointer value: the address is only
-/// compared with the set until it is found there.
+/// The session behind `handle`, if it is open.
 fn lookup(handle: *mut SessionHandle) -> Option<Arc<Session>> {
-    let set = open_set();
-    if !set.contains(&(handle as usize)) {
-        return None;
-    }
-    let raw = handle.cast::<Session>().cast_const();
-    // SAFETY: the address is in the set, so it came from `Arc::into_raw` in `into_handle` and
-    // `ucdk_session_close` has not taken it back: close removes the address under this same
-    // lock before it drops the set's count, and we hold the lock, so the strong count is at
-    // least one for both calls below.
-    unsafe { Arc::increment_strong_count(raw) };
-    // SAFETY: as above; this takes over the count just added.
-    Some(unsafe { Arc::from_raw(raw) })
+    open_set().get(&handle.addr()).cloned()
 }
 
 /// Writes `value` to `slot` unless it is null.
@@ -217,13 +215,10 @@ pub unsafe extern "C" fn ucdk_session_open(
 #[unsafe(no_mangle)]
 pub extern "C" fn ucdk_session_close(session: *mut SessionHandle) {
     let _ = catch_unwind(|| {
-        let removed = open_set().remove(&(session as usize));
-        if removed {
-            // SAFETY: the address was in the set, so it came from `Arc::into_raw` in
-            // `into_handle`, and removing it under the lock makes this the only caller that
-            // takes that count back. Calls in flight hold counts of their own.
-            drop(unsafe { Arc::from_raw(session.cast::<Session>().cast_const()) });
-        }
+        // Taken out of the map first, so the lock is not held while the session is dropped. A
+        // call in flight holds a count of its own and drops the session itself.
+        let closed = open_set().remove(&session.addr());
+        drop(closed);
     });
 }
 
@@ -250,7 +245,9 @@ unsafe fn call_verb(
             status::INVALID_ARGUMENT,
             "the session is not open",
         )),
-        Some(session) => contain(catch_unwind(AssertUnwindSafe(|| {
+        // The session moves into the closure, so if a concurrent close left this call holding
+        // the last count, the drop that follows runs inside `catch_unwind` too.
+        Some(session) => contain(catch_unwind(AssertUnwindSafe(move || {
             // SAFETY: `req` is readable for `req_len` bytes by the contract.
             let bytes = unsafe { borrow(req, req_len) }?;
             session.call(verb, bytes)

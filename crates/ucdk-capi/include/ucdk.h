@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /*
- * The C ABI of ucdk (libucdk.so, libucdk.dylib). Eight functions; requests and responses are
+ * The C ABI of ucdk (libucdk_capi.so, libucdk_capi.dylib). Nine functions; requests and responses are
  * protobuf bytes (the ucdk.api.v1 and ucdk.resource.v1 messages); no callbacks.
  *
  * Ownership: the caller owns the request bytes and the library only borrows them for the call.

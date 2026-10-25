@@ -8,8 +8,8 @@ so a reader can check it.
 
 ## 1. The model in one page
 
-- **One core**, written in Rust, built once as a shared library (`libucdk.so` on Linux,
-  `libucdk.dylib` on macOS) with a small, stable C ABI.
+- **One core**, written in Rust, built once as a shared library (`libucdk_capi.so` on Linux,
+  `libucdk_capi.dylib` on macOS) with a small, stable C ABI.
 - **Thin SDKs** in any language (Python and TypeScript first) load that library and call it.
   An SDK holds no planning, ordering, ledger or provider logic.
 - **Resources are protobuf messages**: the `ucdk.resource.v1` protos
@@ -25,7 +25,7 @@ so a reader can check it.
   Python SDK     TypeScript SDK     (other SDKs)          ucdk CLI
        \               |               /                      |
         \              |              /                       |
-         +---- C ABI (libucdk, protobuf bytes) ----+          |
+         +---- C ABI (libucdk_capi, protobuf bytes) ----+          |
                        |                                      |
                   ucdk-capi  (the only crate with unsafe code)
                        |                                      |
@@ -194,11 +194,12 @@ Where the code is more specific than the text above:
   `provider_options` must be empty and `credentials` a known value. Anything else the library
   lacks is `UCDK_ABI`. A ledger that cannot be opened (held by another session, a missing
   directory) is `UCDK_INTERNAL`.
-- **Handles are looked up.** The library keeps the set of open sessions and finds a call's session
-  in it, so a closed, twice-closed or never-opened handle is refused (`UCDK_INVALID_ARGUMENT`)
-  rather than dereferenced. A handle value can be reused by a later session; a caller that keeps
-  a closed handle can reach the new one, as with any C handle. A close during a call is safe: the
-  call keeps its session alive.
+- **Handles are numbers.** A `ucdk_session *` carries a number from a counter that only grows,
+  and the library keeps the map from open numbers to sessions. A closed, twice-closed or
+  never-opened handle is refused (`UCDK_INVALID_ARGUMENT`), and stays refused when the allocator
+  reuses an address or a later session opens; nothing reads through the pointer. A close during a
+  call is safe: the call keeps its session alive and, if it holds the last count, drops it inside
+  its `catch_unwind`.
 - **Busy and poisoned.** A call takes the session's lock without waiting (`UCDK_BUSY`). A panic
   inside a call leaves the lock poisoned, and every later call on that session is `UCDK_PANIC`
   until it is closed.
@@ -401,9 +402,12 @@ node of the type's other role. Plan hashes are computed over the lowered nodes, 
 lowering is a change to hashes and is gated by goldens.
 
 A kind that is only available on one cloud is `CLOUD_BOUND`; the portable ones are mapped by each
-provider. A provider reports which kinds it hosts; the CLI today refuses a plan for a kind the
-chosen provider does not host (`refused: kind job is not hosted by fake-limited`), and the same
-refusal is a response field in the SDKs.
+provider. A provider reports which kinds it hosts (`Provider::hosts`); the engine refuses a plan,
+apply or status whose list wants a kind the chosen provider does not host, before any provider
+call or ledger write (`Refusal::UnhostedKinds`, `ucdk.api.v1.UnhostedKinds`, exit class refused).
+The command line prints it as `refused: kind job is not hosted by fake-limited (nightly/run)` with
+exit code 3, and the C ABI and the SDKs get it as a response field. A destroy is not refused for
+it: it wants nothing.
 
 ## 8. Providers (exists as a Rust trait; loadable providers are a proposal)
 

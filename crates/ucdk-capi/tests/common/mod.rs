@@ -135,6 +135,17 @@ pub struct Hooked {
     pub on_observe: Box<dyn FnMut() + Send>,
     /// Forget the fake's call log after each read, so a long loop of calls does not grow it.
     pub forget: bool,
+    /// Panic when the provider is dropped (unless already unwinding).
+    pub panic_on_drop: bool,
+}
+
+impl Drop for Hooked {
+    fn drop(&mut self) {
+        assert!(
+            !self.panic_on_drop || std::thread::panicking(),
+            "the provider panics in its destructor"
+        );
+    }
 }
 
 impl Hooked {
@@ -143,6 +154,7 @@ impl Hooked {
             fake: Fake::standard(),
             on_observe: Box::new(on_observe),
             forget: false,
+            panic_on_drop: false,
         }
     }
 }

@@ -770,3 +770,42 @@ fn a_list_with_an_unhosted_kind_is_refused_before_any_write() {
     );
     close(session);
 }
+
+/// Proves: a handle stays refused after it is closed even when a later session is opened, so a
+/// stale handle can never reach the new session, whatever the allocator does with the address.
+/// Catches a handle that is an address a new session can be given again.
+#[test]
+fn a_closed_handle_stays_refused_after_another_session_opens() {
+    let first = open_fake();
+    close(first);
+    let second = open_fake();
+    assert_ne!(first, second, "a handle is never handed out twice");
+    assert_eq!(call(ucdk_status, first, &[]).status, INVALID_ARGUMENT);
+    assert_eq!(call(ucdk_status, second, &[]).status, OK);
+    close(second);
+}
+
+/// Proves: when a session is closed during a call, so the call holds the last reference and
+/// drops the session itself, a destructor that panics is contained: the call answers PANIC and
+/// the process lives. Catches a session dropped outside `catch_unwind`, where the panic would
+/// unwind out of an `extern "C"` function and abort.
+#[test]
+fn a_panicking_destructor_after_a_concurrent_close_is_contained() {
+    let handle = Arc::new(AtomicUsize::new(0));
+    let h = Arc::clone(&handle);
+    let mut provider = Hooked::new(move || {
+        close(h.load(Ordering::SeqCst) as *mut ucdk_capi::SessionHandle);
+    });
+    provider.panic_on_drop = true;
+    let session = into_handle(Session::with_parts(
+        Box::new(provider),
+        Box::new(MemoryLedger::new()),
+        kit::cell(),
+    ));
+    handle.store(session as usize, Ordering::SeqCst);
+
+    let reply = call(ucdk_plan, session, &plan_request(80));
+    assert_eq!(reply.status, PANIC);
+    assert!(error_of(&reply.bytes).message.contains("destructor"));
+    assert_eq!(call(ucdk_status, session, &[]).status, INVALID_ARGUMENT);
+}
