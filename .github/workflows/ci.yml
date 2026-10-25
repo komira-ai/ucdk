@@ -1,7 +1,8 @@
-# Pull-request gate: two jobs, each one `cargo xtask` verb. All logic lives in xtask, where it is
+# Pull-request gate: three jobs, each one `cargo xtask` verb. All logic lives in xtask, where it is
 # tested; a test in xtask holds this file to that (every `run:` line is exactly one verb).
 #   check    static gates: fmt, clippy, cargo-deny, SPDX headers, run lines, public lint, DCO
 #   coverage the tests once under llvm-cov; per-crate line and branch floor
+#   sdk      the Python SDK's tests (Linux x86-64); Python tests are allowed under sdk/python only
 name: ci
 
 on:
@@ -43,3 +44,13 @@ jobs:
         with:
           persist-credentials: false
       - run: cargo xtask coverage
+
+  sdk:
+    name: sdk
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: cargo xtask sdk-test

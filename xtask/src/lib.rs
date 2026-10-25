@@ -16,6 +16,7 @@ pub mod fetch;
 pub mod lint;
 pub mod purity;
 pub mod runlines;
+pub mod sdk;
 pub mod spdx;
 pub mod tree;
 pub mod unsafe_scope;

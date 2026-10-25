@@ -88,3 +88,35 @@ pub fn cache_tools(root: &Path) {
         fs::write(bin.join(format!("{}.sha256", tool.name)), &tool.sha256).expect("write marker");
     }
 }
+
+/// Puts the repository's protos under `root` and writes the generated SDK sources from them, as
+/// a checkout that passes the `sdk-fresh` gate has them.
+pub fn install_sdk(root: &Path) {
+    install_protos(root);
+    xtask::sdk::write(root).expect("the SDK is generated");
+}
+
+/// The repository's protos under `root`, and the crates they live in as members of the fixture.
+pub fn install_protos(root: &Path) {
+    let real = xtask::workspace_root();
+    for dir in ucdk_codegen::PROTO_ROOTS {
+        for file in ucdk_codegen::PROTO_FILES {
+            let from = real.join(dir).join(file);
+            if from.is_file() {
+                write(
+                    root,
+                    &format!("{dir}/{file}"),
+                    &fs::read_to_string(from).expect("proto"),
+                );
+            }
+        }
+    }
+    // The crates the protos live in are members of the fixture workspace like any other.
+    for krate in ["ucdk-proto", "ucdk-api"] {
+        write(
+            root,
+            &format!("crates/{krate}/Cargo.toml"),
+            "[lints]\nworkspace = true\n",
+        );
+    }
+}

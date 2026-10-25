@@ -6,12 +6,14 @@ use std::process::ExitCode;
 
 use crate::cmd::{Runner, System};
 use crate::event::{Event, parse_event};
-use crate::{Finding, check, coverage, fetch, workspace_root};
+use crate::{Finding, check, coverage, fetch, sdk, workspace_root};
 
 const USAGE: &str = "usage: cargo xtask <verb>
   check [--base <sha>]   fmt, clippy, deny, SPDX, run lines, purity, public lint, DCO
   coverage               tests under llvm-cov; per-crate line and branch floor
   fetch                  install the pinned tools
+  gen-sdk                write the generated SDK sources from the protos
+  sdk-test               run the Python SDK's tests
 ";
 
 /// The platform-set variable that names the pull-request event file.
@@ -61,6 +63,19 @@ pub fn run(
         Some("fetch") => {
             let findings = fetch::ensure_all(root, runner);
             (i32::from(!findings.is_empty()), findings_text(&findings))
+        }
+        Some("gen-sdk") => match sdk::write(root) {
+            Ok(written) => (0, written.iter().map(|p| format!("wrote {p}\n")).collect()),
+            Err(e) => (1, format!("{e}\n")),
+        },
+        Some("sdk-test") => {
+            let (findings, examined) = sdk::test(root, runner);
+            let verdict = if findings.is_empty() { "ok" } else { "FAILED" };
+            let text = format!(
+                "== sdk-test: {verdict} ({examined})\n{}",
+                findings_text(&findings)
+            );
+            (i32::from(!findings.is_empty()), text)
         }
         _ => (2, USAGE.to_owned()),
     }
