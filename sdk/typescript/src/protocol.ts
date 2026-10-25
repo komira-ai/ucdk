@@ -19,6 +19,6 @@ export interface Reply {
   id: number;
   status: number;
   data: Uint8Array;
-  /** The handle of a session just opened. */
-  handle?: bigint;
+  /** The handle of a session just opened; 0 for any other reply. */
+  handle: bigint;
 }

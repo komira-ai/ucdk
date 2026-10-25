@@ -601,10 +601,12 @@ is fetched and verified by `xtask`, as the other tools are).
   Python, 215 executable lines, is fully executed by the tests when measured by hand). Node's test
   runner measures lines and branches with nothing to install (`node --test
   --experimental-test-coverage`, threshold flags included, and it reads the worker thread too);
-  by hand the hand-written TypeScript is at 100% of its lines in `errors.ts`, `library.ts` and
-  `worker.ts`, and short of 99% in `session.ts`, where the paths of a worker that dies with calls
-  waiting, and of a status code answered to a session's verb, cannot be reached without a seam in
-  the SDK. Wiring a gate, and deciding that seam, is open.
+  by hand the hand-written TypeScript (`src`, without `src/generated`) is at 99.0% of its lines
+  and 96.8% of its branches. What is not run is the path of a worker thread that ends with calls
+  waiting, a defence against a crash that no test can cause without a seam in the SDK, and the
+  refusal of a library of another ABI as the worker reports it (the SDK's ABI is a constant, and
+  the loader's own tests lower and raise it). Wiring a gate, and deciding whether to add that
+  seam, is open.
 - Static types: the generated code must pass the language's type checker in strict mode.
   **Not run yet** for TypeScript: `tsc` is a package, and CI installs none. The sources are
   written for `strict`, `erasableSyntaxOnly` and `verbatimModuleSyntax` (`sdk/typescript/tsconfig.json`)

@@ -39,10 +39,10 @@ if (!(loaded instanceof Library)) {
       }
       case "close":
         library.closeSession(request.handle);
-        reply = { id: request.id, status: 0, data: new Uint8Array(0) };
+        reply = { id: request.id, status: 0, data: new Uint8Array(0), handle: 0n };
         break;
       case "call":
-        reply = { id: request.id, ...library.answer(request.verb, request.handle, request.request) };
+        reply = { id: request.id, handle: 0n, ...library.answer(request.verb, request.handle, request.request) };
         break;
     }
     port.postMessage(reply);

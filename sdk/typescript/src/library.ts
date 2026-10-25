@@ -157,6 +157,7 @@ export class Library {
   }
 }
 
+/** The message of what `node:ffi` threw, which is always an `Error`. */
 function describe(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return (error as Error).message;
 }

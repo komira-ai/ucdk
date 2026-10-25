@@ -60,7 +60,7 @@ export class Session {
       if (opened.status !== 0) {
         throw errorFor("ucdk_session_open", opened.status, opened.data);
       }
-      return new Session(worker, opened.handle ?? 0n, waiting);
+      return new Session(worker, opened.handle, waiting);
     } catch (error) {
       await worker.terminate();
       throw error;
