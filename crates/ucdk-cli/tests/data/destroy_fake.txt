@@ -1,0 +1,4 @@
+  deleted  example-svc/public
+  deleted  example-svc/run
+  deleted  example-db/run
+3 changed
