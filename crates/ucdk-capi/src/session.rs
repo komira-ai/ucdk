@@ -6,15 +6,15 @@ use std::sync::{Mutex, TryLockError};
 
 use prost::Message as _;
 use ucdk_api::v1::{
-    self, ApplyRequest, CredentialSource, DestroyRequest, Error, ErrorCode, Mode, PlanRequest,
-    SessionConfig, StatusRequest,
+    self, ApplyRequest, CredentialSource, DestroyRequest, Error, ErrorCode, LeaksRequest, Mode,
+    PlanRequest, SessionConfig, StatusRequest,
 };
 use ucdk_api::{Approved, RequestError, catalog_response};
 use ucdk_engine::{Engine, Outcome, Request};
 use ucdk_ledger::{FileLedger, Ledger, MemoryLedger};
 use ucdk_plan::{Plan, lower};
 use ucdk_proto::v1::ResourceList;
-use ucdk_provider::{CellIdentity, CellName, CellUid, Provider};
+use ucdk_provider::{CellIdentity, CellName, CellUid, Kind, Node, NodePath, Provider, Stamp};
 use ucdk_provider_fake::{Fake, FakeConfig};
 
 use crate::status::{self, CallError};
@@ -32,6 +32,8 @@ pub enum Verb {
     Destroy,
     /// Read the ledger and the live objects.
     Status,
+    /// Compare the cell's stamped objects with the ledger.
+    Leaks,
 }
 
 /// The cell of a session whose config names none: every stamp it writes carries this identity.
@@ -71,10 +73,25 @@ fn unsupported(what: &str, value: &str) -> CallError {
     CallError::new(status::ABI, format!("this library has no {what} {value:?}"))
 }
 
-fn provider_named(name: &str) -> Result<Box<dyn Provider>, CallError> {
+/// The fake with one object that carries `cell`'s stamp and that no ledger records, as a run
+/// that lost its ledger would leave: how a host sees a leak without a cloud.
+fn leaky_fake(cell: &CellIdentity) -> Fake {
+    let mut fake = Fake::new(FakeConfig::standard());
+    let path = NodePath::new("ghost/run").expect("the literal path is valid");
+    let name = "ghost-run".to_owned();
+    let node = Node::new(path.clone(), Kind::service(), name, Vec::new())
+        .expect("a node with no fields has no repeated field");
+    let stamp = Stamp::for_node(cell, &path);
+    fake.create(&node, &stamp)
+        .expect("a fresh fake takes a stamped create");
+    fake
+}
+
+fn provider_named(name: &str, cell: &CellIdentity) -> Result<Box<dyn Provider>, CallError> {
     match name {
         "fake" => Ok(Box::new(Fake::new(FakeConfig::standard()))),
         "fake-limited" => Ok(Box::new(Fake::new(FakeConfig::limited()))),
+        "fake-leaky" => Ok(Box::new(leaky_fake(cell))),
         other => Err(unsupported("provider", other)),
     }
 }
@@ -166,6 +183,10 @@ impl Inner {
                 let request: StatusRequest = decode(bytes, "StatusRequest")?;
                 self.answer(request.to_request())
             }
+            Verb::Leaks => {
+                let request: LeaksRequest = decode(bytes, "LeaksRequest")?;
+                self.answer(Ok(request.to_request()))
+            }
             Verb::Apply => {
                 let request: ApplyRequest = decode(bytes, "ApplyRequest")?;
                 let approval = request.approved();
@@ -221,7 +242,7 @@ impl Session {
             parse_cell(&config.cell)?
         };
         Ok(Self::with_parts(
-            provider_named(&config.provider)?,
+            provider_named(&config.provider, &cell)?,
             ledger_for(&config.ledger_kind, &config.ledger_location)?,
             cell,
         ))

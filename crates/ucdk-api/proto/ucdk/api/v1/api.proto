@@ -36,6 +36,9 @@ enum ExitClass {
   EXIT_CLASS_FAILED_NO_EFFECT = 4;
   // Failed after changing something: plan again before running again.
   EXIT_CLASS_FAILED_CHANGED = 6;
+  // A leak sweep found objects that carry our stamp and have no ledger record. Only the leaks
+  // verb ends this way; an apply that finds leaks reports them and is done.
+  EXIT_CLASS_LEAKS = 8;
 }
 
 // Where the provider finds its credentials. The credentials themselves never appear.
@@ -91,6 +94,10 @@ message DestroyRequest {
 message StatusRequest {
   ucdk.resource.v1.ResourceList resources = 1;
 }
+
+// Compare the cell's stamped objects with the ledger, and change nothing. It needs no resource
+// list: it is about the cell, not about a file.
+message LeaksRequest {}
 
 enum StepAction {
   STEP_ACTION_UNSPECIFIED = 0;
@@ -296,6 +303,30 @@ message Report {
   repeated Blocked blocked_by_failed = 9;
   repeated string rolled_back = 10;
   repeated RollbackFailure rollback_failed = 11;
+  // The leak sweep an apply ends with: objects that carry the cell's stamp and have no ledger
+  // record. They are reported and left alone; the apply is not failed for them.
+  repeated Leak leaks = 12;
+  // Set when that sweep could not read; the apply still stands.
+  optional Error leak_sweep_failed = 13;
+}
+
+// A live object that carries the cell's stamp and that no ledger record accounts for. The
+// stamp is a claim, not an authority: nothing deletes the object on it.
+message Leak {
+  string kind = 1;
+  string physical_id = 2;
+  // The name the provider shows, without any stamp encoding.
+  string name = 3;
+  // The top-level owner the stamp names.
+  string owner = 4;
+  // The node key the stamp names.
+  string node = 5;
+}
+
+// What a leak sweep found, by physical id. Empty when there are no leaks (the exit class is
+// then DONE; with leaks it is LEAKS).
+message LeaksResponse {
+  repeated Leak leaks = 1;
 }
 
 // Where a ledger record stands.
@@ -392,6 +423,8 @@ message Outcome {
     Error invalid = 6;
     // The answer of a status request.
     StatusResponse status = 7;
+    // The answer of a leaks request.
+    LeaksResponse leaks = 8;
   }
   ExitClass exit = 5;
 }

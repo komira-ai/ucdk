@@ -39,6 +39,7 @@ fn each_class_has_the_exit_code_the_command_line_documents() {
         (ExitClass::Refused, 3),
         (ExitClass::FailedNoEffect, 4),
         (ExitClass::FailedChanged, 6),
+        (ExitClass::Leaks, 8),
     ];
     for (class, code) in table {
         assert_eq!(class.code(), code, "{class:?}");

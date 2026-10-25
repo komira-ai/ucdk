@@ -33,6 +33,11 @@ export const ExitClass = {
   FAILED_NO_EFFECT: 4,
   /** Failed after changing something: plan again before running again. */
   FAILED_CHANGED: 6,
+  /**
+   * A leak sweep found objects that carry our stamp and have no ledger record. Only the leaks
+   * verb ends this way; an apply that finds leaks reports them and is done.
+   */
+  LEAKS: 8,
 } as const;
 export type ExitClass = (typeof ExitClass)[keyof typeof ExitClass];
 
@@ -509,6 +514,36 @@ export class StatusRequest extends wire.Message {
   /** The message the bytes hold; unknown fields are dropped. */
   static decode(data: Uint8Array): StatusRequest {
     const message = new StatusRequest();
+    message.mergeFrom(data);
+    return message;
+  }
+}
+
+export interface LeaksRequestInit {
+}
+
+/**
+ * Compare the cell's stamped objects with the ledger, and change nothing. It needs no resource
+ * list: it is about the cell, not about a file.
+ */
+export class LeaksRequest extends wire.Message {
+
+  constructor(_init: LeaksRequestInit = {}) {
+    super();
+  }
+
+  protected encodeInto(out: wire.Out): void {
+    void out;
+  }
+
+  /** Reads the fields of `data` into this message; unknown fields are dropped. */
+  mergeFrom(data: Uint8Array): void {
+    wire.validate(data);
+  }
+
+  /** The message the bytes hold; unknown fields are dropped. */
+  static decode(data: Uint8Array): LeaksRequest {
+    const message = new LeaksRequest();
     message.mergeFrom(data);
     return message;
   }
@@ -1757,6 +1792,13 @@ export interface ReportInit {
   blockedByFailed?: Iterable<Blocked>;
   rolledBack?: Iterable<string>;
   rollbackFailed?: Iterable<RollbackFailure>;
+  /**
+   * The leak sweep an apply ends with: objects that carry the cell's stamp and have no ledger
+   * record. They are reported and left alone; the apply is not failed for them.
+   */
+  leaks?: Iterable<Leak>;
+  /** Set when that sweep could not read; the apply still stands. */
+  leakSweepFailed?: Error;
 }
 
 /** What a run did, by object, in the order it did it. */
@@ -1772,6 +1814,13 @@ export class Report extends wire.Message {
   blockedByFailed: Blocked[];
   rolledBack: string[];
   rollbackFailed: RollbackFailure[];
+  /**
+   * The leak sweep an apply ends with: objects that carry the cell's stamp and have no ledger
+   * record. They are reported and left alone; the apply is not failed for them.
+   */
+  leaks: Leak[];
+  /** Set when that sweep could not read; the apply still stands. */
+  leakSweepFailed: Error | undefined;
 
   constructor(init: ReportInit = {}) {
     super();
@@ -1786,6 +1835,8 @@ export class Report extends wire.Message {
     this.blockedByFailed = Array.from(init.blockedByFailed ?? []);
     this.rolledBack = Array.from(init.rolledBack ?? []);
     this.rollbackFailed = Array.from(init.rollbackFailed ?? []);
+    this.leaks = Array.from(init.leaks ?? []);
+    this.leakSweepFailed = init.leakSweepFailed;
   }
 
   protected encodeInto(out: wire.Out): void {
@@ -1821,6 +1872,12 @@ export class Report extends wire.Message {
     }
     for (const item of this.rollbackFailed) {
       wire.putMessage(out, 11, item);
+    }
+    for (const item of this.leaks) {
+      wire.putMessage(out, 12, item);
+    }
+    if (this.leakSweepFailed !== undefined) {
+      wire.putMessage(out, 13, this.leakSweepFailed);
     }
   }
 
@@ -1872,6 +1929,17 @@ export class Report extends wire.Message {
           this.rollbackFailed.push(RollbackFailure.decode(wire.bytesOf(value)));
           break;
         }
+        case 12: {
+          this.leaks.push(Leak.decode(wire.bytesOf(value)));
+          break;
+        }
+        case 13: {
+          const current = this.leakSweepFailed;
+          const message = current ?? new Error();
+          message.mergeFrom(wire.bytesOf(value));
+          this.leakSweepFailed = message;
+          break;
+        }
         default:
           break;
       }
@@ -1881,6 +1949,140 @@ export class Report extends wire.Message {
   /** The message the bytes hold; unknown fields are dropped. */
   static decode(data: Uint8Array): Report {
     const message = new Report();
+    message.mergeFrom(data);
+    return message;
+  }
+}
+
+export interface LeakInit {
+  kind?: string;
+  physicalId?: string;
+  /** The name the provider shows, without any stamp encoding. */
+  name?: string;
+  /** The top-level owner the stamp names. */
+  owner?: string;
+  /** The node key the stamp names. */
+  node?: string;
+}
+
+/**
+ * A live object that carries the cell's stamp and that no ledger record accounts for. The
+ * stamp is a claim, not an authority: nothing deletes the object on it.
+ */
+export class Leak extends wire.Message {
+  kind: string;
+  physicalId: string;
+  /** The name the provider shows, without any stamp encoding. */
+  name: string;
+  /** The top-level owner the stamp names. */
+  owner: string;
+  /** The node key the stamp names. */
+  node: string;
+
+  constructor(init: LeakInit = {}) {
+    super();
+    this.kind = init.kind ?? "";
+    this.physicalId = init.physicalId ?? "";
+    this.name = init.name ?? "";
+    this.owner = init.owner ?? "";
+    this.node = init.node ?? "";
+  }
+
+  protected encodeInto(out: wire.Out): void {
+    if (this.kind !== "") {
+      wire.putString(out, 1, this.kind);
+    }
+    if (this.physicalId !== "") {
+      wire.putString(out, 2, this.physicalId);
+    }
+    if (this.name !== "") {
+      wire.putString(out, 3, this.name);
+    }
+    if (this.owner !== "") {
+      wire.putString(out, 4, this.owner);
+    }
+    if (this.node !== "") {
+      wire.putString(out, 5, this.node);
+    }
+  }
+
+  /** Reads the fields of `data` into this message; unknown fields are dropped. */
+  mergeFrom(data: Uint8Array): void {
+    for (const { number, value } of wire.readFields(data)) {
+      switch (number) {
+        case 1: {
+          this.kind = wire.str(value);
+          break;
+        }
+        case 2: {
+          this.physicalId = wire.str(value);
+          break;
+        }
+        case 3: {
+          this.name = wire.str(value);
+          break;
+        }
+        case 4: {
+          this.owner = wire.str(value);
+          break;
+        }
+        case 5: {
+          this.node = wire.str(value);
+          break;
+        }
+        default:
+          break;
+      }
+    }
+  }
+
+  /** The message the bytes hold; unknown fields are dropped. */
+  static decode(data: Uint8Array): Leak {
+    const message = new Leak();
+    message.mergeFrom(data);
+    return message;
+  }
+}
+
+export interface LeaksResponseInit {
+  leaks?: Iterable<Leak>;
+}
+
+/**
+ * What a leak sweep found, by physical id. Empty when there are no leaks (the exit class is
+ * then DONE; with leaks it is LEAKS).
+ */
+export class LeaksResponse extends wire.Message {
+  leaks: Leak[];
+
+  constructor(init: LeaksResponseInit = {}) {
+    super();
+    this.leaks = Array.from(init.leaks ?? []);
+  }
+
+  protected encodeInto(out: wire.Out): void {
+    for (const item of this.leaks) {
+      wire.putMessage(out, 1, item);
+    }
+  }
+
+  /** Reads the fields of `data` into this message; unknown fields are dropped. */
+  mergeFrom(data: Uint8Array): void {
+    for (const { number, value } of wire.readFields(data)) {
+      switch (number) {
+        case 1: {
+          this.leaks.push(Leak.decode(wire.bytesOf(value)));
+          break;
+        }
+        default:
+          break;
+      }
+    }
+  }
+
+  /** The message the bytes hold; unknown fields are dropped. */
+  static decode(data: Uint8Array): LeaksResponse {
+    const message = new LeaksResponse();
     message.mergeFrom(data);
     return message;
   }
@@ -2175,6 +2377,8 @@ export interface OutcomeInit {
   invalid?: Error;
   /** The answer of a status request. */
   status?: StatusResponse;
+  /** The answer of a leaks request. */
+  leaks?: LeaksResponse;
 }
 
 /** What the engine answered, and the exit class of the answer. */
@@ -2188,6 +2392,8 @@ export class Outcome extends wire.Message {
   invalid: Error | undefined;
   /** The answer of a status request. */
   status: StatusResponse | undefined;
+  /** The answer of a leaks request. */
+  leaks: LeaksResponse | undefined;
 
   constructor(init: OutcomeInit = {}) {
     super();
@@ -2198,11 +2404,12 @@ export class Outcome extends wire.Message {
     this.exit = init.exit ?? ExitClass.DONE;
     this.invalid = init.invalid;
     this.status = init.status;
+    this.leaks = init.leaks;
   }
 
   /** The name of the arm of `result` that is set, or undefined. */
-  whichResult(): "planned" | "done" | "refused" | "failed" | "invalid" | "status" | undefined {
-    return wire.which(this, ["planned", "done", "refused", "failed", "invalid", "status"]);
+  whichResult(): "planned" | "done" | "refused" | "failed" | "invalid" | "status" | "leaks" | undefined {
+    return wire.which(this, ["planned", "done", "refused", "failed", "invalid", "status", "leaks"]);
   }
 
   private clearResult(): void {
@@ -2212,6 +2419,7 @@ export class Outcome extends wire.Message {
     this.failed = undefined;
     this.invalid = undefined;
     this.status = undefined;
+    this.leaks = undefined;
   }
 
   static planned(planned: Plan, fields: OutcomeInit = {}): Outcome {
@@ -2238,6 +2446,10 @@ export class Outcome extends wire.Message {
     return new Outcome({ ...fields, status });
   }
 
+  static leaks(leaks: LeaksResponse, fields: OutcomeInit = {}): Outcome {
+    return new Outcome({ ...fields, leaks });
+  }
+
   protected encodeInto(out: wire.Out): void {
     this.whichResult();
     if (this.planned !== undefined) {
@@ -2252,6 +2464,8 @@ export class Outcome extends wire.Message {
       wire.putMessage(out, 6, this.invalid);
     } else if (this.status !== undefined) {
       wire.putMessage(out, 7, this.status);
+    } else if (this.leaks !== undefined) {
+      wire.putMessage(out, 8, this.leaks);
     }
     if (this.exit !== 0) {
       wire.putVarintField(out, 5, this.exit);
@@ -2312,6 +2526,14 @@ export class Outcome extends wire.Message {
           const message = current ?? new StatusResponse();
           message.mergeFrom(wire.bytesOf(value));
           this.status = message;
+          break;
+        }
+        case 8: {
+          const current = this.leaks;
+          this.clearResult();
+          const message = current ?? new LeaksResponse();
+          message.mergeFrom(wire.bytesOf(value));
+          this.leaks = message;
           break;
         }
         default:

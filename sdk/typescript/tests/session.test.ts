@@ -38,6 +38,7 @@ test("a closed session refuses every verb", async () => {
     () => session.apply(wanted, "a".repeat(64)),
     () => session.destroy(wanted, "a".repeat(64)),
     () => session.status(wanted),
+    () => session.leaks(),
   ]) {
     await assert.rejects(call(), SessionClosed);
   }

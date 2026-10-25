@@ -21,10 +21,11 @@ use prost_types::Duration;
 use ucdk_api::v1::{
     ApplyRequest, Blocked, CatalogNode, CatalogResponse, Conflict, ConflictKind, Conflicts,
     CredentialSource, DestroyRequest, EmptyScope, Error, ErrorCode, ExitClass, Failure, Finding,
-    FindingKind, Findings, LeaseHeld, LiveStatus, Mode, ObjectStatus, Outcome, Plan, PlanChanged,
-    PlanHashMismatch, PlanRequest, RecordState, Refusal, Report, RetainReason, Retained,
-    RetainedObject, RollbackFailure, SessionConfig, Standing, StatusRequest, StatusResponse, Step,
-    StepAction, UnhostedKind, UnhostedKinds, UnsupportedStampMode, outcome, refusal,
+    FindingKind, Findings, Leak, LeaksRequest, LeaksResponse, LeaseHeld, LiveStatus, Mode,
+    ObjectStatus, Outcome, Plan, PlanChanged, PlanHashMismatch, PlanRequest, RecordState, Refusal,
+    Report, RetainReason, Retained, RetainedObject, RollbackFailure, SessionConfig, Standing,
+    StatusRequest, StatusResponse, Step, StepAction, UnhostedKind, UnhostedKinds,
+    UnsupportedStampMode, outcome, refusal,
 };
 use ucdk_proto::v1::{
     Access, Image, Job, Output, Ref, Resource, ResourceList, Scale, SecretRef, Service, Size,
@@ -191,6 +192,18 @@ fn report() -> Report {
             path: text("l/run"),
             message: text("gone"),
         }],
+        leaks: vec![leak()],
+        leak_sweep_failed: Some(error()),
+    }
+}
+
+fn leak() -> Leak {
+    Leak {
+        kind: text("service"),
+        physical_id: text("svc-0001"),
+        name: text("ghost-run"),
+        owner: text("ghost"),
+        node: text("abcdefghijklmnopqrstuvwxyz"),
     }
 }
 
@@ -334,6 +347,11 @@ fn cases() -> Vec<Case> {
             },
         ),
         case(
+            "leaks_request",
+            "ucdk.api.v1.LeaksRequest",
+            &LeaksRequest {},
+        ),
+        case(
             "outcome_planned",
             "ucdk.api.v1.Outcome",
             &Outcome {
@@ -455,6 +473,16 @@ fn cases() -> Vec<Case> {
                     }],
                 })),
                 exit: ExitClass::Done as i32,
+            },
+        ),
+        case(
+            "outcome_leaks",
+            "ucdk.api.v1.Outcome",
+            &Outcome {
+                result: Some(outcome::Result::Leaks(LeaksResponse {
+                    leaks: vec![leak()],
+                })),
+                exit: ExitClass::Leaks as i32,
             },
         ),
         case(

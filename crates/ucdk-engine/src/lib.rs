@@ -30,6 +30,11 @@
 //! - **Read-only status.** `Request::Status` reads the ledger and observes each recorded and
 //!   each wanted object through the provider, and makes no ledger write and no provider call
 //!   that mutates; each entry says whether record and object agree.
+//! - **Leak sweep.** `Request::Leaks` lists the cell's stamped objects and reads the ledger, and
+//!   reports each object that carries our stamp with no record naming it (or an intent for its
+//!   node); nothing is written or deleted, and an apply ends with the same sweep in its report.
+//!   A stamp alone never authorises a delete. An object whose stamp was stripped is not listed
+//!   by the provider and so is not reported: it is not ours to claim.
 //! - **One cell.** Every stamp carries the engine's cell, and an object stamped for another
 //!   cell is not ours.
 //! - **Outputs.** After a confirmed create or update the record holds the object's non-secret
@@ -66,11 +71,12 @@
 mod delete;
 mod engine;
 mod error;
+mod leaks;
 mod seam;
 mod status;
 mod write;
 
 pub use engine::{DEFAULT_LEASE_TTL, Engine};
 pub use error::EngineError;
-pub use seam::{Failure, Mode, ObjectStatus, Outcome, Refusal, Report, Request, Standing};
+pub use seam::{Failure, Leak, Mode, ObjectStatus, Outcome, Refusal, Report, Request, Standing};
 pub use ucdk_ledger::State;

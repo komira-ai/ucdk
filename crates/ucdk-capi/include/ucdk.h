@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /*
- * The C ABI of ucdk (libucdk_capi.so, libucdk_capi.dylib). Nine functions; requests and responses are
+ * The C ABI of ucdk (libucdk_capi.so, libucdk_capi.dylib). Ten functions; requests and responses are
  * protobuf bytes (the ucdk.api.v1 and ucdk.resource.v1 messages); no callbacks.
  *
  * Ownership: the caller owns the request bytes and the library only borrows them for the call.
@@ -29,7 +29,7 @@ extern "C" {
  * verb raises the minor; changing a signature, a status meaning or an ownership rule raises the
  * major. Before the first release the major is 0 and nothing is promised. */
 #define UCDK_ABI_MAJOR 0
-#define UCDK_ABI_MINOR 1
+#define UCDK_ABI_MINOR 2
 
 /* The longest request, in bytes, that a call accepts. */
 #define UCDK_MAX_REQUEST_LEN 67108864
@@ -80,6 +80,9 @@ int32_t ucdk_apply(ucdk_session *session, const uint8_t *req, size_t req_len, uc
 int32_t ucdk_destroy(ucdk_session *session, const uint8_t *req, size_t req_len, ucdk_buf *out);
 /* req: ucdk.api.v1.StatusRequest. out: ucdk.api.v1.Outcome. */
 int32_t ucdk_status(ucdk_session *session, const uint8_t *req, size_t req_len, ucdk_buf *out);
+/* req: ucdk.api.v1.LeaksRequest. out: ucdk.api.v1.Outcome (the `leaks` arm). Lists the cell's
+ * stamped objects and reads the ledger; changes nothing. */
+int32_t ucdk_leaks(ucdk_session *session, const uint8_t *req, size_t req_len, ucdk_buf *out);
 
 /* Releases a buffer the library filled. Once per buffer; a zeroed buffer is a no-op. */
 void ucdk_buf_free(ucdk_buf buf);

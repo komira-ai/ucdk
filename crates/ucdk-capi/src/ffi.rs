@@ -310,6 +310,12 @@ verb!(
     ucdk_status,
     Verb::Status
 );
+verb!(
+    /// Sweeps the cell for stamped objects the ledger does not record, for a `LeaksRequest`;
+    /// answers an `Outcome`. It changes nothing.
+    ucdk_leaks,
+    Verb::Leaks
+);
 
 /// Releases a buffer the library filled. A zeroed buffer is ignored.
 ///

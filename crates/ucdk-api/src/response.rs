@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The engine's values to response messages.
 
-use ucdk_engine::{EngineError, Failure, ObjectStatus, Outcome, Refusal, Report, Standing, State};
+use ucdk_engine::{
+    EngineError, Failure, Leak, ObjectStatus, Outcome, Refusal, Report, Standing, State,
+};
 use ucdk_plan::{
     Action, Conflict, ConflictKind, Finding, FindingKind, Lowered, Plan, Retained, Step,
 };
@@ -18,6 +20,9 @@ impl From<&Outcome> for v1::Outcome {
             Outcome::Done(report) => v1::outcome::Result::Done(report.into()),
             Outcome::Status(objects) => v1::outcome::Result::Status(v1::StatusResponse {
                 objects: objects.iter().map(v1::ObjectStatus::from).collect(),
+            }),
+            Outcome::Leaks(leaks) => v1::outcome::Result::Leaks(v1::LeaksResponse {
+                leaks: leaks.iter().map(v1::Leak::from).collect(),
             }),
             Outcome::Refused(why) => v1::outcome::Result::Refused(why.into()),
             Outcome::Failed(failure) => v1::outcome::Result::Failed(failure.into()),
@@ -132,6 +137,20 @@ impl From<&Report> for v1::Report {
                     message: error.to_string(),
                 })
                 .collect(),
+            leaks: report.leaks.iter().map(v1::Leak::from).collect(),
+            leak_sweep_failed: report.leak_sweep_failed.as_ref().map(v1::Error::from),
+        }
+    }
+}
+
+impl From<&Leak> for v1::Leak {
+    fn from(leak: &Leak) -> Self {
+        Self {
+            kind: leak.kind.as_str().to_owned(),
+            physical_id: leak.physical.as_str().to_owned(),
+            name: leak.name.clone(),
+            owner: leak.owner.to_string(),
+            node: leak.node.to_string(),
         }
     }
 }

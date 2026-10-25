@@ -5,7 +5,7 @@
 use std::fmt::Write as _;
 
 use ucdk_api::v1::ExitClass;
-use ucdk_engine::{Failure, ObjectStatus, Report, Standing, State};
+use ucdk_engine::{Failure, Leak, ObjectStatus, Report, Standing, State};
 use ucdk_plan::{Action, Plan, PlanHash, Retained};
 use ucdk_provider::Status;
 
@@ -102,6 +102,28 @@ pub fn status_text(provider: ProviderName, objects: &[ObjectStatus]) -> String {
     text
 }
 
+fn leak_line(leak: &Leak) -> String {
+    format!(
+        "{} [{}] {:?} (stamped for {}, node {}; the ledger has no record of it)",
+        leak.physical,
+        leak.kind.as_str(),
+        leak.name,
+        leak.owner,
+        leak.node
+    )
+}
+
+/// The leaks a sweep found, one line per object, then a summary. Nothing is deleted: the
+/// stamp says whose the object claims to be, and a person decides what to do with it.
+pub fn leaks_text(provider: ProviderName, leaks: &[Leak]) -> String {
+    let mut text = format!("ucdk leaks\nprovider: {}\n", provider.as_str());
+    for leak in leaks {
+        let _ = writeln!(text, "  leaked  {}", leak_line(leak));
+    }
+    let _ = writeln!(text, "{} leaks", leaks.len());
+    text
+}
+
 /// What a run did, one line per object, then a summary.
 pub fn report_text(report: &Report) -> String {
     let mut text = String::new();
@@ -140,6 +162,12 @@ pub fn report_text(report: &Report) -> String {
             "  blocked  {path} (its producer {producer} is still failed)"
         );
     }
+    for leak in &report.leaks {
+        let _ = writeln!(text, "  leaked   {}", leak_line(leak));
+    }
+    if let Some(error) = &report.leak_sweep_failed {
+        let _ = writeln!(text, "  leak sweep failed: {error}");
+    }
     text.push_str(&if changes == 0 {
         "no changes\n".to_owned()
     } else {
@@ -162,4 +190,43 @@ pub fn failure(failure: &Failure, class: ExitClass) -> String {
         .as_ref()
         .map_or_else(String::new, |at| format!(" at {at}"));
     format!("failed{place}: {}\n{advice}\n", failure.error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ucdk_engine::EngineError;
+    use ucdk_provider::{Kind, NodePath, PhysicalId, ProviderError};
+
+    /// Proves: a report that carries a leak and a sweep that could not read prints both, under
+    /// the run's lines and above its summary. Catches a failed sweep that leaves no trace in the
+    /// text (a reader would take it for "no leaks"), which no command-level test can arm because
+    /// the sweep is the last read of an apply.
+    #[test]
+    fn a_report_prints_its_leaks_and_a_failed_sweep() {
+        let path = NodePath::new("ghost/run").expect("a path");
+        let report = Report {
+            leaks: vec![Leak {
+                kind: Kind::service(),
+                physical: PhysicalId::new("svc-1"),
+                name: "ghost-run".to_owned(),
+                owner: path.owner(),
+                node: path.key(),
+            }],
+            leak_sweep_failed: Some(EngineError::Provider(ProviderError::Transient(
+                "down".to_owned(),
+            ))),
+            ..Report::default()
+        };
+        let text = report_text(&report);
+        let want_leak = format!(
+            "  leaked   svc-1 [service] \"ghost-run\" (stamped for ghost, node {}; the ledger has no record of it)\n",
+            path.key()
+        );
+        assert!(text.starts_with(&want_leak), "{text}");
+        let rest = &text[want_leak.len()..];
+        assert!(rest.starts_with("  leak sweep failed: "), "{text}");
+        assert!(rest.contains("down"), "{text}");
+        assert!(rest.ends_with("\nno changes\n"), "{text}");
+    }
 }

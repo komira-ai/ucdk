@@ -7,6 +7,7 @@ plan_request.bin ucdk.api.v1.PlanRequest
 apply_request.bin ucdk.api.v1.ApplyRequest
 destroy_request.bin ucdk.api.v1.DestroyRequest
 status_request.bin ucdk.api.v1.StatusRequest
+leaks_request.bin ucdk.api.v1.LeaksRequest
 outcome_planned.bin ucdk.api.v1.Outcome
 outcome_done.bin ucdk.api.v1.Outcome
 outcome_refused_findings.bin ucdk.api.v1.Outcome
@@ -20,5 +21,6 @@ outcome_refused_lease_held.bin ucdk.api.v1.Outcome
 outcome_failed.bin ucdk.api.v1.Outcome
 outcome_invalid.bin ucdk.api.v1.Outcome
 outcome_status.bin ucdk.api.v1.Outcome
+outcome_leaks.bin ucdk.api.v1.Outcome
 catalog_response.bin ucdk.api.v1.CatalogResponse
 error.bin ucdk.api.v1.Error

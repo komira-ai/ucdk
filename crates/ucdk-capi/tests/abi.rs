@@ -15,13 +15,14 @@ use prost::Message as _;
 use std::time::Duration;
 use ucdk_api::catalog_response;
 use ucdk_api::v1::{
-    self, ApplyRequest, CatalogResponse, DestroyRequest, ErrorCode, ExitClass, Mode, Outcome,
-    PlanRequest, SessionConfig, StatusRequest, outcome,
+    self, ApplyRequest, CatalogResponse, DestroyRequest, ErrorCode, ExitClass, LeaksRequest, Mode,
+    Outcome, PlanRequest, SessionConfig, StatusRequest, outcome,
 };
 use ucdk_capi::{
     ABI, ABI_MAJOR, ABI_MINOR, BUSY, Buf, DECODE, INTERNAL, INVALID_ARGUMENT, MAX_REQUEST_LEN, OK,
     PANIC, Session, TOO_LARGE, into_handle, ucdk_abi_version, ucdk_apply, ucdk_buf_free,
-    ucdk_destroy, ucdk_load_catalog, ucdk_plan, ucdk_session_close, ucdk_session_open, ucdk_status,
+    ucdk_destroy, ucdk_leaks, ucdk_load_catalog, ucdk_plan, ucdk_session_close, ucdk_session_open,
+    ucdk_status,
 };
 use ucdk_engine::{Engine, Request};
 
@@ -31,12 +32,13 @@ use ucdk_proto::v1::ResourceList;
 use ucdk_provider::kit;
 use ucdk_provider_fake::Fake;
 
-const VERBS: [(&str, VerbFn); 5] = [
+const VERBS: [(&str, VerbFn); 6] = [
     ("load_catalog", ucdk_load_catalog),
     ("plan", ucdk_plan),
     ("apply", ucdk_apply),
     ("destroy", ucdk_destroy),
     ("status", ucdk_status),
+    ("leaks", ucdk_leaks),
 ];
 
 fn close(session: *mut ucdk_capi::SessionHandle) {
@@ -124,7 +126,7 @@ fn a_config_that_asks_for_what_is_not_here_is_refused() {
 /// another session) is INTERNAL. Catches a ledger failure reported as success.
 #[test]
 fn the_supported_configs_open_and_a_ledger_that_cannot_open_is_internal() {
-    for provider in ["fake", "fake-limited"] {
+    for provider in ["fake", "fake-limited", "fake-leaky"] {
         let mut config = fake_config();
         config.provider = provider.to_owned();
         config.ledger_kind = "memory".to_owned();
@@ -377,6 +379,19 @@ impl Both {
         direct
     }
 
+    fn leaks(&mut self) -> Outcome {
+        let request = LeaksRequest {};
+        let wire = call(ucdk_leaks, self.session, &request.encode_to_vec());
+        assert_eq!(wire.status, OK);
+        let direct = Outcome::from(&self.engine(request.to_request()));
+        assert_eq!(
+            wire.bytes,
+            direct.encode_to_vec(),
+            "leaks: wire and engine agree"
+        );
+        direct
+    }
+
     /// An apply or a destroy: the engine plans the world as it is, then runs with the pinned hash.
     fn run(&mut self, destroy: bool, list: &ResourceList, hash: &str) -> Outcome {
         let resources = Some(list.clone());
@@ -469,6 +484,13 @@ fn a_run_through_the_abi_is_the_run_of_the_engine() {
 
     let status = both.status(&list);
     assert_eq!(standings(&status), [v1::Standing::Agrees as i32; 2]);
+
+    let leaks = both.leaks();
+    assert_eq!(leaks.exit, ExitClass::Done as i32);
+    assert!(
+        matches!(&leaks.result, Some(outcome::Result::Leaks(l)) if l.leaks.is_empty()),
+        "an applied list leaks nothing: {leaks:?}"
+    );
 
     let again = both.plan(&list, Mode::Apply);
     let Some(outcome::Result::Planned(plan)) = &again.result else {
@@ -888,4 +910,117 @@ fn a_panicking_destructor_after_a_concurrent_close_is_contained() {
     assert_eq!(reply.status, PANIC);
     assert!(error_of(&reply.bytes).message.contains("destructor"));
     assert_eq!(call(ucdk_status, session, &[]).status, INVALID_ARGUMENT);
+}
+
+/// A session over a fake that already holds a stamped object nobody records, on `ledger`;
+/// returns the session and the leaked object's physical id.
+fn session_with_a_leak(
+    ledger: Box<dyn ucdk_ledger::Ledger>,
+) -> (*mut ucdk_capi::SessionHandle, String) {
+    use ucdk_provider::{Node, Provider as _, Stamp};
+    let mut fake = Fake::standard();
+    let path = ucdk_provider::NodePath::new("ghost/run").expect("a path");
+    let node = Node::new(
+        path.clone(),
+        ucdk_provider::Kind::service(),
+        "ghost-run".to_owned(),
+        Vec::new(),
+    )
+    .expect("a node");
+    let id = fake
+        .create(&node, &Stamp::for_node(&kit::cell(), &path))
+        .expect("create")
+        .physical;
+    let session = into_handle(Session::with_parts(Box::new(fake), ledger, kit::cell()));
+    (session, id.as_str().to_owned())
+}
+
+/// Proves: `ucdk_leaks` through the library, on the in-memory and on the file ledger, answers the
+/// leaks arm with the leaked object and exit class leaks (8), twice with the same answer (it
+/// consumes nothing); and an apply through the same session ends done with the leak in its
+/// report. Catches a verb wired to the wrong request, a response that drops the object, and a
+/// sweep that differs by ledger.
+#[test]
+fn leaks_through_the_abi_find_the_object_on_both_ledgers() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("abi-leaks");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let file = FileLedger::open(dir.join("ledger")).expect("open");
+    let ledgers: [Box<dyn ucdk_ledger::Ledger>; 2] =
+        [Box::new(MemoryLedger::new()), Box::new(file)];
+    for ledger in ledgers {
+        let (session, ghost) = session_with_a_leak(ledger);
+        let first = call(ucdk_leaks, session, &LeaksRequest {}.encode_to_vec());
+        assert_eq!(first.status, OK);
+        let answer = Outcome::decode(first.bytes.as_slice()).expect("an outcome");
+        assert_eq!(answer.exit, ExitClass::Leaks as i32);
+        let Some(outcome::Result::Leaks(found)) = &answer.result else {
+            panic!("not leaks: {answer:?}");
+        };
+        assert_eq!(found.leaks.len(), 1);
+        assert_eq!(found.leaks[0].physical_id, ghost);
+        assert_eq!(found.leaks[0].owner, "ghost");
+        assert_eq!(
+            call(ucdk_leaks, session, &[]).bytes,
+            first.bytes,
+            "the empty request is the request"
+        );
+
+        let list = list_of(vec![service_of("web", 80)]);
+        let planned = call(
+            ucdk_plan,
+            session,
+            &PlanRequest {
+                resources: Some(list.clone()),
+                mode: Mode::Apply as i32,
+            }
+            .encode_to_vec(),
+        );
+        let hash = planned_hash(&Outcome::decode(planned.bytes.as_slice()).expect("an outcome"));
+        let applied = call(
+            ucdk_apply,
+            session,
+            &ApplyRequest {
+                resources: Some(list),
+                plan_hash: hash,
+                rollback: false,
+            }
+            .encode_to_vec(),
+        );
+        let applied = Outcome::decode(applied.bytes.as_slice()).expect("an outcome");
+        assert_eq!(applied.exit, ExitClass::Done as i32, "{applied:?}");
+        let Some(outcome::Result::Done(report)) = &applied.result else {
+            panic!("not done: {applied:?}");
+        };
+        assert_eq!(report.created.len(), 1);
+        assert_eq!(report.leaks.len(), 1);
+        assert_eq!(report.leaks[0].physical_id, ghost);
+        close(session);
+    }
+}
+
+/// Proves: the provider `fake-leaky` holds one object stamped for the session's own cell, the
+/// local one and one named in the config, so the sweep reports it either way (a stamp of any
+/// other cell would not be listed), and the ordinary `fake` holds none. Catches a fixture
+/// stamped for a fixed cell.
+#[test]
+fn the_leaky_provider_leaks_into_the_sessions_own_cell() {
+    for (provider, cell, leaked) in [
+        ("fake-leaky", "", 1),
+        ("fake-leaky", "host/cell/bbbbbbbbbbbbbbbbbbbbbbbbbb", 1),
+        ("fake", "", 0),
+    ] {
+        let mut config = fake_config();
+        config.provider = provider.to_owned();
+        config.cell = cell.to_owned();
+        let opened = open(&config);
+        assert_eq!(opened.status, OK);
+        let reply = call(ucdk_leaks, opened.session, &[]);
+        let answer = Outcome::decode(reply.bytes.as_slice()).expect("an outcome");
+        let Some(outcome::Result::Leaks(found)) = &answer.result else {
+            panic!("not leaks: {answer:?}");
+        };
+        assert_eq!(found.leaks.len(), leaked, "{provider} {cell}");
+        close(opened.session);
+    }
 }

@@ -31,7 +31,7 @@ with Session(config, library_path="target/debug/libucdk_capi.so") as session:
   (`outcome.refused`, `outcome.failed`, `outcome.exit`), never exceptions. An exception
   (`ucdk.errors`) means the call itself did not work.
 - `ucdk/generated` is written by `cargo xtask gen-sdk` from the protos and is not edited by hand.
-  Everything else in `ucdk` is hand-written and small: `_library.py` (the nine C functions),
+  Everything else in `ucdk` is hand-written and small: `_library.py` (the ten C functions),
   `session.py` and `errors.py`.
 
 Tests are in `tests` and run with `cargo xtask sdk-test`, which builds the library first.

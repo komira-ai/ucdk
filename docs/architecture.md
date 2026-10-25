@@ -104,12 +104,13 @@ int32_t ucdk_plan        (ucdk_session *s, const uint8_t *req, size_t req_len, u
 int32_t ucdk_apply       (ucdk_session *s, const uint8_t *req, size_t req_len, ucdk_buf *out);
 int32_t ucdk_destroy     (ucdk_session *s, const uint8_t *req, size_t req_len, ucdk_buf *out);
 int32_t ucdk_status      (ucdk_session *s, const uint8_t *req, size_t req_len, ucdk_buf *out);
+int32_t ucdk_leaks       (ucdk_session *s, const uint8_t *req, size_t req_len, ucdk_buf *out);
 
 /* Memory: every ucdk_buf the library fills is released here, once. Zeroed buf is a no-op. */
 void    ucdk_buf_free(ucdk_buf buf);
 ```
 
-That is nine symbols. The five verbs share one signature on purpose: a binding is written once.
+That is ten symbols. The six verbs share one signature on purpose: a binding is written once.
 
 What each verb is, in terms of what exists:
 
@@ -131,8 +132,16 @@ What each verb is, in terms of what exists:
   `Request::Status`, which calls `Ledger::read` and `Provider::observe` and nothing else. It lists
   every recorded object and every wanted node of the list.
 
-A later verb (for example a leak sweep) is a new symbol and a new minor version; nothing existing
-changes.
+- `ucdk_leaks`: request is a `LeaksRequest` (empty: it is about the cell, not about a file);
+  response is an `Outcome` whose `leaks` arm lists the objects that carry the cell's stamp and
+  that no ledger record accounts for. Read-only: `Request::Leaks` reads the ledger and calls
+  `Provider::list_stamped` and nothing else. Its exit class is done when the list is empty and
+  `leaks` (8) when it is not. A stamp is a claim, never an authority: nothing is deleted on it,
+  and an object whose stamp was stripped is not listed by the provider and so is not reported. An
+  apply ends with the same sweep and carries its leaks in its report (`Report.leaks`); it is still
+  done. Added in ABI minor 2.
+
+A later verb is a new symbol and a new minor version; nothing existing changes.
 
 ### 3.3 Handles and threads
 
@@ -182,14 +191,14 @@ independently (section 8.3). It is not a function-pointer table added to this on
 `crates/ucdk-capi` builds as `cdylib` and `rlib` (the tests call the same functions in-process).
 Where the code is more specific than the text above:
 
-- **Nine functions, not eight.** `abi_version`, `session_open`, `session_close`, the five verbs
+- **Ten functions.** `abi_version`, `session_open`, `session_close`, the six verbs
   and `buf_free`. The header is hand-maintained; `tests/header.rs` compares it with the exports
   (names, order, signatures, constants and the buffer layout), and checks that each name
   resolves, by a linker declaration, to the function of that name.
 - **`ucdk_load_catalog`** takes a `ResourceList` and answers `ucdk.api.v1.CatalogResponse` (the
   lowered nodes in dependency order with kind, wanted flag and dependencies, or the findings
   that refuse the list). The other four verbs answer `ucdk.api.v1.Outcome`.
-- **Sessions.** `SessionConfig.provider` is `fake` or `fake-limited`; `ledger_kind` is empty or
+- **Sessions.** `SessionConfig.provider` is `fake`, `fake-limited` or `fake-leaky` (the fake with one stamped object no record names, for hosts that test the leak sweep); `ledger_kind` is empty or
   `memory`, or `file` with `ledger_location`; `cell` is empty (a local cell) or `machine/cell/uid`;
   `provider_options` must be empty and `credentials` a known value. Anything else the library
   lacks is `UCDK_ABI`. A ledger that cannot be opened (held by another session, a missing
@@ -248,7 +257,7 @@ a zero length is a valid empty request; a null pointer with a non-zero length is
 On a non-zero code the library tries to fill `out` with an `Error` message (`code`, `message`,
 optional detail). The message is for a human and is not parsed. This extends rather than replaces
 the exit table the CLI documents today (0 done, 2 usage, 3 refused with nothing changed, 4 failed
-with no effect, 6 failed after changing something): `ucdk-api` holds the one function from
+with no effect, 6 failed after changing something, 8 leaks found by the leak sweep): `ucdk-api` holds the one function from
 `Outcome` to that exit class, the CLI prints it as its exit code, and each SDK returns it as a
 field of the result. There is one table, not one per host.
 
@@ -302,7 +311,7 @@ no `protoc` and no per-language protobuf toolchain is needed to generate anythin
 
 | Generated, never edited | Hand-written, small and fixed |
 |---|---|
-| message classes and enums for both packages, with docs taken from the proto comments | the C ABI binding: load the library, check the version, call the nine functions |
+| message classes and enums for both packages, with docs taken from the proto comments | the C ABI binding: load the library, check the version, call the ten functions |
 | binary encode and decode for those messages | the `Session` type: `open`, `load_catalog`, `plan`, `apply`, `destroy`, `status`, `close`, and the error type built from the status codes |
 | one typed template per resource kind (the fields of the `Resource.body` oneof): required fields as constructor arguments, optional ones as keywords, oneofs as separate named constructors (an image is `Image.digest(...)` or `Image.step_output(...)`, never a free-form dict) | locating the library (6.5) |
 | typed output references from the `exposes` option: `service.url` is a `Ref`, not a string | the worker thread and the promises (TypeScript) |
@@ -577,7 +586,7 @@ repository does today is a **proposal**.
 | `ucdk-engine` | apply, destroy, resume, rollback, outputs, status | integration tests over the fake with call logs (`tests/apply.rs`, `crash.rs`, `delete.rs`, `outputs.rs`, `status.rs`, `read_status.rs`); the crash sweeps and rollback scenarios run on the memory and the file ledger | a mutation before its intent is recorded, a record dropped after a failed read, a delete of an object that is not ours |
 | `ucdk-cli` | arguments, exit codes, plan text, end to end | in-process runs over a `World` (`tests/cli.rs`, `e2e.rs`, `status.rs`, `status_verb.rs`) with plan-text goldens | wrong exit class, a drifting plan text |
 | `ucdk-api` (proposal) | message-to-value conversion in both directions; the outcome-to-exit table | round-trip tests; an exhaustive match so a new `Outcome` or `Refusal` variant fails to compile until it is mapped | a field dropped in conversion, an unmapped outcome |
-| `ucdk-capi` | the nine functions, called as C would | see 10.3 | ownership, panic, version and malformed-input defects |
+| `ucdk-capi` | the ten functions, called as C would | see 10.3 | ownership, panic, version and malformed-input defects |
 | SDKs | binding and generated code | see 10.4 | an SDK that disagrees with the core or with another SDK |
 | generator | output for fixture protos; the committed SDK; a kind added to `resource.proto` | golden output (`tests/generate.rs`, `templates.rs`, `golden_coverage.rs`), the `sdk-fresh` gate, and the fixture's golden loaded and run by the Python and TypeScript tests | generated code that does not load or encode wrongly, a refused-in-silence field type, a stale committed SDK |
 
@@ -732,8 +741,10 @@ lists its tests by name. The first part ends with working Python and TypeScript 
     destroy through TypeScript against the fake provider, end to end, through the real library.**
     Not done: the npm package layout (step 15), a coverage gate and a type-check gate (10.4).
 11. **Lease and fencing** with an injected clock (done: 9.2; the fence in every engine write, `Refusal::LeaseHeld` and `LEASE_LOST` through `ucdk-api`, the CLI, the library and both SDKs, the crash sweep run again with a dead holder).
-12. **Leak sweep**: a read-only comparison of the cell's stamped objects with the ledger, as a
-    new verb in the engine, `ucdk-api`, the library (a minor ABI bump) and both SDKs.
+12. **Leak sweep** (done: `Request::Leaks`, a read-only comparison of the cell's stamped objects
+    with the ledger; `LeaksRequest` and `LeaksResponse` in `ucdk-api` with exit class `leaks` (8),
+    `ucdk leaks`, `ucdk_leaks` in the library (ABI minor 2) and both SDKs; an apply ends with the
+    sweep and reports leaks without failing; a stamp alone never authorises a delete).
 13. **First real cloud, emulator first.** Provider crate, emulator crate, adapter crate;
     `kit::run_all` and the crash sweep on the emulator; the registry entry. Then the
     object-store ledger on that cloud's conditional writes (9, item 3).

@@ -7,7 +7,7 @@
 //! line today; a library and the SDKs later) does three things with this crate:
 //!
 //! - turns a request message into the engine's [`ucdk_engine::Request`]
-//!   ([`v1::PlanRequest::to_request`], [`v1::StatusRequest::to_request`],
+//!   ([`v1::PlanRequest::to_request`], [`v1::StatusRequest::to_request`], [`v1::LeaksRequest::to_request`],
 //!   [`v1::ApplyRequest::approved`] and [`v1::DestroyRequest::approved`]), or learns why it cannot ([`RequestError`]);
 //! - turns what the engine answered into a [`v1::Outcome`] (`From<&ucdk_engine::Outcome>`), which
 //!   carries the exit class of the answer;

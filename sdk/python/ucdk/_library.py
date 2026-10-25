@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """The C ABI of the ucdk library (`crates/ucdk-capi/include/ucdk.h`), bound with ctypes.
 
-This is the whole of the binding: load the library, check its version, call the nine functions.
+This is the whole of the binding: load the library, check its version, call the ten functions.
 Nothing is read from the environment; the library is named by an argument or found in the
 package directory.
 """
@@ -14,10 +14,10 @@ from typing import Optional, Tuple, Union
 from .errors import AbiMismatch, LibraryError, UcdkError, error_for
 
 #: The ABI this SDK was written for, as (major, minor): the header's UCDK_ABI_MAJOR/MINOR.
-SDK_ABI = (0, 1)
+SDK_ABI = (0, 2)
 
 _NAME = "libucdk_capi.dylib" if sys.platform == "darwin" else "libucdk_capi.so"
-_VERBS = ("load_catalog", "plan", "apply", "destroy", "status")
+_VERBS = ("load_catalog", "plan", "apply", "destroy", "status", "leaks")
 
 
 class _Buf(ctypes.Structure):

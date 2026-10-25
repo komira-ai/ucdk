@@ -128,6 +128,15 @@ export class Session {
     return api.Outcome.decode(await this.#call("destroy", request));
   }
 
+  /**
+   * Compares the cell's stamped objects with the ledger and changes nothing. `outcome.leaks`
+   * lists the objects that carry the cell's stamp and have no ledger record, and `outcome.exit`
+   * is the leaks class (8) when there are any. A stamp never authorises a delete.
+   */
+  async leaks(): Promise<api.Outcome> {
+    return api.Outcome.decode(await this.#call("leaks", new api.LeaksRequest({})));
+  }
+
   /** Reads the ledger and the live objects; `outcome.status` holds one entry per object. */
   async status(resources: proto.ResourceList): Promise<api.Outcome> {
     return api.Outcome.decode(await this.#call("status", new api.StatusRequest({ resources })));

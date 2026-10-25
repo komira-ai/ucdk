@@ -9,7 +9,7 @@ use crate::v1::ExitClass;
 
 impl ExitClass {
     /// The exit code of the class: 0 done, 2 usage, 3 refused, 4 failed with no effect, 6
-    /// failed after changing something.
+    /// failed after changing something, 8 leaks found.
     pub fn code(self) -> u8 {
         match self {
             Self::Done => 0,
@@ -17,19 +17,24 @@ impl ExitClass {
             Self::Refused => 3,
             Self::FailedNoEffect => 4,
             Self::FailedChanged => 6,
+            Self::Leaks => 8,
         }
     }
 }
 
 /// How an outcome ends a command. A plan, a status (whatever it found: a missing object is a finding, not a failure), and a
 /// run that finished (even one that left an object
-/// converging or still failed, which its report says), are done.
+/// converging or still failed, which its report says), are done. A leak sweep is done when it
+/// found none and `Leaks` when it found some; an apply that finds leaks is still done, because
+/// its report carries them.
 ///
 /// Every outcome and every refusal is named here, so a new variant does not compile until it
 /// has a class.
 pub fn exit_class(outcome: &Outcome) -> ExitClass {
     match outcome {
         Outcome::Planned(_) | Outcome::Done(_) | Outcome::Status(_) => ExitClass::Done,
+        Outcome::Leaks(leaks) if leaks.is_empty() => ExitClass::Done,
+        Outcome::Leaks(_) => ExitClass::Leaks,
         Outcome::Refused(why) => match why {
             Refusal::Conflicts(_)
             | Refusal::EmptyScope

@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use ucdk_ledger::State;
 use ucdk_plan::{Conflict, Lowered, Plan, PlanHash, Retained};
-use ucdk_provider::{Kind, NodePath, Status};
+use ucdk_provider::{Kind, NodeKey, NodePath, OwnerLabel, PhysicalId, Status};
 
 use crate::error::{EngineError, short};
 
@@ -43,6 +43,10 @@ pub enum Request {
     /// Read the ledger and the live objects it records and `desired` names, and change
     /// nothing: no ledger write, no provider call that mutates.
     Status { desired: Lowered },
+    /// Compare the cell's stamped objects with the ledger and change nothing: one list call
+    /// and one ledger read. An object that carries our stamp and has no record is reported; it
+    /// is never deleted on that evidence.
+    Leaks,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +57,9 @@ pub enum Outcome {
     Done(Report),
     /// The answer of a `Request::Status`: one entry per object, in path order.
     Status(Vec<ObjectStatus>),
+    /// The answer of a `Request::Leaks`: the leaked objects, by physical id; empty when there
+    /// are none.
+    Leaks(Vec<Leak>),
     /// The run was refused before anything was changed.
     Refused(Refusal),
     /// The run stopped; `Failure::report` says what had been done.
@@ -156,6 +163,25 @@ pub struct Report {
     pub rolled_back: Vec<NodePath>,
     /// Objects a rollback could not delete.
     pub rollback_failed: Vec<(NodePath, EngineError)>,
+    /// The leak sweep an apply ends with: objects of this cell that carry our stamp and have
+    /// no ledger record. They are reported and left alone, and the apply is not failed for them.
+    pub leaks: Vec<Leak>,
+    /// Set when that sweep could not read the ledger or the provider; the apply still stands.
+    pub leak_sweep_failed: Option<EngineError>,
+}
+
+/// A live object that carries this cell's stamp and that no ledger record accounts for. The
+/// stamp says whose it claims to be; it is no authority to delete it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Leak {
+    pub kind: Kind,
+    pub physical: PhysicalId,
+    /// The name the provider shows, without any stamp encoding.
+    pub name: String,
+    /// The top-level owner the stamp names.
+    pub owner: OwnerLabel,
+    /// The node the stamp names.
+    pub node: NodeKey,
 }
 
 /// A run that stopped at a step.
