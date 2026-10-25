@@ -5,7 +5,7 @@
 //! Verbs: `plan`, `apply` and `destroy`, against the `fake` or `fake-limited` provider. All
 //! input is flags: `--input` is a binary `ucdk.resource.v1.ResourceList`.
 //!
-//! Exit codes:
+//! Exit codes (the table is `ucdk_api::exit_class`):
 //!
 //! | code | meaning |
 //! |---|---|

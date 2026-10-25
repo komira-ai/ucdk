@@ -1,0 +1,27 @@
+[package]
+name = "ucdk-api"
+description = "The ucdk.api.v1 messages, their conversion to and from the engine's values, and the one table from outcome to exit class."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+prost.workspace = true
+ucdk-engine = { path = "../ucdk-engine" }
+ucdk-plan = { path = "../ucdk-plan" }
+ucdk-proto = { path = "../ucdk-proto" }
+ucdk-provider = { path = "../ucdk-provider" }
+
+[build-dependencies]
+prost-build.workspace = true
+protox.workspace = true
+
+[dev-dependencies]
+ucdk-ledger = { path = "../ucdk-ledger" }
+ucdk-provider-fake = { path = "../ucdk-provider-fake" }
+
+[lints]
+workspace = true

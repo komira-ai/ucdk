@@ -550,10 +550,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
+name = "ucdk-api"
+version = "0.0.0"
+dependencies = [
+ "prost",
+ "prost-build",
+ "protox",
+ "ucdk-engine",
+ "ucdk-ledger",
+ "ucdk-plan",
+ "ucdk-proto",
+ "ucdk-provider",
+ "ucdk-provider-fake",
+]
+
+[[package]]
 name = "ucdk-cli"
 version = "0.0.0"
 dependencies = [
  "prost",
+ "ucdk-api",
  "ucdk-engine",
  "ucdk-ledger",
  "ucdk-plan",

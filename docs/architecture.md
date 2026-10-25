@@ -29,7 +29,7 @@ so a reader can check it.
                        |                                      |
                   ucdk-capi  (proposal; the only crate with unsafe code)
                        |                                      |
-                  ucdk-api   (proposal; protobuf <-> engine values, one exit-code table)
+                  ucdk-api   (protobuf <-> engine values, one exit-code table)
                        |______________________________________|
                                        |
                                   ucdk-engine   write-ahead apply, closed-world delete
@@ -60,7 +60,7 @@ pure workspace crates).
 | Engine | `ucdk-engine` | `Engine::handle(Request) -> Outcome`: write-ahead apply, re-observe before each mutation, closed-world delete, opt-in rollback, outputs, status. Synchronous | no |
 | Host: CLI | `ucdk-cli` | `plan`, `apply`, `destroy` against the fake, as a library (`run(args, &mut World) -> u8`) with a three-line `main.rs` | no |
 | Repository checks | `xtask` | `cargo xtask check`, `coverage`, `fetch` | no |
-| API | `ucdk-api` (**proposal**) | protobuf messages for everything that is not a resource (session config, plan, report, status, findings, error) and the code converting them to and from the engine's values; the single table from outcome to exit class that both the CLI and the SDKs use | no |
+| API | `ucdk-api` | the `ucdk.api.v1` protobuf messages for everything that is not a resource (session config, requests, plan, report, findings, error; the status message waits for the engine's status request, step 5) and the code converting requests to the engine's requests and the engine's outcomes to messages (a plan only goes out: a caller sends the hash, never a plan); the single table from outcome to exit class that both the CLI and the SDKs use | no |
 | C ABI | `ucdk-capi` (**proposal**) | the `cdylib`, the C header, panic containment, buffer ownership. The only crate in the workspace allowed `unsafe` | no |
 | SDKs | `sdk/python`, `sdk/typescript` (**proposal**) | the loader, the session wrapper, and generated typed templates | n/a |
 | Generator | `ucdk-codegen` (**proposal**) | reads the descriptor set and writes the generated SDK sources | no |

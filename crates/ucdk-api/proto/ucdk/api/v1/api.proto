@@ -1,0 +1,290 @@
+// SPDX-License-Identifier: Apache-2.0
+// The ucdk API (`ucdk.api.v1`): everything that crosses between a host (the command line, a
+// library, an SDK) and the core, other than the resources themselves, which stay in
+// `ucdk.resource.v1`. Requests carry a resource list; responses carry what the engine answered
+// and the exit class of that answer.
+//
+// The messages are data. A response is never parsed for its text: `message` fields are for a
+// person. Numbers are a promise; a field is added, never renumbered.
+
+syntax = "proto3";
+
+package ucdk.api.v1;
+
+import "ucdk/resource/v1/resource.proto";
+
+// What a plan is for.
+enum Mode {
+  MODE_UNSPECIFIED = 0;
+  // Make the world match the list.
+  MODE_APPLY = 1;
+  // Remove everything the list names.
+  MODE_DESTROY = 2;
+}
+
+// How a run ended, as the one table every host reports. The numbers are the command line's exit
+// codes. 0 is success; usage (2) is a request the host could not understand.
+enum ExitClass {
+  // Done, or planned; including "no changes" and a run that left an object converging or failed
+  // (the report says so).
+  EXIT_CLASS_DONE = 0;
+  // The request was malformed: a bad flag, or bytes that are not the expected message.
+  EXIT_CLASS_USAGE = 2;
+  // Refused, and nothing was changed.
+  EXIT_CLASS_REFUSED = 3;
+  // Failed, and nothing was changed: safe to run again.
+  EXIT_CLASS_FAILED_NO_EFFECT = 4;
+  // Failed after changing something: plan again before running again.
+  EXIT_CLASS_FAILED_CHANGED = 6;
+}
+
+// Where the provider finds its credentials. The credentials themselves never appear.
+enum CredentialSource {
+  CREDENTIAL_SOURCE_UNSPECIFIED = 0;
+  // The named profile (`SessionConfig.profile`).
+  CREDENTIAL_SOURCE_PROFILE = 1;
+  // The platform's default chain.
+  CREDENTIAL_SOURCE_DEFAULT_CHAIN = 2;
+  // An identity the provider resolves itself.
+  CREDENTIAL_SOURCE_PROVIDER_RESOLVED = 3;
+}
+
+// What a session is opened with.
+message SessionConfig {
+  // The provider's name, such as `fake`.
+  string provider = 1;
+  map<string, string> provider_options = 2;
+  // The kind of ledger and where it is.
+  string ledger_kind = 3;
+  string ledger_location = 4;
+  // The cell identity every stamp of the session carries.
+  string cell = 5;
+  CredentialSource credentials = 6;
+  // The profile, when `credentials` is PROFILE.
+  string profile = 7;
+}
+
+// Observe and plan; changes nothing.
+message PlanRequest {
+  ucdk.resource.v1.ResourceList resources = 1;
+  Mode mode = 2;
+}
+
+// Carry out the plan the approver pinned. The core plans the world as it is now and refuses the
+// run unless that plan has `plan_hash`.
+message ApplyRequest {
+  ucdk.resource.v1.ResourceList resources = 1;
+  // 64 lower-case hex digits.
+  string plan_hash = 2;
+  // A failed run deletes what it created.
+  bool rollback = 3;
+}
+
+// Carry out the approved destroy plan, under the same hash rule.
+message DestroyRequest {
+  ucdk.resource.v1.ResourceList resources = 1;
+  string plan_hash = 2;
+}
+
+enum StepAction {
+  STEP_ACTION_UNSPECIFIED = 0;
+  STEP_ACTION_CREATE = 1;
+  STEP_ACTION_UPDATE = 2;
+  STEP_ACTION_NOOP = 3;
+  STEP_ACTION_DELETE = 4;
+  STEP_ACTION_REAP = 5;
+  STEP_ACTION_CONVERGING = 6;
+  STEP_ACTION_KNOWN_AFTER_APPLY = 7;
+  STEP_ACTION_RETAIN = 8;
+}
+
+// Why an object is left alone on purpose.
+enum RetainReason {
+  RETAIN_REASON_UNSPECIFIED = 0;
+  // Its kind holds data.
+  RETAIN_REASON_KEEP = 1;
+  // The provider says it cannot be deleted; `detail` is the provider's reason.
+  RETAIN_REASON_UNDELETABLE = 2;
+  // The list no longer names the owner.
+  RETAIN_REASON_OWNER_NOT_NAMED = 3;
+}
+
+message Retained {
+  RetainReason reason = 1;
+  string detail = 2;
+}
+
+message Step {
+  string path = 1;
+  string kind = 2;
+  StepAction action = 3;
+  // The physical id, for a delete.
+  string physical_id = 4;
+  // Set for a retain.
+  Retained retained = 5;
+}
+
+// The steps of a run, in the order they run, and the hash an approver pins.
+message Plan {
+  repeated Step steps = 1;
+  string hash = 2;
+}
+
+enum ConflictKind {
+  CONFLICT_KIND_UNSPECIFIED = 0;
+  CONFLICT_KIND_FOREIGN = 1;
+  CONFLICT_KIND_STAMP_WITHOUT_RECORD = 2;
+  CONFLICT_KIND_PHYSICAL_ID_MISMATCH = 3;
+  CONFLICT_KIND_STAMP_STRIPPED = 4;
+  CONFLICT_KIND_OTHER_OWNER = 5;
+  CONFLICT_KIND_OTHER_TOOL = 6;
+  CONFLICT_KIND_VANISHED_RETAINED = 7;
+  CONFLICT_KIND_RECORDED_CYCLE = 8;
+}
+
+message Conflict {
+  string path = 1;
+  ConflictKind kind = 2;
+  // The other tool's marker, for OTHER_TOOL.
+  string marker = 3;
+  string message = 4;
+}
+
+enum FindingKind {
+  FINDING_KIND_UNSPECIFIED = 0;
+  FINDING_KIND_BAD_ID = 1;
+  FINDING_KIND_DUPLICATE_ID = 2;
+  FINDING_KIND_MISSING_BODY = 3;
+  FINDING_KIND_MISSING_IMAGE = 4;
+  FINDING_KIND_UNRESOLVED = 5;
+  FINDING_KIND_UNSUPPORTED_PLATFORM = 6;
+  FINDING_KIND_EMPTY_VALUE = 7;
+  FINDING_KIND_ENV_SECRET_OVERLAP = 8;
+  FINDING_KIND_UNBOUND_REF = 9;
+  FINDING_KIND_NO_TARGET = 10;
+  FINDING_KIND_UNSUPPORTED_ACCESS = 11;
+  FINDING_KIND_ACCESS_TO_OUTPUT = 12;
+  FINDING_KIND_MISSING_OUTPUT = 13;
+  FINDING_KIND_NAMED_OUTPUT = 14;
+  FINDING_KIND_UNEXPOSED_OUTPUT = 15;
+  FINDING_KIND_NOT_PORTABLE = 16;
+  FINDING_KIND_CYCLE = 17;
+}
+
+// One problem in a resource list.
+message Finding {
+  string resource = 1;
+  // The field, such as `service.env.DB_URL`; empty when the whole resource is meant.
+  string field = 2;
+  FindingKind kind = 3;
+  string message = 4;
+}
+
+message Findings {
+  repeated Finding findings = 1;
+}
+
+message Conflicts {
+  repeated Conflict conflicts = 1;
+}
+
+message EmptyScope {}
+
+message PlanHashMismatch {
+  string approved = 1;
+  string plan = 2;
+}
+
+message PlanChanged {
+  string approved = 1;
+  string now = 2;
+}
+
+message UnsupportedStampMode {
+  repeated string paths = 1;
+}
+
+// Why a run was refused whole, before anything was changed.
+message Refusal {
+  oneof reason {
+    Findings findings = 1;
+    Conflicts conflicts = 2;
+    EmptyScope empty_scope = 3;
+    PlanHashMismatch plan_hash_mismatch = 4;
+    PlanChanged plan_changed = 5;
+    UnsupportedStampMode unsupported_stamp_mode = 6;
+  }
+  string message = 7;
+}
+
+message RetainedObject {
+  string path = 1;
+  Retained retained = 2;
+}
+
+message Blocked {
+  string path = 1;
+  // The resource path whose failure blocks it.
+  string producer = 2;
+}
+
+message RollbackFailure {
+  string path = 1;
+  string message = 2;
+}
+
+// What a run did, by object, in the order it did it.
+message Report {
+  repeated string created = 1;
+  repeated string updated = 2;
+  repeated string resumed = 3;
+  repeated string deleted = 4;
+  repeated string reaped = 5;
+  repeated RetainedObject retained = 6;
+  repeated string converging = 7;
+  repeated string failed = 8;
+  repeated Blocked blocked_by_failed = 9;
+  repeated string rolled_back = 10;
+  repeated RollbackFailure rollback_failed = 11;
+}
+
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  ERROR_CODE_PROVIDER = 1;
+  ERROR_CODE_LEDGER = 2;
+  ERROR_CODE_LEDGER_BUSY = 3;
+  ERROR_CODE_NOT_OURS = 4;
+  ERROR_CODE_STILL_PRESENT = 5;
+  ERROR_CODE_UNWITNESSED = 6;
+  ERROR_CODE_OUTPUT_UNKNOWN = 7;
+  // The request was not the expected message, or named a hash that is not one.
+  ERROR_CODE_INVALID_REQUEST = 8;
+}
+
+// Why a step failed. `message` is for a person and is not parsed.
+message Error {
+  ErrorCode code = 1;
+  string message = 2;
+}
+
+// A run that stopped at a step.
+message Failure {
+  // What had been done before it stopped, and what a rollback did.
+  Report report = 1;
+  // The object of the step that failed; absent when nothing was started.
+  optional string at = 2;
+  Error error = 3;
+}
+
+// What the engine answered, and the exit class of the answer.
+message Outcome {
+  oneof result {
+    Plan planned = 1;
+    Report done = 2;
+    Refusal refused = 3;
+    Failure failed = 4;
+    // The request was not understood; the exit class is USAGE.
+    Error invalid = 6;
+  }
+  ExitClass exit = 5;
+}

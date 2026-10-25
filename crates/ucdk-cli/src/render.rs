@@ -4,9 +4,9 @@
 
 use std::fmt::Write as _;
 
-use ucdk_engine::{EngineError, Failure, Report};
+use ucdk_api::v1::ExitClass;
+use ucdk_engine::{Failure, Report};
 use ucdk_plan::{Action, Plan, PlanHash, Retained};
-use ucdk_provider::ProviderError;
 
 use crate::args::Mode;
 use crate::world::ProviderName;
@@ -114,31 +114,18 @@ pub fn report_text(report: &Report) -> String {
     text
 }
 
-/// The exit code of a run that stopped, and the message for standard error. Code 4: nothing
-/// was changed, so the run is safe to repeat. Code 6: something may have been, so the world
+/// The message for standard error of a run that stopped, with the advice its exit class gives:
+/// nothing was changed, so the run is safe to repeat; or something may have been, so the world
 /// is read (planned) again before running again.
-pub fn failure(failure: &Failure) -> (u8, String) {
-    let safe_error = matches!(
-        &failure.error,
-        EngineError::Provider(
-            ProviderError::Refused(_) | ProviderError::Permanent(_) | ProviderError::Transient(_)
-        )
-    );
-    let nothing_done = failure.report == Report::default();
-    let (code, advice) = if nothing_done && (failure.at.is_none() || safe_error) {
-        (4, "nothing was changed; it is safe to run again")
+pub fn failure(failure: &Failure, class: ExitClass) -> String {
+    let advice = if class == ExitClass::FailedNoEffect {
+        "nothing was changed; it is safe to run again"
     } else {
-        (
-            6,
-            "the run changed things before it stopped; plan again before running again",
-        )
+        "the run changed things before it stopped; plan again before running again"
     };
     let place = failure
         .at
         .as_ref()
         .map_or_else(String::new, |at| format!(" at {at}"));
-    (
-        code,
-        format!("failed{place}: {}\n{advice}\n", failure.error),
-    )
+    format!("failed{place}: {}\n{advice}\n", failure.error)
 }
