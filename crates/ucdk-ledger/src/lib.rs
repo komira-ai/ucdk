@@ -6,7 +6,8 @@
 //! [`Ledger`] trait is a single document with a version [`Token`]: a write names the token it
 //! read and fails with [`LedgerError::Stale`] when another writer got there first, so two
 //! engines can never overwrite each other unseen. [`MemoryLedger`] keeps the document in
-//! memory.
+//! memory; [`FileLedger`] keeps it in a file on one machine, replaced atomically on every write,
+//! so a run can be resumed after the process died.
 //!
 //! The ledger holds no secrets and no cloud state beyond the physical id and the node's
 //! identity. It is not pure (it is state, and a real one does I/O), so it sits above the pure
@@ -15,9 +16,12 @@
 //! [`lease::Lease`] is an interface only: it names what a holder of the cell will need once
 //! lease time and fencing exist, and nothing implements it yet.
 
+mod file;
+mod format;
 pub mod lease;
 mod memory;
 mod record;
 
+pub use file::{FileLedger, OpenError};
 pub use memory::MemoryLedger;
 pub use record::{Change, Ledger, LedgerError, Origin, OwnerPath, Record, Snapshot, State, Token};

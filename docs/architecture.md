@@ -56,7 +56,7 @@ pure workspace crates).
 | Provider contract | `ucdk-provider` | the `Provider` trait, the node model (`Node`, `Kind`, `DesiredField`), stamps and cells, errors classified by what the caller may assume (`Refused`, `Permanent`, `Transient`, `InFlight`, `Unknown`), and the contract kit (`kit`) every provider must pass | yes |
 | Planning | `ucdk-plan` | validating and lowering a `ResourceList` to nodes in dependency order (`catalog`), the plan against an observed state, and the `PlanHash` an approver pins | yes |
 | Reference provider | `ucdk-provider-fake` | an in-memory provider with fault injection; the executable spec of the trait | yes |
-| Ledger | `ucdk-ledger` | records, the single-document compare-and-swap `Ledger` trait, `MemoryLedger`; `Lease` is an interface only, nothing implements it | no |
+| Ledger | `ucdk-ledger` | records, the single-document compare-and-swap `Ledger` trait, `MemoryLedger`, `FileLedger`; `Lease` is an interface only, nothing implements it | no |
 | Engine | `ucdk-engine` | `Engine::handle(Request) -> Outcome`: write-ahead apply, re-observe before each mutation, closed-world delete, opt-in rollback, outputs, status. Synchronous | no |
 | Host: CLI | `ucdk-cli` | `plan`, `apply`, `destroy` against the fake, as a library (`run(args, &mut World) -> u8`) with a three-line `main.rs` | no |
 | Repository checks | `xtask` | `cargo xtask check`, `coverage`, `fetch` | no |
@@ -377,8 +377,9 @@ be written in Rust.
 ## 9. State and the ledger
 
 **Exists:** `Ledger` is a single document with a version `Token`; a write names the token it read
-and fails with `LedgerError::Stale` if another writer got there first. `MemoryLedger` is the only
-implementation, so today nothing survives the process. `Lease` (acquire, release, `Epoch`) is an
+and fails with `LedgerError::Stale` if another writer got there first. `MemoryLedger` keeps the
+document in the process, for tests. `FileLedger` keeps it in a file, so a run can be resumed by
+another process on the same machine (below). `Lease` (acquire, release, `Epoch`) is an
 interface and nothing implements or calls it. The engine copes with two runs on one ledger by
 compare-and-swap writes and the create refusal, not by exclusion.
 
@@ -390,16 +391,40 @@ source of truth.
 
 **Proposals, in order:**
 
-1. A file ledger (single machine; documented as not a team backend) so the CLI and SDKs can resume
-   after a crash before any cloud exists. Atomic replace, restrictive file mode, refuses corrupt,
-   truncated or newer-major documents.
+1. **Done: the file ledger** (`FileLedger`; single machine, not a team backend), so a run can
+   resume after a crash before any cloud exists. See 9.1.
 2. A real lease with an injected clock and epoch fencing in the ledger write, so a stalled run
    cannot write after a newer one took over. Fencing protects the ledger, not the cloud.
 3. An object-store ledger on conditional writes (create-only, then if-match), with the lease in
    the same document, implemented by the provider that owns the environment. A provider that
    cannot give conditional writes is refused as a ledger home.
 
-The ledger holds no secrets; secret outputs are handed to the run that asks and never written.
+### 9.1 The file ledger
+
+`FileLedger::open(path)` keeps the whole document in one file.
+
+- **Writes.** Each write builds the next document, writes it to `<path>.tmp` in the same directory
+  (mode 0600), flushes the file, renames it over `<path>`, and flushes the directory. A reader
+  sees the old document or the new one. A crash before the rename leaves the old document and a
+  stale `.tmp`, which the next open removes. If a write fails, the handle re-reads the file (it
+  may have landed) so the next compare-and-swap is made against what is there.
+- **Format.** Line-oriented text: a header `ucdk-ledger <major>.<minor>`, the document version
+  (the `Token`), one block per record, and an `end <records> <checksum>` line. Values are
+  percent-escaped. The minor only adds tags: a build reads a document of its major and any
+  minor and ignores tags it does not know, but refuses to rewrite a document with a newer minor
+  (it would drop them). A newer major is refused on open by name. Nothing is guessed.
+- **Refusals.** A file that is empty, cut short at any length, changed by any one byte, not a
+  ledger, or whole but invalid (missing field, unknown state, duplicate record, wrong count) is
+  refused on open with the line and the reason (`OpenError::Corrupt`). The file is never
+  repaired or overwritten by a refused open. The checksum guards against accidents, not
+  tampering.
+- **One writer at a time is out of scope.** The real answer is the lease (item 2), which expires
+  and fences. Until then `open` takes an advisory lock on `<path>.lock` and refuses a second open
+  while any handle is alive (`OpenError::Locked`). The lock does not expire, does not cross
+  machines or network file systems reliably, and does not stop a process that ignores it.
+- **Not yet wired to the CLI.** The CLI's only cloud is the in-memory fake, so a state file
+  could not resume anything; `--state` arrives with the first provider whose objects outlive
+  the process. to the run that asks and never written.
 `SessionConfig` names the ledger by kind and location, plus a credential source by name.
 
 ## 10. Testing plan
@@ -417,8 +442,8 @@ repository does today is a **proposal**.
 | `ucdk-provider` | the model: names, ids, stamps, digests | unit tests; the kit has its own self-test where a deliberately nonconforming stub must fail each scenario (`tests/kit_self_test.rs`) | a kit scenario that cannot fail |
 | `ucdk-plan` | validation findings, lowering, ordering, plan and its hash | unit and golden tests (`tests/catalog.rs`, `graph.rs`, `plan.rs`, `hash_text.rs`) | a changed hash, a missed cycle or dangling reference, a foreign object not refused |
 | providers | the trait contract | `kit::run_all` on each provider; fake: fault injection (`fail_at_call`, `read_lag`, `ambiguous_success`, `foreign`, `race_next`, `create_failed`, `converging_reads`) | create that does not stamp atomically, an ambiguous result treated as failure, a delete of a foreign object |
-| `ucdk-ledger` | CAS semantics, record encoding | unit tests; proposed: one conformance suite run against every implementation | lost update, stale write accepted |
-| `ucdk-engine` | apply, destroy, resume, rollback, outputs, status | integration tests over the fake with call logs (`tests/apply.rs`, `crash.rs`, `delete.rs`, `outputs.rs`, `status.rs`) | a mutation before its intent is recorded, a record dropped after a failed read, a delete of an object that is not ours |
+| `ucdk-ledger` | CAS semantics, record encoding | unit tests; a conformance suite (`tests/conformance.rs`) run on both implementations; file-format and crash tests (`tests/file.rs`) | lost update, stale write accepted, a torn or altered file read as a ledger |
+| `ucdk-engine` | apply, destroy, resume, rollback, outputs, status | integration tests over the fake with call logs (`tests/apply.rs`, `crash.rs`, `delete.rs`, `outputs.rs`, `status.rs`); the crash sweeps and rollback scenarios run on the memory and the file ledger | a mutation before its intent is recorded, a record dropped after a failed read, a delete of an object that is not ours |
 | `ucdk-cli` | arguments, exit codes, plan text, end to end | in-process runs over a `World` (`tests/cli.rs`, `e2e.rs`, `status.rs`) with plan-text goldens | wrong exit class, a drifting plan text |
 | `ucdk-api` (proposal) | message-to-value conversion in both directions; the outcome-to-exit table | round-trip tests; an exhaustive match so a new `Outcome` or `Refusal` variant fails to compile until it is mapped | a field dropped in conversion, an unmapped outcome |
 | `ucdk-capi` (proposal) | the eight functions, called as C would | see 10.3 | ownership, panic, version and malformed-input defects |
@@ -519,8 +544,9 @@ lists its tests by name. The first part ends with a working Python SDK; real clo
 2. **`ucdk-api` and the `ucdk.api.v1` protos.** Session config, plan, report, status, findings,
    error; conversions to and from the engine's values; the outcome-to-exit table; the CLI is
    moved onto it with its exit codes and plan-text goldens unchanged.
-3. **File ledger** (`--state` for the CLI), so a run can be resumed across processes before the
-   library exists. Includes the ledger conformance suite.
+3. **File ledger** (done: `FileLedger`, the ledger conformance suite, the engine's crash and rollback
+   scenarios run on both ledgers). The CLI `--state` flag moves to the first provider whose
+   objects outlive the process (9.1).
 4. **Descriptor-driven lowering** for `service` and `job`, with the existing plan hashes and
    goldens unchanged as the proof; the kind-specific `match` in `catalog` is gone.
 5. **Read-only status in the engine** (`Request::Status`) and the CLI `status` verb.

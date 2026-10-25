@@ -1,6 +1,6 @@
 [package]
 name = "ucdk-ledger"
-description = "The ledger: what a run records about the objects it owns, behind a compare-and-swap trait, with an in-memory implementation."
+description = "The ledger: what a run records about the objects it owns, behind a compare-and-swap trait, with an in-memory and a single-machine file implementation."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
