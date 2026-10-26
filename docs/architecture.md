@@ -10,6 +10,8 @@ crate so a reader can check it.
 
 ## 1. The model in one page
 
+This describes the deploy-side framework as it stands today. The direction of the project has since moved to build, test and release; see [release.md](release.md), which also lists which parts of the framework stay and which go.
+
 - **One core**, written in Rust, built once as a shared library (`libucdk_capi.so` on Linux,
   `libucdk_capi.dylib` on macOS) with a small C ABI.
 - **Thin SDKs** in any language (Python and TypeScript first) load that library and call it.
