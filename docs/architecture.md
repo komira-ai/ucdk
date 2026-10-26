@@ -509,7 +509,8 @@ source of truth.
    cannot write after a newer one took over. Fencing protects the ledger, not the cloud. See 9.2.
 3. An object-store ledger on conditional writes (create-only, then if-match), with the lease in
    the same document, implemented by the provider that owns the environment. A provider that
-   cannot give conditional writes is refused as a ledger home.
+   cannot give conditional writes is refused as a ledger home. Decided: this is the first
+   feature and it is built on all four targets together (12, step 13).
 
 ### 9.1 The file ledger
 
@@ -689,10 +690,161 @@ is fetched and verified by `xtask`, as the other tools are).
 
 ### 10.5 Real clouds
 
-Each provider: `kit::run_all` and the crash sweep on its emulator in pull requests. After merge
-and only on demand, behind an explicit live flag that refuses to run without a named account and
-a spend cap: the kit against the real service, recordings scrubbed before they are committed.
-Live tests never run in pull-request CI.
+**Decided:** every feature is ported and tested on all four targets (AWS, GCP, Azure, on-premises)
+before the next feature starts; there is no first cloud. Each target has two tiers.
+
+- **Emulator tier (runs in pull requests).** The provider and the adapter's API trait run against
+  an emulator of that cloud's service with `kit::run_all` and the crash sweep (8.2, 10.2). No
+  account, no network, no credential. It is the only tier that gates a merge.
+- **Live tier (on demand only, never in pull-request CI).** The same suites against the real
+  service, started by an explicit verb. The verb refuses to start unless it is given, by flag,
+  the name of the test account, project or subscription (or, on-premises, the cluster and store)
+  and a spend cap, and unless that name matches the one the federated identity resolved to. A
+  recording is scrubbed before it is committed.
+
+**Proposal for every target, unless a section below says otherwise:**
+
+- **Cell and run id.** A live run uses a fresh cell and a fresh run id. The run id is written to
+  `Stamp.extra` on every kind whose stamp mode carries extra labels (`carries_extra`), outside the
+  identity, the digest and the plan hash, so it never changes a plan. A kind that cannot carry
+  extra labels is found by its cell stamp alone.
+- **Teardown and leak check.** The run ends with `destroy`, then `ucdk leaks` must exit 0. A
+  non-zero exit fails the live run and is reported with the objects listed.
+- **Scheduled sweep.** A scheduled job lists everything that carries a test stamp and is older
+  than N hours (N is a flag; 24 is the starting value) and reports it. It never deletes on a
+  stamp alone: a stamp is a claim, not an authority (3.2, `ucdk_leaks`), so a human removes what it reports,
+  or a run that holds the cell's ledger destroys it.
+- **Least privilege.** The federated CI identity may act only on resources that carry the test
+  stamp, or on a name prefix that only the test cell uses where a kind cannot be stamped at
+  create. It has no permission to change identities, billing, or anything outside the test
+  account. A policy is written down and reviewed as a file in the repository.
+- **Spend.** The test account has a budget alarm. The estimates below are for planning only; each
+  states its assumption, and none is a measured figure.
+- **Credentials.** None are standing. The workflow gets a short-lived credential by federation
+  from its own identity token, scoped to a named workflow environment of this repository, and
+  nothing is stored as a repository secret. A tier that cannot federate is listed as such.
+- **Emulator fidelity.** Every emulator models, at least: conditional writes (create-only and
+  if-match) with that service's own failure codes, so the ledger's `Stale` is produced from the
+  real code and not an invented one; eventually consistent listing (the new object is absent
+  from a list for a configurable number of calls); throttling (a retryable error before any
+  effect); and the ambiguous outcome (the write took effect and the caller saw an error or a
+  timeout). The suites assert these through counted calls and an injected clock, never wall
+  time.
+
+#### 10.5.1 AWS
+
+- **Emulator tier.** An in-process S3 model: `PutObject` with `If-None-Match: *` for create-only
+  and `If-Match` for compare-and-swap, returning the service's `412 PreconditionFailed` when the
+  condition fails and `409 ConditionalRequestConflict` when a conflicting write is in flight;
+  list-after-write lag; `503 SlowDown` throttling; a write that took effect and then reports a
+  connection error. Provider kinds are modelled by the service-API traits of their own emulators.
+- **Live tier.** A test account (see below), a ledger store with versioning on and public access
+  blocked, and the kit and crash sweep run in a fresh cell.
+- **Test environment.** A dedicated test account, separate from any account that serves traffic;
+  one ledger store; the CI identity (an IAM role trusted by the repository's workflow identity
+  provider); a budget with an alarm; a permissions boundary on the role so it cannot widen
+  itself.
+- **Credentials.** OIDC web identity federation: the role's trust policy accepts the workflow
+  identity provider's issuer, audience `sts.amazonaws.com`, and a subject of exactly this
+  repository and the named environment. Sessions last at most one hour.
+- **Policy.** Object read, write and list on the ledger store's cell prefix; create, tag,
+  describe and delete only where the resource carries the test stamp tag (condition on the
+  request tag at create and the resource tag afterwards); no IAM, no organization, no billing.
+- **Cost (estimate).** A ledger-only live run is a few hundred requests and some kilobytes of
+  storage, which is cents. A kit run that creates and deletes small compute or network
+  resources, assuming each lives under an hour and nothing is left running, is expected to be
+  in the low single-digit dollars. A monthly cap of 50 dollars is proposed as a figure for the
+  alarm, to be revised after the first month of real use.
+- **Cleanup.** As above. Resources are tagged at create; the sweep reads tags, and reports
+  anything older than N hours. Versioned ledger objects are expired by a lifecycle rule
+  on the test ledger store only.
+
+#### 10.5.2 GCP
+
+- **Emulator tier.** An in-process Cloud Storage model: uploads with `ifGenerationMatch=0` for
+  create-only and `ifGenerationMatch=<generation>` for compare-and-swap, failing with `412
+  conditionNotMet`; strongly consistent object reads with eventually consistent container-level
+  metadata; `429` and `503` throttling with a retry hint; an ambiguous write.
+- **Live tier.** A test project with a ledger store (uniform access control, public access
+  prevented), and the same kit and crash sweep.
+- **Test environment.** A dedicated test project, outside the folder that holds any project that
+  serves traffic; a ledger store; a Workload Identity Federation pool and provider; a service
+  account the pool impersonates; a billing budget with alert thresholds on the project.
+- **Credentials.** Workload Identity Federation with the provider's attribute condition fixed to
+  this repository and the named environment; the service account is impersonated for one hour
+  at most; no service-account key is ever created.
+- **Policy.** A custom role with object get, create, delete and list on the ledger store, and
+  create, get, update, delete and list on the kinds under test, with an IAM condition on the
+  resource's test label where the service supports conditions; no project-level owner, editor
+  or IAM admin.
+- **Cost (estimate).** Ledger traffic is cents per run, same assumption as AWS. A kit run that
+  creates short-lived resources for under an hour is expected to be low single-digit dollars. The
+  budget threshold proposed is the same monthly figure as AWS.
+- **Cleanup.** Labels at create; the sweep lists by label and age and reports. A lifecycle
+  rule removes old object versions of the ledger in the test ledger store.
+
+#### 10.5.3 Azure
+
+- **Emulator tier.** An in-process Blob Storage model: `If-None-Match: *` on `Put Blob` for
+  create-only and `If-Match: <etag>` for compare-and-swap, failing with `409 BlobAlreadyExists`
+  and `412 ConditionNotMet`; eventually consistent listing; `503 ServerBusy` throttling; an
+  ambiguous write. A lease on a blob (the service's own) is not used for the ledger lease, which
+  stays in the document (9.2).
+- **Live tier.** A test subscription with a resource group and a storage account whose ledger
+  container has public access disabled.
+- **Test environment.** Whether a subscription for tests exists is **not known**; it is one of
+  the questions the human administrator answers (see below). It needs a dedicated subscription
+  (or at least a dedicated resource group that nothing else shares), a storage account, an app
+  registration or user-assigned managed identity with a federated credential, and a budget.
+- **Credentials.** A federated identity credential on the app registration (or managed
+  identity), with issuer and subject fixed to this repository and the named environment; the
+  token is exchanged for a short-lived access token; no client secret and no certificate.
+- **Policy.** A role assignment scoped to the test resource group (not the subscription) for
+  blob data contributor on the ledger container and a custom role for the kinds under test,
+  with a condition on the test tag where role-assignment conditions apply; no owner, no user
+  access administrator.
+- **Cost (estimate).** Ledger traffic is cents per run, same assumption as AWS. A kit run with
+  short-lived resources is expected to be low single-digit dollars. The proposed monthly budget
+  is the same figure as AWS.
+- **Cleanup.** Tags at create; the sweep lists by tag and age within the test resource group
+  and reports. Teardown of the cell's resource group contents is by the run's own `destroy`,
+  never by deleting the group.
+
+#### 10.5.4 On-premises
+
+- **Emulator tier.** An in-process model of an S3-compatible store that supports conditional
+  writes (`If-None-Match: *` and `If-Match`), returning the same codes as 10.5.1, since that is
+  the contract the operator's store is required to meet. A store that does not honour conditional
+  writes is refused as a ledger home (9). The emulator also models listing lag, throttling and an
+  ambiguous write. The cluster side is modelled by the on-premises provider's own API trait.
+- **Live tier.** The operator names the cluster, the object store, the secrets store and the DNS
+  zone by flag; the verb refuses to start without all four and a quota cap (on-premises has no
+  invoice, so the cap is the quota of the test namespace and the store's quota).
+- **Test environment.** A cluster namespace set aside for tests; an S3-compatible object store
+  with conditional writes and a ledger container with a quota; a secrets store; a DNS zone or a sub-zone
+  the tests may write to; a CI runner that can reach them.
+- **Credentials.** The operator issues short-lived credentials (for example an identity
+  provider token exchanged for store credentials, or a cluster service account token bound to
+  the namespace) with a lifetime of at most one hour. A static access key is not accepted.
+  Where the operator's store cannot federate, that is reported in the run's output, not hidden.
+- **Policy.** Read, write and list on the ledger container's cell prefix; namespace-scoped rights
+  in the test namespace only; write to the test sub-zone only.
+- **Cost (estimate).** No per-run invoice; the cost is capacity: assumed a few gigabytes of
+  store and a few CPU cores for the length of the run, which the operator accounts for in the
+  usual way. The cap is the quota.
+- **Cleanup.** Labels or annotations at create; the sweep lists by label and age in the test
+  namespace and reports.
+
+#### 10.5.5 Bring-up order, for each feature
+
+**Proposal.** For every feature, the emulator suites for all four targets land in pull requests
+(they need nothing that does not exist today), and the feature is not complete until all four
+pass. The live tier is brought up where an account already exists, in this order: AWS first if
+a test account can be made, and on-premises first if the operator already runs a conforming
+object store, since both are the cheapest to make safe; GCP next; Azure last, because it is not
+known that a subscription exists. A target whose live tier is not yet available does not block the
+feature, since the emulator tier is the gate; it is listed as "emulator only" in the feature's
+pull request until its live run has been done once, on demand.
 
 ### 10.6 What runs where
 
@@ -704,7 +856,9 @@ Live tests never run in pull-request CI.
 | SDK conformance on Linux x86-64 for each SDK (`cargo xtask sdk-test`) | yes | all supported platforms |
 | built `cdylib` loaded dynamically, Miri, sanitizer builds | no | yes |
 | macOS arm64 and Linux arm64 builds and SDK conformance | no | yes |
-| live cloud runs | never | explicit, on demand |
+| per-cloud emulator suites (`kit::run_all`, the crash sweep and the ledger conformance suite on the AWS, GCP, Azure and on-premises emulators) | yes | yes |
+| per-cloud live runs (10.5), each against that target's named test account, project, subscription or cluster, with a spend cap | never | explicit, on demand |
+| scheduled sweep for objects carrying a test stamp older than N hours (reports, never deletes) | no | scheduled, after the live tier exists |
 
 The workflow has three jobs (`check`, `coverage`, `sdk`), one `cargo xtask` verb per job as the
 rule requires.
@@ -718,8 +872,10 @@ These are the decisions this document cannot make alone:
 2. **SDK-language tests** (10.4): decided: a scoped exception for `sdk/<language>`, run through
    `cargo xtask sdk-test` (`CONTRIBUTING.md`).
 3. **Encoding strategy** (6.3): decided: generated encoders.
-4. **The first real cloud's order** after the fake, and the live-account and spend rules for
-   section 10.5.
+4. **The first real cloud's order** after the fake: decided: there is no first cloud. One feature
+   at a time is ported and works on all four targets (AWS, GCP, Azure, on-premises) before the
+   next starts; the first feature is the in-environment state backend (9, 12). The live-account
+   and spend rules are in 10.5; which accounts exist is not recorded here.
 5. **Descriptor-driven lowering** (6.4) is built; kinds are added as a message with options.
 
 ## 12. Implementation sequence (proposal)
@@ -769,12 +925,22 @@ lists its tests by name. The first part ends with working Python and TypeScript 
     with the ledger; `LeaksRequest` and `LeaksResponse` in `ucdk-api` with exit class `leaks` (8),
     `ucdk leaks`, `ucdk_leaks` in the library (ABI minor 2) and both SDKs; an apply ends with the
     sweep and reports leaks without failing; a stamp alone never authorises a delete).
-13. **First real cloud, emulator first.** Provider crate, emulator crate, adapter crate;
-    `kit::run_all` and the crash sweep on the emulator; the registry entry. Then the
-    object-store ledger on that cloud's conditional writes (9, item 3).
-14. **Second and third clouds, and on-premises**, each as step 13, in the order decided in
-    question 4. On-premises uses the same trait against infrastructure the operator names and object
-    store.
+13. **In-environment state backend, on all four targets** (decided: one feature at a time, each
+    on AWS, GCP, Azure and on-premises before the next; emulator first, live runs only on demand).
+    The ledger lives in that environment's object store: S3 on AWS, Cloud Storage on GCP, Blob
+    Storage on Azure, and an operator-named S3-compatible store on-premises. Not done.
+    - (a) A conditional-write object-store trait (create-only, if-match, the service's failure
+      codes mapped to the ledger's `Stale`) and an object-store ledger over it, with the lease
+      and fence semantics of 9.2 unchanged and the ledger conformance suite passing on it.
+    - (b) One emulator per target modelling that service's conditional-write semantics (10.5),
+      each passing the ledger conformance suite and the crash sweep.
+    - (c) One thin adapter crate per target that calls the real service, with no coverage
+      exemption; each crate meets the 99% line and branch floor on its own.
+    - (d) Live runs on demand (10.5) once the test accounts exist, each ending with `ucdk leaks`
+      at exit 0. A target without an account is listed as emulator only until its first live run.
+14. **The next feature, the provider kinds, on all four targets** the same way: the kinds'
+    mapping against each cloud's API trait, an emulator per target, one thin adapter crate per
+    target, then live runs on demand. Not started until step 13 is done on all four targets.
 15. **Release packaging**: per-platform library builds, wheels and npm packages, the version
     policy of section 5 enforced by `cargo xtask check`.
 
