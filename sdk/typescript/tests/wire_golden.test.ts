@@ -178,6 +178,7 @@ function cases(): Record<string, Case> {
       credentials: api.CredentialSource.PROFILE,
       profile: "work",
       holder: "ci-7",
+      testClockMs: 2_000_000n,
     }),
     plan_request: new api.PlanRequest({ resources: resourceList(), mode: api.Mode.DESTROY }),
     apply_request: new api.ApplyRequest({

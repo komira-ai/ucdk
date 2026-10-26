@@ -2,8 +2,9 @@
 //! The `ucdk` command line as a library: `run(args, &mut World)` returns the exit code, so a
 //! test drives the same code the binary does, in-process.
 //!
-//! Verbs: `plan`, `apply` and `destroy`, against the `fake` or `fake-limited` provider. All
-//! input is flags: `--input` is a binary `ucdk.resource.v1.ResourceList`.
+//! Verbs: `plan`, `status`, `leaks`, `apply` and `destroy`, against the `fake` or `fake-limited`
+//! provider. All input is flags: `--input` is a binary `ucdk.resource.v1.ResourceList`, and
+//! `apply` and `destroy` take `--holder`, the name they take the ledger lease as.
 //!
 //! Exit codes (the table is `ucdk_api::exit_class`):
 //!
@@ -11,9 +12,10 @@
 //! |---|---|
 //! | 0 | done, or planned; including "no changes", and including a run that left an object still converging or still failed (a note says so) |
 //! | 2 | usage: a bad flag, or a file that cannot be read, written or decoded |
-//! | 3 | refused, nothing was changed: findings, a kind the provider lacks, an object that is not ours, a plan that is not the approved one |
+//! | 3 | refused, nothing was changed: findings, a kind the provider lacks, an object that is not ours, a plan that is not the approved one, a ledger leased to another holder |
 //! | 4 | failed with no effect: safe to run again |
-//! | 6 | failed after changing something: plan again before running again |
+//! | 6 | failed after changing something, or the run may still hold the ledger lease: plan again before running again |
+//! | 8 | `ucdk leaks` found stamped objects no ledger record accounts for |
 
 mod args;
 mod exec;

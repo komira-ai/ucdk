@@ -165,6 +165,7 @@ def cases():
             credentials=api.CredentialSource.PROFILE,
             profile="work",
             holder="ci-7",
+            test_clock_ms=2_000_000,
         ),
         "plan_request": api.PlanRequest(resources=resource_list(), mode=api.Mode.DESTROY),
         "apply_request": api.ApplyRequest(

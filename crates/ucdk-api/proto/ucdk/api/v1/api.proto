@@ -69,6 +69,10 @@ message SessionConfig {
   // has the lease; the holder a lease names takes it again at once, so naming it lets a rerun
   // reclaim a lease an earlier run left behind. Empty: a new name for every run.
   string holder = 8;
+  // For tests: when not zero, the ledger times its leases by a clock fixed at this many
+  // milliseconds since the Unix epoch, instead of the wall clock, so a test says when a lease
+  // lapses without waiting or reading the time. Zero: the wall clock.
+  uint64 test_clock_ms = 9;
 }
 
 // Observe and plan; changes nothing.

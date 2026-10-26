@@ -18,7 +18,9 @@ from ucdk.errors import Internal
 from .support import (
     DATA,
     IMAGE,
+    AFTER_LAPSE_MS,
     LEDGER_GOLDEN,
+    WHILE_HELD_MS,
     objects_of,
     open_session,
     pair,
@@ -231,7 +233,9 @@ class Lease(unittest.TestCase):
         wanted = pair()
         with tempfile.TemporaryDirectory() as directory:
             location = self.copy_of(directory, "leased.ucdk")
-            with open_session(ledger_kind="file", ledger_location=location) as session:
+            with open_session(
+                ledger_kind="file", ledger_location=location, test_clock_ms=WHILE_HELD_MS
+            ) as session:
                 # Reading is not writing: the plan and the status are answered.
                 plan = session.plan(wanted)
                 self.assertEqual(plan.which_result(), "planned")
@@ -253,11 +257,17 @@ class Lease(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             location = self.copy_of(directory, "leased.ucdk")
             with open_session(
-                ledger_kind="file", ledger_location=location, holder="ci-8"
+                ledger_kind="file",
+                ledger_location=location,
+                holder="ci-8",
+                test_clock_ms=WHILE_HELD_MS,
             ) as other:
                 refused = other.apply(wanted, other.plan(wanted).planned.hash)
             with open_session(
-                ledger_kind="file", ledger_location=location, holder="ci-7"
+                ledger_kind="file",
+                ledger_location=location,
+                holder="ci-7",
+                test_clock_ms=WHILE_HELD_MS,
             ) as same:
                 applied = same.apply(wanted, same.plan(wanted).planned.hash)
         self.assertEqual(refused.exit, api.ExitClass.REFUSED)
@@ -266,8 +276,10 @@ class Lease(unittest.TestCase):
     def test_an_apply_on_a_ledger_whose_holder_lapsed_takes_over_and_goes_through(self):
         wanted = pair()
         with tempfile.TemporaryDirectory() as directory:
-            location = self.copy_of(directory, "lapsed.ucdk")
-            with open_session(ledger_kind="file", ledger_location=location) as session:
+            location = self.copy_of(directory, "leased.ucdk")
+            with open_session(
+                ledger_kind="file", ledger_location=location, test_clock_ms=AFTER_LAPSE_MS
+            ) as session:
                 plan = session.plan(wanted)
                 applied = session.apply(wanted, plan.planned.hash)
         self.assertEqual(applied.exit, api.ExitClass.DONE)

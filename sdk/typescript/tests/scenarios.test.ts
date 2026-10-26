@@ -19,7 +19,9 @@ import { Internal } from "../src/errors.ts";
 import {
   DATA,
   IMAGE,
+  AFTER_LAPSE_MS,
   LEDGER_GOLDEN,
+  WHILE_HELD_MS,
   objectsOf,
   openSession,
   pair,
@@ -257,7 +259,11 @@ test("an apply on a ledger another holder has leased is refused as data", () =>
     const wanted = pair();
     const location = join(directory, "ledger");
     copyFileSync(join(LEDGER_GOLDEN, "leased.ucdk"), location);
-    await using session = await openSession("fake", { ledgerKind: "file", ledgerLocation: location });
+    await using session = await openSession("fake", {
+      ledgerKind: "file",
+      ledgerLocation: location,
+      testClockMs: WHILE_HELD_MS,
+    });
     // Reading is not writing: the plan and the status are answered.
     const plan = await session.plan(wanted);
     assert.equal(plan.whichResult(), "planned");
@@ -283,6 +289,7 @@ test("a session named as the holder of a lease takes it again at once", () =>
       await using other = await openSession("fake", {
         ledgerKind: "file",
         ledgerLocation: location,
+        testClockMs: WHILE_HELD_MS,
         holder: "ci-8",
       });
       const plan = await other.plan(wanted);
@@ -292,6 +299,7 @@ test("a session named as the holder of a lease takes it again at once", () =>
     await using same = await openSession("fake", {
       ledgerKind: "file",
       ledgerLocation: location,
+      testClockMs: WHILE_HELD_MS,
       holder: "ci-7",
     });
     const plan = await same.plan(wanted);
@@ -303,8 +311,12 @@ test("an apply on a ledger whose holder lapsed takes over and goes through", () 
   inTemporaryDirectory(async (directory) => {
     const wanted = pair();
     const location = join(directory, "ledger");
-    copyFileSync(join(LEDGER_GOLDEN, "lapsed.ucdk"), location);
-    await using session = await openSession("fake", { ledgerKind: "file", ledgerLocation: location });
+    copyFileSync(join(LEDGER_GOLDEN, "leased.ucdk"), location);
+    await using session = await openSession("fake", {
+      ledgerKind: "file",
+      ledgerLocation: location,
+      testClockMs: AFTER_LAPSE_MS,
+    });
     const plan = await session.plan(wanted);
     const applied = await session.apply(wanted, plan.planned?.hash as string);
     assert.equal(applied.exit, api.ExitClass.DONE);

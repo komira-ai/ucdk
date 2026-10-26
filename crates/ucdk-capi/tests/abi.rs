@@ -819,14 +819,26 @@ fn file_ledger_leased_by(
 
 /// The outcome of planning `list` and applying it under that plan's hash through a session on
 /// the file ledger at `location`.
-fn apply_through_the_abi(location: &str, list: &ResourceList) -> Outcome {
-    apply_through_the_abi_as(location, list, "")
+fn apply_through_the_abi(location: &str, list: &ResourceList, now_ms: u64) -> Outcome {
+    apply_through_the_abi_as(location, list, "", now_ms)
 }
 
+/// When `ci-7` took the lease in these tests, and for how long; and the times the session sees.
+const GRANTED_MS: u64 = 1_000_000;
+const LEASE: Duration = Duration::from_secs(3600);
+const WHILE_HELD_MS: u64 = GRANTED_MS + 1_000;
+const AFTER_LAPSE_MS: u64 = GRANTED_MS + 3_600_000 + 5_000;
+
 /// [`apply_through_the_abi`] in a session whose runs take the lease as `holder` (empty: unnamed).
-fn apply_through_the_abi_as(location: &str, list: &ResourceList, holder: &str) -> Outcome {
+fn apply_through_the_abi_as(
+    location: &str,
+    list: &ResourceList,
+    holder: &str,
+    now_ms: u64,
+) -> Outcome {
     let mut config = fake_config();
     config.holder = holder.to_owned();
+    config.test_clock_ms = now_ms;
     config.ledger_kind = "file".to_owned();
     config.ledger_location = location.to_owned();
     let opened = open(&config);
@@ -859,10 +871,10 @@ fn an_apply_on_a_ledger_leased_to_another_holder_is_refused_as_data_until_it_lap
     let live = file_ledger_leased_by(
         "abi-leased",
         "ci-7",
-        Duration::from_secs(3600),
-        Arc::new(ucdk_ledger::SystemClock) as Arc<dyn ucdk_ledger::Clock>,
+        LEASE,
+        Arc::new(ManualClock::at(GRANTED_MS)),
     );
-    let answer = apply_through_the_abi(&live, &list);
+    let answer = apply_through_the_abi(&live, &list, WHILE_HELD_MS);
     assert_eq!(answer.exit, ExitClass::Refused as i32, "{answer:?}");
     let Some(outcome::Result::Refused(why)) = answer.result else {
         panic!("not refused: {answer:?}");
@@ -871,16 +883,16 @@ fn an_apply_on_a_ledger_leased_to_another_holder_is_refused_as_data_until_it_lap
         panic!("not a lease refusal: {why:?}");
     };
     assert_eq!(held.holder, "ci-7");
-    assert!(held.remaining_ms > 0);
+    assert_eq!(held.remaining_ms, 3_600_000 - 1_000 + 5_000);
 
-    // A holder that died long ago: its lease was granted in 1970 by a clock at 1 s.
+    // The session's clock reads past the lease and the skew bound: the holder is taken over.
     let dead = file_ledger_leased_by(
         "abi-lapsed",
         "ci-7",
-        Duration::from_secs(60),
-        Arc::new(ManualClock::at(1_000)),
+        LEASE,
+        Arc::new(ManualClock::at(GRANTED_MS)),
     );
-    let answer = apply_through_the_abi(&dead, &list);
+    let answer = apply_through_the_abi(&dead, &list, AFTER_LAPSE_MS);
     assert_eq!(answer.exit, ExitClass::Done as i32, "{answer:?}");
 }
 
@@ -893,18 +905,18 @@ fn a_session_named_as_the_holder_of_a_lease_reclaims_it() {
     let leased = file_ledger_leased_by(
         "abi-reclaim",
         "ci-7",
-        Duration::from_secs(3600),
-        Arc::new(ucdk_ledger::SystemClock) as Arc<dyn ucdk_ledger::Clock>,
+        LEASE,
+        Arc::new(ManualClock::at(GRANTED_MS)),
     );
     for holder in ["", "ci-8"] {
-        let answer = apply_through_the_abi_as(&leased, &list, holder);
+        let answer = apply_through_the_abi_as(&leased, &list, holder, WHILE_HELD_MS);
         assert_eq!(
             answer.exit,
             ExitClass::Refused as i32,
             "{holder:?}: {answer:?}"
         );
     }
-    let answer = apply_through_the_abi_as(&leased, &list, "ci-7");
+    let answer = apply_through_the_abi_as(&leased, &list, "ci-7", WHILE_HELD_MS);
     assert_eq!(answer.exit, ExitClass::Done as i32, "{answer:?}");
 }
 

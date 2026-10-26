@@ -1,6 +1,6 @@
 [package]
 name = "ucdk-capi"
-description = "The C ABI of ucdk: a shared library whose nine functions carry protobuf bytes, and the header that declares them."
+description = "The C ABI of ucdk: a shared library whose ten functions carry protobuf bytes, and the header that declares them."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

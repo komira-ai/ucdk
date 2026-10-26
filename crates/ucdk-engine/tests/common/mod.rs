@@ -350,9 +350,10 @@ pub enum Backend {
 }
 
 impl Backend {
-    /// A new, empty ledger of this kind, on the wall clock.
+    /// A new, empty ledger of this kind, on a clock that never moves: a lease on it never
+    /// lapses, and no test reads the time.
     pub fn ledger(self) -> AnyLedger {
-        self.ledger_on(Arc::new(ucdk_ledger::SystemClock))
+        self.ledger_on(Arc::new(ucdk_ledger::ManualClock::at(1_000_000)))
     }
 
     /// A new, empty ledger of this kind, whose leases are timed by `clock`.
