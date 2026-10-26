@@ -22,7 +22,7 @@ use crate::store::{SetScope, StoreKey, is_plain};
 /// The schema version of a manifest that [`verify_member`] reads. The version is not part of
 /// the set hash (the design's field list for it does not name it), so this check is the only
 /// thing that holds a stored manifest to it.
-const MANIFEST_SCHEMA: i32 = 1;
+pub(crate) const MANIFEST_SCHEMA: i32 = 1;
 
 /// One check of a member or of a generation; each has a test that breaks it alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
