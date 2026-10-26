@@ -398,7 +398,7 @@ impl Record {
             }),
             "stage" => Record::Stage(Stage {
                 stage: e.name.clone(),
-                attempt: r.small("attempt")?,
+                attempt: r.attempt()?,
                 platform: r.text("platform")?,
                 set: r.opt_hash("set")?,
                 generation: r.map.get("generation").cloned(),
@@ -422,7 +422,7 @@ impl Record {
                 exceptional: r.flag("exceptional")?,
                 run: r.text("run")?,
                 stage: r.text("stage")?,
-                attempt: r.small("attempt")?,
+                attempt: r.attempt()?,
             }),
             "validation" => {
                 let names = split(&e.name, 2)?;
@@ -461,7 +461,7 @@ impl Record {
                     commit: r.text("commit")?,
                     timestamp: r.number("timestamp")?,
                     run: r.text("run")?,
-                    attempt: r.small("attempt")?,
+                    attempt: r.attempt()?,
                 })
             }
         })
@@ -501,6 +501,14 @@ impl Reader<'_> {
     fn small(&self, key: &'static str) -> Result<u32, CodecError> {
         let n = self.number(key)?;
         u32::try_from(n).map_err(|_| self.bad(key, &n.to_string()))
+    }
+
+    /// An attempt number: attempts count from 1, so a 0 is not one the writer writes.
+    fn attempt(&self) -> Result<u32, CodecError> {
+        match self.small("attempt")? {
+            0 => Err(self.bad("attempt", "0")),
+            n => Ok(n),
+        }
     }
 
     fn hash(&self, key: &'static str) -> Result<Hash256, CodecError> {

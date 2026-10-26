@@ -20,7 +20,8 @@ pub struct SetScope {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct StoreKey(String);
 
-/// A part of a key that is empty or holds a `/`, so the key would not say what it names.
+/// A part of a key that is empty, is `.` or `..`, or holds a `/`, a `\` or a control character,
+/// so the key would not say what it names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreKeyError {
     pub part: &'static str,
@@ -30,7 +31,7 @@ impl fmt::Display for StoreKeyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "the {} of a store key is empty or holds a `/`",
+            "the {} of a store key is empty, is a dot part, or holds a `/`, a `\\` or a control character",
             self.part
         )
     }
@@ -56,7 +57,7 @@ fn join(scope: &SetScope, member: Option<&str>) -> Result<String, StoreKeyError>
         .iter()
         .filter_map(|(what, part)| part.map(|p| (*what, p)))
         .collect();
-    if let Some((part, _)) = given.iter().find(|(_, p)| p.is_empty() || p.contains('/')) {
+    if let Some((part, _)) = given.iter().find(|(_, p)| !is_plain(p)) {
         return Err(StoreKeyError { part });
     }
     let head: Vec<&str> = given.iter().take(4).map(|(_, p)| *p).collect();
@@ -64,6 +65,17 @@ fn join(scope: &SetScope, member: Option<&str>) -> Result<String, StoreKeyError>
         Some((_, name)) => format!("{}/m/{name}", head.join("/")),
         None => head.join("/"),
     })
+}
+
+/// A part that names one thing: not empty, not `.` or `..`, and with no `/`, `\` or control
+/// character, so it cannot stand for a parent, a root or a second part.
+fn is_plain(part: &str) -> bool {
+    !part.is_empty()
+        && part != "."
+        && part != ".."
+        && !part
+            .chars()
+            .any(|c| c == '/' || c == '\\' || c.is_control())
 }
 
 impl StoreKey {

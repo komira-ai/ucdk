@@ -440,6 +440,26 @@ fn a_value_that_is_not_in_the_form_the_writer_writes_is_refused() {
 }
 
 #[test]
+fn attempt_zero_is_refused() {
+    // Attempts count from 1. A stage, a publication and a seal each carry one; the counter `k`
+    // of a validation is not an attempt and may be 0.
+    for record in [stage(true), publication(true), seal()] {
+        let mut written = record.encode();
+        written.outputs.insert("attempt".to_owned(), "0".to_owned());
+        let got = Record::decode(&written);
+        assert!(
+            matches!(&got, Err(CodecError::Bad { key, value, .. }) if key == "attempt" && value == "0"),
+            "{got:?}"
+        );
+        written.outputs.insert("attempt".to_owned(), "1".to_owned());
+        assert!(Record::decode(&written).is_ok());
+    }
+    let mut written = validation(true).encode();
+    written.outputs.insert("k".to_owned(), "0".to_owned());
+    assert!(Record::decode(&written).is_ok());
+}
+
+#[test]
 fn the_locator_is_where_the_kind_has_one_and_nowhere_else() {
     for record in every_record() {
         let written = record.encode();

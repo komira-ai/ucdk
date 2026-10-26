@@ -37,10 +37,10 @@ impl SupersedeDecision {
 ///
 /// Exceptional builds are not counted. Yanked builds are: a yank withdraws a coordinate, it
 /// does not un-build it. A held build is newer than ours when its build number is greater, or
-/// equal with another commit. `ancestry(ours, theirs)` says whether our commit is an ancestor
-/// of theirs. A newer build that is not our descendant refuses the run, even when another
-/// cannot be compared; a build with no stamp, or an answer that is not yes or no, is
-/// indeterminate.
+/// equal with another commit that is not our ancestor. `ancestry(a, b)` says whether commit
+/// `a` is an ancestor of commit `b`. A newer build that is not our descendant refuses the run,
+/// even when another cannot be compared; a build with no stamp, or an answer that is not yes
+/// or no, is indeterminate.
 pub fn decide_supersede(
     ours: &Stamped,
     held: &[Presence],
@@ -58,12 +58,27 @@ pub fn decide_supersede(
     {
         match &build.stamp {
             None => unstamped = true,
-            Some(theirs)
-                if theirs.build_number > ours.build_number
-                    || (theirs.build_number == ours.build_number
-                        && theirs.source_commit != ours.source_commit) =>
-            {
+            Some(theirs) if theirs.build_number > ours.build_number => {
                 answers.push(ancestry(&ours.source_commit, &theirs.source_commit));
+            }
+            Some(theirs)
+                if theirs.build_number == ours.build_number
+                    && theirs.source_commit != ours.source_commit =>
+            {
+                // A commit that changes nothing a build reads keeps its parent's build
+                // number, so an equal number does not make the held build newer when it is
+                // our ancestor.
+                let back = ancestry(&theirs.source_commit, &ours.source_commit);
+                if back != Tri::Yes {
+                    let forward = ancestry(&ours.source_commit, &theirs.source_commit);
+                    // When the source cannot say whether the two are unrelated, a no from
+                    // the forward question is not a refusal.
+                    answers.push(if back == Tri::No || forward == Tri::Yes {
+                        forward
+                    } else {
+                        Tri::Unknown
+                    });
+                }
             }
             Some(_) => {}
         }

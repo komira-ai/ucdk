@@ -64,11 +64,6 @@ fn table_over_history_and_ancestry() {
             Presence::Yanked(held(11, "new", false)),
             [Superseded, Refused, Indeterminate, Indeterminate],
         ),
-        (
-            "equal number, another commit",
-            present(10, "other"),
-            [Superseded, Refused, Indeterminate, Indeterminate],
-        ),
         ("no stamp", unstamped, [Indeterminate; 4]),
     ];
     // The answers, in the order of the expected decisions.
@@ -86,8 +81,67 @@ fn table_over_history_and_ancestry() {
 
 #[test]
 fn equal_build_number_other_commit_supersedes() {
-    assert_eq!(decide(&[present(10, "other")], Tri::Yes), Superseded);
+    // Our commit is an ancestor of the held one, which is not an ancestor of ours.
+    assert_eq!(
+        decide_with_directions(Tri::Yes, Tri::No, "other"),
+        Superseded
+    );
+    // The two are unrelated.
+    assert_eq!(decide_with_directions(Tri::No, Tri::No, "other"), Refused);
+    // The same commit is not another commit.
     assert_eq!(decide(&[present(10, "ours")], Tri::Yes), Proceed);
+}
+
+#[test]
+fn equal_build_number_descendant_proceeds() {
+    // A commit that changes nothing a build reads keeps its parent's number: the held build
+    // is the parent of ours, so ours is not stood down for it.
+    assert_eq!(decide_with_directions(Tri::No, Tri::Yes, "parent"), Proceed);
+    // The held build was made from an ancestor further back.
+    let history = [present(10, "grandparent"), present(10, "parent")];
+    let decision = decide_supersede(&ours(), &history, &|mine, _| {
+        if mine == "ours" { Tri::No } else { Tri::Yes }
+    });
+    assert_eq!(decision, Proceed);
+}
+
+/// What `ancestry` is asked, and answers, for a build of our number: `forward` for "is ours an
+/// ancestor of theirs", `backward` for the other direction.
+fn decide_with_directions(forward: Tri, backward: Tri, theirs: &str) -> SupersedeDecision {
+    decide_supersede(&ours(), &[present(10, theirs)], &|mine, _| {
+        if mine == "ours" { forward } else { backward }
+    })
+}
+
+#[test]
+fn equal_build_number_over_every_pair_of_answers() {
+    // Rows are the answer to "is ours an ancestor of theirs"; columns the answer to "is theirs
+    // an ancestor of ours": yes, no, unknown, unspecified. A held build that is our ancestor
+    // never stops the run; a forward yes always does; otherwise only a definite no from both
+    // refuses, and anything the source cannot tell is indeterminate.
+    let answers = [Tri::Yes, Tri::No, Tri::Unknown, Tri::Unspecified];
+    let table = [
+        (Tri::Yes, [Proceed, Superseded, Superseded, Superseded]),
+        (Tri::No, [Proceed, Refused, Indeterminate, Indeterminate]),
+        (
+            Tri::Unknown,
+            [Proceed, Indeterminate, Indeterminate, Indeterminate],
+        ),
+        (
+            Tri::Unspecified,
+            [Proceed, Indeterminate, Indeterminate, Indeterminate],
+        ),
+    ];
+    for ((forward, row), asked) in table.into_iter().zip(answers) {
+        assert_eq!(forward, asked);
+        for (backward, want) in answers.into_iter().zip(row) {
+            assert_eq!(
+                decide_with_directions(forward, backward, "other"),
+                want,
+                "forward {forward:?}, backward {backward:?}"
+            );
+        }
+    }
 }
 
 #[test]

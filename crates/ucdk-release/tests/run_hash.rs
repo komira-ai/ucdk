@@ -189,6 +189,7 @@ fn a_stage_with_no_steps_hashes_with_an_empty_platform() {
         &[],
         vec![],
     ));
+    let machine = machine_hash(&m);
     let checked = Checked::read(m).expect("read");
     let hash = run_hash(
         &checked,
@@ -197,6 +198,37 @@ fn a_stage_with_no_steps_hashes_with_an_empty_platform() {
         REVISION,
         &stamp(),
         Some(&set()),
-    );
-    assert!(hash.is_ok());
+    )
+    .expect("a hash");
+    // The platform field is present and empty: the same fields as any stage's, in the same
+    // order, with an empty text where the platform goes.
+    let set_text = set();
+    let fields = [
+        machine.as_str(),
+        "idle",
+        "0",
+        REVISION,
+        "",
+        "1.2.3",
+        "41",
+        "abc123",
+        set_text.as_str(),
+    ];
+    let by_hand = fields
+        .iter()
+        .fold(Framed::new(b"ucdk/release-run/1\n"), |h, f| {
+            h.field(f.as_bytes())
+        })
+        .finish();
+    assert_eq!(hash, by_hand);
+    // And it is not the hash of a platform that happens to be spelled out.
+    let mut named = fields;
+    named[4] = "linux-x86_64";
+    let named = named
+        .iter()
+        .fold(Framed::new(b"ucdk/release-run/1\n"), |h, f| {
+            h.field(f.as_bytes())
+        })
+        .finish();
+    assert_ne!(hash, named);
 }
