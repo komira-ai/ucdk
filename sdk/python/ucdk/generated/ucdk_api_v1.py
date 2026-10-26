@@ -8,29 +8,15 @@ import enum
 from typing import Any, Iterable, Mapping, Optional
 
 from . import _wire
-from . import ucdk_resource_v1
-
-
-class Mode(enum.IntEnum):
-    """
-    What a plan is for.
-    """
-
-    UNSPECIFIED = 0
-    # Make the world match the list.
-    APPLY = 1
-    # Remove everything the list names.
-    DESTROY = 2
 
 
 class ExitClass(enum.IntEnum):
     """
-    How a run ended, as the one table every host reports. The numbers are the command line's exit
+    How a call ended, as the one table every host reports. The numbers are the command line's exit
     codes. 0 is success; usage (2) is a request the host could not understand.
     """
 
-    # Done, or planned; including "no changes" and a run that left an object converging or failed
-    # (the report says so).
+    # Done, including "no changes".
     DONE = 0
     # The request was malformed: a bad flag, or bytes that are not the expected message.
     USAGE = 2
@@ -38,84 +24,10 @@ class ExitClass(enum.IntEnum):
     REFUSED = 3
     # Failed, and nothing was changed: safe to run again.
     FAILED_NO_EFFECT = 4
-    # Failed after changing something: plan again before running again.
+    # Failed after changing something: look again before running again.
     FAILED_CHANGED = 6
-    # A leak sweep found objects that carry our stamp and have no ledger record. Only the leaks
-    # verb ends this way; an apply that finds leaks reports them and is done.
+    # A sweep found objects that the ledger does not account for.
     LEAKS = 8
-
-
-class CredentialSource(enum.IntEnum):
-    """
-    Where the provider finds its credentials. The credentials themselves never appear.
-    """
-
-    UNSPECIFIED = 0
-    # The named profile (`SessionConfig.profile`).
-    PROFILE = 1
-    # The platform's default chain.
-    DEFAULT_CHAIN = 2
-    # An identity the provider resolves itself.
-    PROVIDER_RESOLVED = 3
-
-
-class StepAction(enum.IntEnum):
-    UNSPECIFIED = 0
-    CREATE = 1
-    UPDATE = 2
-    NOOP = 3
-    DELETE = 4
-    REAP = 5
-    CONVERGING = 6
-    KNOWN_AFTER_APPLY = 7
-    RETAIN = 8
-
-
-class RetainReason(enum.IntEnum):
-    """
-    Why an object is left alone on purpose.
-    """
-
-    UNSPECIFIED = 0
-    # Its kind holds data.
-    KEEP = 1
-    # The provider says it cannot be deleted; `detail` is the provider's reason.
-    UNDELETABLE = 2
-    # The list no longer names the owner.
-    OWNER_NOT_NAMED = 3
-
-
-class ConflictKind(enum.IntEnum):
-    UNSPECIFIED = 0
-    FOREIGN = 1
-    STAMP_WITHOUT_RECORD = 2
-    PHYSICAL_ID_MISMATCH = 3
-    STAMP_STRIPPED = 4
-    OTHER_OWNER = 5
-    OTHER_TOOL = 6
-    VANISHED_RETAINED = 7
-    RECORDED_CYCLE = 8
-
-
-class FindingKind(enum.IntEnum):
-    UNSPECIFIED = 0
-    BAD_ID = 1
-    DUPLICATE_ID = 2
-    MISSING_BODY = 3
-    MISSING_IMAGE = 4
-    UNRESOLVED = 5
-    UNSUPPORTED_PLATFORM = 6
-    EMPTY_VALUE = 7
-    ENV_SECRET_OVERLAP = 8
-    UNBOUND_REF = 9
-    NO_TARGET = 10
-    UNSUPPORTED_ACCESS = 11
-    ACCESS_TO_OUTPUT = 12
-    MISSING_OUTPUT = 13
-    NAMED_OUTPUT = 14
-    UNEXPOSED_OUTPUT = 15
-    NOT_PORTABLE = 16
-    CYCLE = 17
 
 
 class RecordState(enum.IntEnum):
@@ -124,56 +36,44 @@ class RecordState(enum.IntEnum):
     """
 
     UNSPECIFIED = 0
-    # Written before a create or update; the call may or may not have landed.
+    # Written before an effect; the effect may or may not have landed.
     INTENT = 1
     CONFIRMED = 2
-    # Written before a delete; the object may or may not be gone.
+    # Written before the thing is removed; it may or may not be gone.
     REAPING = 3
-
-
-class LiveStatus(enum.IntEnum):
-    """
-    Whether a live object is working.
-    """
-
-    UNSPECIFIED = 0
-    READY = 1
-    CONVERGING = 2
-    FAILED = 3
-
-
-class Standing(enum.IntEnum):
-    """
-    How an object's record and the live object stand against each other.
-    """
-
-    UNSPECIFIED = 0
-    # A confirmed record, and the live object it names carries our stamp.
-    AGREES = 1
-    # An intent or reap record and a live object of ours: a later run settles it.
-    PENDING = 2
-    # A record and no live object.
-    MISSING = 3
-    # The list names it; there is no record and no live object.
-    NOT_APPLIED = 4
-    # A live object that is not ours, or ours with no record.
-    UNCLAIMED = 5
 
 
 class ErrorCode(enum.IntEnum):
     UNSPECIFIED = 0
-    PROVIDER = 1
+    # The ledger could not be opened or read.
     LEDGER = 2
+    # The ledger is in use by a writer that holds its lock.
     LEDGER_BUSY = 3
-    NOT_OURS = 4
-    STILL_PRESENT = 5
-    UNWITNESSED = 6
-    OUTPUT_UNKNOWN = 7
-    # The request was not the expected message, or named a hash that is not one.
+    # The request was not the expected message.
     INVALID_REQUEST = 8
-    # The run's ledger lease lapsed or was taken over, so the ledger refused its write and the
-    # run stopped. The next run resolves what this one left.
-    LEASE_LOST = 9
+
+
+class LeaseState(enum.IntEnum):
+    """
+    Where a recorded lease stands by the session's clock.
+    """
+
+    UNSPECIFIED = 0
+    # Before it expires: its holder writes, and no other holder is granted it.
+    LIVE = 1
+    # Expired, but inside the skew bound: its holder may no longer write, and others are still
+    # refused.
+    LAPSING = 2
+    # Past that: another holder is granted it.
+    LAPSED = 3
+
+
+class RecordOrigin(enum.IntEnum):
+    UNSPECIFIED = 0
+    # This tool made what the record stands for.
+    CREATED = 1
+    # This tool took it over when it found it.
+    ADOPTED = 2
 
 
 class SessionConfig(_wire.Message):
@@ -181,75 +81,40 @@ class SessionConfig(_wire.Message):
     What a session is opened with.
 
     Attributes:
-        provider: The provider's name, such as `fake`.
         ledger_kind: The kind of ledger and where it is.
-        cell: The cell identity every stamp of the session carries.
-        profile: The profile, when `credentials` is PROFILE.
-        holder: The name the session's runs take the ledger lease as. A run is refused while another holder
-            has the lease; the holder a lease names takes it again at once, so naming it lets a rerun
-            reclaim a lease an earlier run left behind. Empty: a new name for every run.
-        test_clock_ms: For tests: when not zero, the ledger times its leases by a clock fixed at this many
-            milliseconds since the Unix epoch, instead of the wall clock, so a test says when a lease
-            lapses without waiting or reading the time. Zero: the wall clock. Only a library built with
-            the `test-clock` feature honours it; every other build refuses a non-zero value as an
-            invalid argument, because a caller able to fix the clock would defeat the lease.
+        holder: The name a lease is taken as, and the name a lease is reported as `yours` for. A lease
+            names its holder, and the holder it names takes it again at once. Empty: no lease is yours.
+        test_clock_ms: For tests: when not zero, the ledger is timed by a clock fixed at this many milliseconds
+            since the Unix epoch, instead of the wall clock, so a test says when a lease lapses without
+            waiting or reading the time. Zero: the wall clock. Only a library built with the
+            `test-clock` feature honours it; every other build refuses a non-zero value as an invalid
+            argument, because a caller able to fix the clock would defeat the lease.
     """
 
     _FIELDS = (
-        "provider",
-        "provider_options",
         "ledger_kind",
         "ledger_location",
-        "cell",
-        "credentials",
-        "profile",
         "holder",
         "test_clock_ms",
     )
 
     def __init__(
         self,
-        provider: str = "",
-        provider_options: Optional[Mapping[str, str]] = None,
         ledger_kind: str = "",
         ledger_location: str = "",
-        cell: str = "",
-        credentials: CredentialSource = CredentialSource.UNSPECIFIED,
-        profile: str = "",
         holder: str = "",
         test_clock_ms: int = 0,
     ) -> None:
-        self.provider = provider
-        self.provider_options = {} if provider_options is None else dict(provider_options)
         self.ledger_kind = ledger_kind
         self.ledger_location = ledger_location
-        self.cell = cell
-        self.credentials = credentials
-        self.profile = profile
         self.holder = holder
         self.test_clock_ms = test_clock_ms
 
     def _encode_into(self, out: bytearray) -> None:
-        if self.provider:
-            _wire.put_string(out, 1, self.provider)
-        for key in sorted(self.provider_options):
-            item = self.provider_options[key]
-            entry = bytearray()
-            if key:
-                _wire.put_string(entry, 1, key)
-            if item:
-                _wire.put_string(entry, 2, item)
-            _wire.put_bytes(out, 2, bytes(entry))
         if self.ledger_kind:
             _wire.put_string(out, 3, self.ledger_kind)
         if self.ledger_location:
             _wire.put_string(out, 4, self.ledger_location)
-        if self.cell:
-            _wire.put_string(out, 5, self.cell)
-        if self.credentials:
-            _wire.put_varint_field(out, 6, self.credentials)
-        if self.profile:
-            _wire.put_string(out, 7, self.profile)
         if self.holder:
             _wire.put_string(out, 8, self.holder)
         if self.test_clock_ms:
@@ -257,35 +122,12 @@ class SessionConfig(_wire.Message):
 
     def _merge(self, data: bytes) -> None:
         for number, wire_type, value in _wire.read_fields(data):
-            if number == 1:
-                _wire.expect(wire_type, _wire.LEN)
-                self.provider = _wire.get_string(value)
-            elif number == 2:
-                _wire.expect(wire_type, _wire.LEN)
-                key, item = "", ""
-                for number_, wire_type_, value_ in _wire.read_fields(value):
-                    if number_ == 1:
-                        _wire.expect(wire_type_, _wire.LEN)
-                        key = _wire.get_string(value_)
-                    elif number_ == 2:
-                        _wire.expect(wire_type_, _wire.LEN)
-                        item = _wire.get_string(value_)
-                self.provider_options[key] = item
-            elif number == 3:
+            if number == 3:
                 _wire.expect(wire_type, _wire.LEN)
                 self.ledger_kind = _wire.get_string(value)
             elif number == 4:
                 _wire.expect(wire_type, _wire.LEN)
                 self.ledger_location = _wire.get_string(value)
-            elif number == 5:
-                _wire.expect(wire_type, _wire.LEN)
-                self.cell = _wire.get_string(value)
-            elif number == 6:
-                _wire.expect(wire_type, _wire.VARINT)
-                self.credentials = _wire.get_enum(CredentialSource, value)
-            elif number == 7:
-                _wire.expect(wire_type, _wire.LEN)
-                self.profile = _wire.get_string(value)
             elif number == 8:
                 _wire.expect(wire_type, _wire.LEN)
                 self.holder = _wire.get_string(value)
@@ -294,1375 +136,9 @@ class SessionConfig(_wire.Message):
                 self.test_clock_ms = _wire.get_uint64(value)
 
 
-class PlanRequest(_wire.Message):
-    """
-    Observe and plan; changes nothing.
-    """
-
-    _FIELDS = (
-        "resources",
-        "mode",
-    )
-
-    def __init__(
-        self,
-        resources: Optional[ucdk_resource_v1.ResourceList] = None,
-        mode: Mode = Mode.UNSPECIFIED,
-    ) -> None:
-        self.resources = resources
-        self.mode = mode
-
-    def _encode_into(self, out: bytearray) -> None:
-        if self.resources is not None:
-            _wire.put_message(out, 1, self.resources)
-        if self.mode:
-            _wire.put_varint_field(out, 2, self.mode)
-
-    def _merge(self, data: bytes) -> None:
-        for number, wire_type, value in _wire.read_fields(data):
-            if number == 1:
-                _wire.expect(wire_type, _wire.LEN)
-                if self.resources is None:
-                    self.resources = ucdk_resource_v1.ResourceList()
-                self.resources = self.resources
-                self.resources._merge(value)
-            elif number == 2:
-                _wire.expect(wire_type, _wire.VARINT)
-                self.mode = _wire.get_enum(Mode, value)
-
-
-class ApplyRequest(_wire.Message):
-    """
-    Carry out the plan the approver pinned. The core plans the world as it is now and refuses the
-    run unless that plan has `plan_hash`.
-
-    Attributes:
-        plan_hash: 64 lower-case hex digits.
-        rollback: A failed run deletes what it created.
-    """
-
-    _FIELDS = (
-        "resources",
-        "plan_hash",
-        "rollback",
-    )
-
-    def __init__(
-        self,
-        resources: Optional[ucdk_resource_v1.ResourceList] = None,
-        plan_hash: str = "",
-        rollback: bool = False,
-    ) -> None:
-        self.resources = resources
-        self.plan_hash = plan_hash
-        self.rollback = rollback
-
-    def _encode_into(self, out: bytearray) -> None:
-        if self.resources is not None:
-            _wire.put_message(out, 1, self.resources)
-        if self.plan_hash:
-            _wire.put_string(out, 2, self.plan_hash)
-        if self.rollback:
-            _wire.put_bool(out, 3, self.rollback)
-
-    def _merge(self, data: bytes) -> None:
-        for number, wire_type, value in _wire.read_fields(data):
-            if number == 1:
-                _wire.expect(wire_type, _wire.LEN)
-                if self.resources is None:
-                    self.resources = ucdk_resource_v1.ResourceList()
-                self.resources = self.resources
-                self.resources._merge(value)
-            elif number == 2:
-                _wire.expect(wire_type, _wire.LEN)
-                self.plan_hash = _wire.get_string(value)
-            elif number == 3:
-                _wire.expect(wire_type, _wire.VARINT)
-                self.rollback = _wire.get_bool(value)
-
-
-class DestroyRequest(_wire.Message):
-    """
-    Carry out the approved destroy plan, under the same hash rule.
-    """
-
-    _FIELDS = (
-        "resources",
-        "plan_hash",
-    )
-
-    def __init__(
-        self,
-        resources: Optional[ucdk_resource_v1.ResourceList] = None,
-        plan_hash: str = "",
-    ) -> None:
-        self.resources = resources
-        self.plan_hash = plan_hash
-
-    def _encode_into(self, out: bytearray) -> None:
-        if self.resources is not None:
-            _wire.put_message(out, 1, self.resources)
-        if self.plan_hash:
-            _wire.put_string(out, 2, self.plan_hash)
-
-    def _merge(self, data: bytes) -> None:
-        for number, wire_type, value in _wire.read_fields(data):
-            if number == 1:
-                _wire.expect(wire_type, _wire.LEN)
-                if self.resources is None:
-                    self.resources = ucdk_resource_v1.ResourceList()
-                self.resources = self.resources
-                self.resources._merge(value)
-            elif number == 2:
-                _wire.expect(wire_type, _wire.LEN)
-                self.plan_hash = _wire.get_string(value)
-
-
-class StatusRequest(_wire.Message):
-    """
-    Read the ledger and the live objects, and change nothing. The list names the objects to look
-    at besides those the ledger records.
-    """
-
-    _FIELDS = (
-        "resources",
-    )
-
-    def __init__(
-        self,
-        resources: Optional[ucdk_resource_v1.ResourceList] = None,
-    ) -> None:
-        self.resources = resources
-
-    def _encode_into(self, out: bytearray) -> None:
-        if self.resources is not None:
-            _wire.put_message(out, 1, self.resources)
-
-    def _merge(self, data: bytes) -> None:
-        for number, wire_type, value in _wire.read_fields(data):
-            if number == 1:
-                _wire.expect(wire_type, _wire.LEN)
-                if self.resources is None:
-                    self.resources = ucdk_resource_v1.ResourceList()
-                self.resources = self.resources
-                self.resources._merge(value)
-
-
-class LeaksRequest(_wire.Message):
-    """
-    Compare the cell's stamped objects with the ledger, and change nothing. It needs no resource
-    list: it is about the cell, not about a file.
-    """
-
-    _FIELDS = (
-    )
-
-    def __init__(
-        self,
-    ) -> None:
-        pass
-
-    def _encode_into(self, out: bytearray) -> None:
-        return
-
-    def _merge(self, data: bytes) -> None:
-        for number, wire_type, value in _wire.read_fields(data):
-            pass
-
-
-class Retained(_wire.Message):
-    _FIELDS = (
-        "reason",
-        "detail",
-    )
-
-    def __init__(
-        self,
-        reason: RetainReason = RetainReason.UNSPECIFIED,
-        detail: str = "",
-    ) -> None:
-        self.reason = reason
-        self.detail = detail
-
-    def _encode_into(self, out: bytearray) -> None:
-        if self.reason:
-            _wire.put_varint_field(out, 1, self.reason)
-        if self.detail:
-            _wire.put_string(out, 2, self.detail)
-
-    def _merge(self, data: bytes) -> None:
-        for number, wire_type, value in _wire.read_fields(data):
-            if number == 1:
-                _wire.expect(wire_type, _wire.VARINT)
-                self.reason = _wire.get_enum(RetainReason, value)
-            elif number == 2:
-                _wire.expect(wire_type, _wire.LEN)
-                self.detail = _wire.get_string(value)
-
-
-class Step(_wire.Message):
-    """
-    Attributes:
-        physical_id: The physical id, for a delete.
-        retained: Set for a retain.
-    """
-
-    _FIELDS = (
-        "path",
-        "kind",
-        "action",
-        "physical_id",
-        "retained",
-    )
-
-    def __init__(
-        self,
-        path: str = "",
-        kind: str = "",
-        action: StepAction = StepAction.UNSPECIFIED,
-        physical_id: str = "",
-        retained: Optional[Retained] = None,
-    ) -> None:
-        self.path = path
-        self.kind = kind
-        self.action = action
-        self.physical_id = physical_id
-        self.retained = retained
-
-    def _encode_into(self, out: bytearray) -> None:
-        if self.path:
-            _wire.put_string(out, 1, self.path)
-        if self.kind:
-            _wire.put_string(out, 2, self.kind)
-        if self.action:
-            _wire.put_varint_field(out, 3, self.action)
-        if self.physical_id:
-            _wire.put_string(out, 4, self.physical_id)
-        if self.retained is not None:
-            _wire.put_message(out, 5, self.retained)
-
-    def _merge(self, data: bytes) -> None:
-        for number, wire_type, value in _wire.read_fields(data):
-            if number == 1:
-                _wire.expect(wire_type, _wire.LEN)
-                self.path = _wire.get_string(value)
-            elif number == 2:
-                _wire.expect(wire_type, _wire.LEN)
-                self.kind = _wire.get_string(value)
-            elif number == 3:
-                _wire.expect(wire_type, _wire.VARINT)
-                self.action = _wire.get_enum(StepAction, value)
-            elif number == 4:
-                _wire.expect(wire_type, _wire.LEN)
-                self.physical_id = _wire.get_string(value)
-            elif number == 5:
-                _wire.expect(wire_type, _wire.LEN)
-                if self.retained is None:
-                    self.retained = Retained()
-                self.retained = self.retained
-                self.retained._merge(value)
-
-
-class Plan(_wire.Message):
-    """
-    The steps of a run, in the order they run, and the hash an approver pins.
-    """
-
-    _FIELDS = (
-        "steps",
-        "hash",
-    )
-
-    def __init__(
-        self,
-        steps: Iterable[Step] = (),
-        hash: str = "",
-    ) -> None:
-        self.steps = list(steps)
-        self.hash = hash
-
-    def _encode_into(self, out: bytearray) -> None:
-        for item in self.steps:
-            _wire.put_message(out, 1, item)
-        if self.hash:
-            _wire.put_string(out, 2, self.hash)
-
-    def _merge(self, data: bytes) -> None:
-        for number, wire_type, value in _wire.read_fields(data):
-            if number == 1:
-                _wire.expect(wire_type, _wire.LEN)
-                self.steps.append(Step.decode(value))
-            elif number == 2:
-                _wire.expect(wire_type, _wire.LEN)
-                self.hash = _wire.get_string(value)
-
-
-class Conflict(_wire.Message):
-    """
-    Attributes:
-        marker: The other tool's marker, for OTHER_TOOL.
-    """
-
-    _FIELDS = (
-        "path",
-        "kind",
-        "marker",
-        "message",
-    )
-
-    def __init__(
-        self,
-        path: str = "",
-        kind: ConflictKind = ConflictKind.UNSPECIFIED,
-        marker: str = "",
-        message: str = "",
-    ) -> None:
-        self.path = path
-        self.kind = kind
-        self.marker = marker
-        self.message = message
-
-    def _encode_into(self, out: bytearray) -> None:
-        if self.path:
-            _wire.put_string(out, 1, self.path)
-        if self.kind:
-            _wire.put_varint_field(out, 2, self.kind)
-        if self.marker:
-            _wire.put_string(out, 3, self.marker)
-        if self.message:
-            _wire.put_string(out, 4, self.message)
-
-    def _merge(self, data: bytes) -> None:
-        for number, wire_type, value in _wire.read_fields(data):
-            if number == 1:
-                _wire.expect(wire_type, _wire.LEN)
-                self.path = _wire.get_string(value)
-            elif number == 2:
-                _wire.expect(wire_type, _wire.VARINT)
-                self.kind = _wire.get_enum(ConflictKind, value)
-            elif number == 3:
-                _wire.expect(wire_type, _wire.LEN)
-                self.marker = _wire.get_string(value)
-            elif number == 4:
-                _wire.expect(wire_type, _wire.LEN)
-                self.message = _wire.get_string(value)
-
-
-class Finding(_wire.Message):
-    """
-    One problem in a resource list.
-
-    Attributes:
-        field: The field, such as `service.env.DB_URL`; empty when the whole resource is meant.
-    """
-
-    _FIELDS = (
-        "resource",
-        "field",
-        "kind",
-        "message",
-    )
-
-    def __init__(
-        self,
-        resource: str = "",
-        field: str = "",
-        kind: FindingKind = FindingKind.UNSPECIFIED,
-        message: str = "",
-    ) -> None:
-        self.resource = resource
-        self.field = field
-        self.kind = kind
-        self.message = message
-
-    def _encode_into(self, out: bytearray) -> None:
-        if self.resource:
-            _wire.put_string(out, 1, self.resource)
-        if self.field:
-            _wire.put_string(out, 2, self.field)
-        if self.kind:
-            _wire.put_varint_field(out, 3, self.kind)
-        if self.message:
-            _wire.put_string(out, 4, self.message)
-
-    def _merge(self, data: bytes) -> None:
-        for number, wire_type, value in _wire.read_fields(data):
-            if number == 1:
-                _wire.expect(wire_type, _wire.LEN)
-                self.resource = _wire.get_string(value)
-            elif number == 2:
-                _wire.expect(wire_type, _wire.LEN)
-                self.field = _wire.get_string(value)
-            elif number == 3:
-                _wire.expect(wire_type, _wire.VARINT)
-                self.kind = _wire.get_enum(FindingKind, value)
-            elif number == 4:
-                _wire.expect(wire_type, _wire.LEN)
-                self.message = _wire.get_string(value)
-
-
-class Findings(_wire.Message):
-    _FIELDS = (
-        "findings",
-    )
-
-    def __init__(
-        self,
-        findings: Iterable[Finding] = (),
-    ) -> None:
-        self.findings = list(findings)
-
-    def _encode_into(self, out: bytearray) -> None:
-        for item in self.findings:
-            _wire.put_message(out, 1, item)
-
-    def _merge(self, data: bytes) -> None:
-        for number, wire_type, value in _wire.read_fields(data):
-            if number == 1:
-                _wire.expect(wire_type, _wire.LEN)
-                self.findings.append(Finding.decode(value))
-
-
-class CatalogNode(_wire.Message):
-    """
-    One node a resource list lowers to.
-
-    Attributes:
-        path: `<resource id>/<role>`.
-        wanted: False for a role the list turns off: the node stays so that its leftovers are found.
-        deps: The paths of the nodes that must exist first.
-    """
-
-    _FIELDS = (
-        "path",
-        "kind",
-        "wanted",
-        "deps",
-    )
-
-    def __init__(
-        self,
-        path: str = "",
-        kind: str = "",
-        wanted: bool = False,
-        deps: Iterable[str] = (),
-    ) -> None:
-        self.path = path
-        self.kind = kind
-        self.wanted = wanted
-        self.deps = list(deps)
-
-    def _encode_into(self, out: bytearray) -> None:
-        if self.path:
-            _wire.put_string(out, 1, self.path)
-        if self.kind:
-            _wire.put_string(out, 2, self.kind)
-        if self.wanted:
-            _wire.put_bool(out, 3, self.wanted)
-        for item in self.deps:
-            _wire.put_string(out, 4, item)
-
-    def _merge(self, data: bytes) -> None:
-        for number, wire_type, value in _wire.read_fields(data):
-            if number == 1:
-                _wire.expect(wire_type, _wire.LEN)
-                self.path = _wire.get_string(value)
-            elif number == 2:
-                _wire.expect(wire_type, _wire.LEN)
-                self.kind = _wire.get_string(value)
-            elif number == 3:
-                _wire.expect(wire_type, _wire.VARINT)
-                self.wanted = _wire.get_bool(value)
-            elif number == 4:
-                _wire.expect(wire_type, _wire.LEN)
-                self.deps.append(_wire.get_string(value))
-
-
-class CatalogResponse(_wire.Message):
-    """
-    What loading a resource list found: the nodes in dependency order, or the findings that
-    refuse the list. Reads nothing and changes nothing.
-
-    Attributes:
-        nodes: Empty when the list is refused.
-        findings: Empty when the list lowers.
-        exit: DONE, or REFUSED when there are findings.
-    """
-
-    _FIELDS = (
-        "nodes",
-        "findings",
-        "exit",
-    )
-
-    def __init__(
-        self,
-        nodes: Iterable[CatalogNode] = (),
-        findings: Iterable[Finding] = (),
-        exit: ExitClass = ExitClass.DONE,
-    ) -> None:
-        self.nodes = list(nodes)
-        self.findings = list(findings)
-        self.exit = exit
-
-    def _encode_into(self, out: bytearray) -> None:
-        for item in self.nodes:
-            _wire.put_message(out, 1, item)
-        for item in self.findings:
-            _wire.put_message(out, 2, item)
-        if self.exit:
-            _wire.put_varint_field(out, 3, self.exit)
-
-    def _merge(self, data: bytes) -> None:
-        for number, wire_type, value in _wire.read_fields(data):
-            if number == 1:
-                _wire.expect(wire_type, _wire.LEN)
-                self.nodes.append(CatalogNode.decode(value))
-            elif number == 2:
-                _wire.expect(wire_type, _wire.LEN)
-                self.findings.append(Finding.decode(value))
-            elif number == 3:
-                _wire.expect(wire_type, _wire.VARINT)
-                self.exit = _wire.get_enum(ExitClass, value)
-
-
-class Conflicts(_wire.Message):
-    _FIELDS = (
-        "conflicts",
-    )
-
-    def __init__(
-        self,
-        conflicts: Iterable[Conflict] = (),
-    ) -> None:
-        self.conflicts = list(conflicts)
-
-    def _encode_into(self, out: bytearray) -> None:
-        for item in self.conflicts:
-            _wire.put_message(out, 1, item)
-
-    def _merge(self, data: bytes) -> None:
-        for number, wire_type, value in _wire.read_fields(data):
-            if number == 1:
-                _wire.expect(wire_type, _wire.LEN)
-                self.conflicts.append(Conflict.decode(value))
-
-
-class EmptyScope(_wire.Message):
-    _FIELDS = (
-    )
-
-    def __init__(
-        self,
-    ) -> None:
-        pass
-
-    def _encode_into(self, out: bytearray) -> None:
-        return
-
-    def _merge(self, data: bytes) -> None:
-        for number, wire_type, value in _wire.read_fields(data):
-            pass
-
-
-class PlanHashMismatch(_wire.Message):
-    _FIELDS = (
-        "approved",
-        "plan",
-    )
-
-    def __init__(
-        self,
-        approved: str = "",
-        plan: str = "",
-    ) -> None:
-        self.approved = approved
-        self.plan = plan
-
-    def _encode_into(self, out: bytearray) -> None:
-        if self.approved:
-            _wire.put_string(out, 1, self.approved)
-        if self.plan:
-            _wire.put_string(out, 2, self.plan)
-
-    def _merge(self, data: bytes) -> None:
-        for number, wire_type, value in _wire.read_fields(data):
-            if number == 1:
-                _wire.expect(wire_type, _wire.LEN)
-                self.approved = _wire.get_string(value)
-            elif number == 2:
-                _wire.expect(wire_type, _wire.LEN)
-                self.plan = _wire.get_string(value)
-
-
-class PlanChanged(_wire.Message):
-    _FIELDS = (
-        "approved",
-        "now",
-    )
-
-    def __init__(
-        self,
-        approved: str = "",
-        now: str = "",
-    ) -> None:
-        self.approved = approved
-        self.now = now
-
-    def _encode_into(self, out: bytearray) -> None:
-        if self.approved:
-            _wire.put_string(out, 1, self.approved)
-        if self.now:
-            _wire.put_string(out, 2, self.now)
-
-    def _merge(self, data: bytes) -> None:
-        for number, wire_type, value in _wire.read_fields(data):
-            if number == 1:
-                _wire.expect(wire_type, _wire.LEN)
-                self.approved = _wire.get_string(value)
-            elif number == 2:
-                _wire.expect(wire_type, _wire.LEN)
-                self.now = _wire.get_string(value)
-
-
-class UnsupportedStampMode(_wire.Message):
-    _FIELDS = (
-        "paths",
-    )
-
-    def __init__(
-        self,
-        paths: Iterable[str] = (),
-    ) -> None:
-        self.paths = list(paths)
-
-    def _encode_into(self, out: bytearray) -> None:
-        for item in self.paths:
-            _wire.put_string(out, 1, item)
-
-    def _merge(self, data: bytes) -> None:
-        for number, wire_type, value in _wire.read_fields(data):
-            if number == 1:
-                _wire.expect(wire_type, _wire.LEN)
-                self.paths.append(_wire.get_string(value))
-
-
-class UnhostedKind(_wire.Message):
-    """
-    A wanted object whose kind the provider does not host.
-    """
-
-    _FIELDS = (
-        "path",
-        "kind",
-    )
-
-    def __init__(
-        self,
-        path: str = "",
-        kind: str = "",
-    ) -> None:
-        self.path = path
-        self.kind = kind
-
-    def _encode_into(self, out: bytearray) -> None:
-        if self.path:
-            _wire.put_string(out, 1, self.path)
-        if self.kind:
-            _wire.put_string(out, 2, self.kind)
-
-    def _merge(self, data: bytes) -> None:
-        for number, wire_type, value in _wire.read_fields(data):
-            if number == 1:
-                _wire.expect(wire_type, _wire.LEN)
-                self.path = _wire.get_string(value)
-            elif number == 2:
-                _wire.expect(wire_type, _wire.LEN)
-                self.kind = _wire.get_string(value)
-
-
-class UnhostedKinds(_wire.Message):
-    _FIELDS = (
-        "kinds",
-    )
-
-    def __init__(
-        self,
-        kinds: Iterable[UnhostedKind] = (),
-    ) -> None:
-        self.kinds = list(kinds)
-
-    def _encode_into(self, out: bytearray) -> None:
-        for item in self.kinds:
-            _wire.put_message(out, 1, item)
-
-    def _merge(self, data: bytes) -> None:
-        for number, wire_type, value in _wire.read_fields(data):
-            if number == 1:
-                _wire.expect(wire_type, _wire.LEN)
-                self.kinds.append(UnhostedKind.decode(value))
-
-
-class LeaseHeld(_wire.Message):
-    """
-    Another run holds the ledger's lease. Nothing was read or written; try again when that run
-    has ended.
-
-    Attributes:
-        holder: The identity the other run took the lease as.
-        remaining_ms: At most this many milliseconds until the lease can be taken, if that run died without
-            releasing it.
-    """
-
-    _FIELDS = (
-        "holder",
-        "remaining_ms",
-    )
-
-    def __init__(
-        self,
-        holder: str = "",
-        remaining_ms: int = 0,
-    ) -> None:
-        self.holder = holder
-        self.remaining_ms = remaining_ms
-
-    def _encode_into(self, out: bytearray) -> None:
-        if self.holder:
-            _wire.put_string(out, 1, self.holder)
-        if self.remaining_ms:
-            _wire.put_varint_field(out, 2, self.remaining_ms)
-
-    def _merge(self, data: bytes) -> None:
-        for number, wire_type, value in _wire.read_fields(data):
-            if number == 1:
-                _wire.expect(wire_type, _wire.LEN)
-                self.holder = _wire.get_string(value)
-            elif number == 2:
-                _wire.expect(wire_type, _wire.VARINT)
-                self.remaining_ms = _wire.get_uint64(value)
-
-
-class Refusal(_wire.Message):
-    """
-    Why a run was refused whole, before anything was changed.
-    """
-
-    _FIELDS = (
-        "findings",
-        "conflicts",
-        "empty_scope",
-        "plan_hash_mismatch",
-        "plan_changed",
-        "unsupported_stamp_mode",
-        "message",
-        "unhosted_kinds",
-        "lease_held",
-    )
-
-    def __init__(
-        self,
-        findings: Optional[Findings] = None,
-        conflicts: Optional[Conflicts] = None,
-        empty_scope: Optional[EmptyScope] = None,
-        plan_hash_mismatch: Optional[PlanHashMismatch] = None,
-        plan_changed: Optional[PlanChanged] = None,
-        unsupported_stamp_mode: Optional[UnsupportedStampMode] = None,
-        message: str = "",
-        unhosted_kinds: Optional[UnhostedKinds] = None,
-        lease_held: Optional[LeaseHeld] = None,
-    ) -> None:
-        self.findings = findings
-        self.conflicts = conflicts
-        self.empty_scope = empty_scope
-        self.plan_hash_mismatch = plan_hash_mismatch
-        self.plan_changed = plan_changed
-        self.unsupported_stamp_mode = unsupported_stamp_mode
-        self.message = message
-        self.unhosted_kinds = unhosted_kinds
-        self.lease_held = lease_held
-
-    def which_reason(self) -> Optional[str]:
-        """The name of the arm of `reason` that is set, or None."""
-        return _wire.which(self, (
-            "findings",
-            "conflicts",
-            "empty_scope",
-            "plan_hash_mismatch",
-            "plan_changed",
-            "unsupported_stamp_mode",
-            "unhosted_kinds",
-            "lease_held",
-        ))
-
-    def _clear_reason(self) -> None:
-        self.findings = None
-        self.conflicts = None
-        self.empty_scope = None
-        self.plan_hash_mismatch = None
-        self.plan_changed = None
-        self.unsupported_stamp_mode = None
-        self.unhosted_kinds = None
-        self.lease_held = None
-
-    @classmethod
-    def findings(cls, findings: Findings, **fields: Any) -> "Refusal":
-        return cls(findings=findings, **fields)
-
-    @classmethod
-    def conflicts(cls, conflicts: Conflicts, **fields: Any) -> "Refusal":
-        return cls(conflicts=conflicts, **fields)
-
-    @classmethod
-    def empty_scope(cls, **fields: Any) -> "Refusal":
-        return cls(empty_scope=EmptyScope(), **fields)
-
-    @classmethod
-    def plan_hash_mismatch(cls, approved: str, plan: str, **fields: Any) -> "Refusal":
-        return cls(plan_hash_mismatch=PlanHashMismatch(approved=approved, plan=plan), **fields)
-
-    @classmethod
-    def plan_changed(cls, approved: str, now: str, **fields: Any) -> "Refusal":
-        return cls(plan_changed=PlanChanged(approved=approved, now=now), **fields)
-
-    @classmethod
-    def unsupported_stamp_mode(cls, unsupported_stamp_mode: UnsupportedStampMode, **fields: Any) -> "Refusal":
-        return cls(unsupported_stamp_mode=unsupported_stamp_mode, **fields)
-
-    @classmethod
-    def unhosted_kinds(cls, unhosted_kinds: UnhostedKinds, **fields: Any) -> "Refusal":
-        return cls(unhosted_kinds=unhosted_kinds, **fields)
-
-    @classmethod
-    def lease_held(cls, holder: str, remaining_ms: int, **fields: Any) -> "Refusal":
-        return cls(lease_held=LeaseHeld(holder=holder, remaining_ms=remaining_ms), **fields)
-
-    def _encode_into(self, out: bytearray) -> None:
-        arm = self.which_reason()
-        if arm == "findings":
-            _wire.put_message(out, 1, self.findings)
-        elif arm == "conflicts":
-            _wire.put_message(out, 2, self.conflicts)
-        elif arm == "empty_scope":
-            _wire.put_message(out, 3, self.empty_scope)
-        elif arm == "plan_hash_mismatch":
-            _wire.put_message(out, 4, self.plan_hash_mismatch)
-        elif arm == "plan_changed":
-            _wire.put_message(out, 5, self.plan_changed)
-        elif arm == "unsupported_stamp_mode":
-            _wire.put_message(out, 6, self.unsupported_stamp_mode)
-        elif arm == "unhosted_kinds":
-            _wire.put_message(out, 8, self.unhosted_kinds)
-        elif arm == "lease_held":
-            _wire.put_message(out, 9, self.lease_held)
-        if self.message:
-            _wire.put_string(out, 7, self.message)
-
-    def _merge(self, data: bytes) -> None:
-        for number, wire_type, value in _wire.read_fields(data):
-            if number == 1:
-                _wire.expect(wire_type, _wire.LEN)
-                current = self.findings
-                self._clear_reason()
-                if current is None:
-                    current = Findings()
-                self.findings = current
-                self.findings._merge(value)
-            elif number == 2:
-                _wire.expect(wire_type, _wire.LEN)
-                current = self.conflicts
-                self._clear_reason()
-                if current is None:
-                    current = Conflicts()
-                self.conflicts = current
-                self.conflicts._merge(value)
-            elif number == 3:
-                _wire.expect(wire_type, _wire.LEN)
-                current = self.empty_scope
-                self._clear_reason()
-                if current is None:
-                    current = EmptyScope()
-                self.empty_scope = current
-                self.empty_scope._merge(value)
-            elif number == 4:
-                _wire.expect(wire_type, _wire.LEN)
-                current = self.plan_hash_mismatch
-                self._clear_reason()
-                if current is None:
-                    current = PlanHashMismatch()
-                self.plan_hash_mismatch = current
-                self.plan_hash_mismatch._merge(value)
-            elif number == 5:
-                _wire.expect(wire_type, _wire.LEN)
-                current = self.plan_changed
-                self._clear_reason()
-                if current is None:
-                    current = PlanChanged()
-                self.plan_changed = current
-                self.plan_changed._merge(value)
-            elif number == 6:
-                _wire.expect(wire_type, _wire.LEN)
-                current = self.unsupported_stamp_mode
-                self._clear_reason()
-                if current is None:
-                    current = UnsupportedStampMode()
-                self.unsupported_stamp_mode = current
-                self.unsupported_stamp_mode._merge(value)
-            elif number == 7:
-                _wire.expect(wire_type, _wire.LEN)
-                self.message = _wire.get_string(value)
-            elif number == 8:
-                _wire.expect(wire_type, _wire.LEN)
-                current = self.unhosted_kinds
-                self._clear_reason()
-                if current is None:
-                    current = UnhostedKinds()
-                self.unhosted_kinds = current
-                self.unhosted_kinds._merge(value)
-            elif number == 9:
-                _wire.expect(wire_type, _wire.LEN)
-                current = self.lease_held
-                self._clear_reason()
-                if current is None:
-                    current = LeaseHeld()
-                self.lease_held = current
-                self.lease_held._merge(value)
-
-
-class RetainedObject(_wire.Message):
-    _FIELDS = (
-        "path",
-        "retained",
-    )
-
-    def __init__(
-        self,
-        path: str = "",
-        retained: Optional[Retained] = None,
-    ) -> None:
-        self.path = path
-        self.retained = retained
-
-    def _encode_into(self, out: bytearray) -> None:
-        if self.path:
-            _wire.put_string(out, 1, self.path)
-        if self.retained is not None:
-            _wire.put_message(out, 2, self.retained)
-
-    def _merge(self, data: bytes) -> None:
-        for number, wire_type, value in _wire.read_fields(data):
-            if number == 1:
-                _wire.expect(wire_type, _wire.LEN)
-                self.path = _wire.get_string(value)
-            elif number == 2:
-                _wire.expect(wire_type, _wire.LEN)
-                if self.retained is None:
-                    self.retained = Retained()
-                self.retained = self.retained
-                self.retained._merge(value)
-
-
-class Blocked(_wire.Message):
-    """
-    Attributes:
-        producer: The resource path whose failure blocks it.
-    """
-
-    _FIELDS = (
-        "path",
-        "producer",
-    )
-
-    def __init__(
-        self,
-        path: str = "",
-        producer: str = "",
-    ) -> None:
-        self.path = path
-        self.producer = producer
-
-    def _encode_into(self, out: bytearray) -> None:
-        if self.path:
-            _wire.put_string(out, 1, self.path)
-        if self.producer:
-            _wire.put_string(out, 2, self.producer)
-
-    def _merge(self, data: bytes) -> None:
-        for number, wire_type, value in _wire.read_fields(data):
-            if number == 1:
-                _wire.expect(wire_type, _wire.LEN)
-                self.path = _wire.get_string(value)
-            elif number == 2:
-                _wire.expect(wire_type, _wire.LEN)
-                self.producer = _wire.get_string(value)
-
-
-class RollbackFailure(_wire.Message):
-    _FIELDS = (
-        "path",
-        "message",
-    )
-
-    def __init__(
-        self,
-        path: str = "",
-        message: str = "",
-    ) -> None:
-        self.path = path
-        self.message = message
-
-    def _encode_into(self, out: bytearray) -> None:
-        if self.path:
-            _wire.put_string(out, 1, self.path)
-        if self.message:
-            _wire.put_string(out, 2, self.message)
-
-    def _merge(self, data: bytes) -> None:
-        for number, wire_type, value in _wire.read_fields(data):
-            if number == 1:
-                _wire.expect(wire_type, _wire.LEN)
-                self.path = _wire.get_string(value)
-            elif number == 2:
-                _wire.expect(wire_type, _wire.LEN)
-                self.message = _wire.get_string(value)
-
-
-class Report(_wire.Message):
-    """
-    What a run did, by object, in the order it did it.
-
-    Attributes:
-        leaks: The leak sweep an apply ends with: objects that carry the cell's stamp and have no ledger
-            record. They are reported and left alone; the apply is not failed for them.
-        leak_sweep_failed: Set when that sweep could not read; the apply still stands.
-    """
-
-    _FIELDS = (
-        "created",
-        "updated",
-        "resumed",
-        "deleted",
-        "reaped",
-        "retained",
-        "converging",
-        "failed",
-        "blocked_by_failed",
-        "rolled_back",
-        "rollback_failed",
-        "leaks",
-        "leak_sweep_failed",
-    )
-
-    def __init__(
-        self,
-        created: Iterable[str] = (),
-        updated: Iterable[str] = (),
-        resumed: Iterable[str] = (),
-        deleted: Iterable[str] = (),
-        reaped: Iterable[str] = (),
-        retained: Iterable[RetainedObject] = (),
-        converging: Iterable[str] = (),
-        failed: Iterable[str] = (),
-        blocked_by_failed: Iterable[Blocked] = (),
-        rolled_back: Iterable[str] = (),
-        rollback_failed: Iterable[RollbackFailure] = (),
-        leaks: Iterable[Leak] = (),
-        leak_sweep_failed: Optional[Error] = None,
-    ) -> None:
-        self.created = list(created)
-        self.updated = list(updated)
-        self.resumed = list(resumed)
-        self.deleted = list(deleted)
-        self.reaped = list(reaped)
-        self.retained = list(retained)
-        self.converging = list(converging)
-        self.failed = list(failed)
-        self.blocked_by_failed = list(blocked_by_failed)
-        self.rolled_back = list(rolled_back)
-        self.rollback_failed = list(rollback_failed)
-        self.leaks = list(leaks)
-        self.leak_sweep_failed = leak_sweep_failed
-
-    def _encode_into(self, out: bytearray) -> None:
-        for item in self.created:
-            _wire.put_string(out, 1, item)
-        for item in self.updated:
-            _wire.put_string(out, 2, item)
-        for item in self.resumed:
-            _wire.put_string(out, 3, item)
-        for item in self.deleted:
-            _wire.put_string(out, 4, item)
-        for item in self.reaped:
-            _wire.put_string(out, 5, item)
-        for item in self.retained:
-            _wire.put_message(out, 6, item)
-        for item in self.converging:
-            _wire.put_string(out, 7, item)
-        for item in self.failed:
-            _wire.put_string(out, 8, item)
-        for item in self.blocked_by_failed:
-            _wire.put_message(out, 9, item)
-        for item in self.rolled_back:
-            _wire.put_string(out, 10, item)
-        for item in self.rollback_failed:
-            _wire.put_message(out, 11, item)
-        for item in self.leaks:
-            _wire.put_message(out, 12, item)
-        if self.leak_sweep_failed is not None:
-            _wire.put_message(out, 13, self.leak_sweep_failed)
-
-    def _merge(self, data: bytes) -> None:
-        for number, wire_type, value in _wire.read_fields(data):
-            if number == 1:
-                _wire.expect(wire_type, _wire.LEN)
-                self.created.append(_wire.get_string(value))
-            elif number == 2:
-                _wire.expect(wire_type, _wire.LEN)
-                self.updated.append(_wire.get_string(value))
-            elif number == 3:
-                _wire.expect(wire_type, _wire.LEN)
-                self.resumed.append(_wire.get_string(value))
-            elif number == 4:
-                _wire.expect(wire_type, _wire.LEN)
-                self.deleted.append(_wire.get_string(value))
-            elif number == 5:
-                _wire.expect(wire_type, _wire.LEN)
-                self.reaped.append(_wire.get_string(value))
-            elif number == 6:
-                _wire.expect(wire_type, _wire.LEN)
-                self.retained.append(RetainedObject.decode(value))
-            elif number == 7:
-                _wire.expect(wire_type, _wire.LEN)
-                self.converging.append(_wire.get_string(value))
-            elif number == 8:
-                _wire.expect(wire_type, _wire.LEN)
-                self.failed.append(_wire.get_string(value))
-            elif number == 9:
-                _wire.expect(wire_type, _wire.LEN)
-                self.blocked_by_failed.append(Blocked.decode(value))
-            elif number == 10:
-                _wire.expect(wire_type, _wire.LEN)
-                self.rolled_back.append(_wire.get_string(value))
-            elif number == 11:
-                _wire.expect(wire_type, _wire.LEN)
-                self.rollback_failed.append(RollbackFailure.decode(value))
-            elif number == 12:
-                _wire.expect(wire_type, _wire.LEN)
-                self.leaks.append(Leak.decode(value))
-            elif number == 13:
-                _wire.expect(wire_type, _wire.LEN)
-                if self.leak_sweep_failed is None:
-                    self.leak_sweep_failed = Error()
-                self.leak_sweep_failed = self.leak_sweep_failed
-                self.leak_sweep_failed._merge(value)
-
-
-class Leak(_wire.Message):
-    """
-    A live object that carries the cell's stamp and that no ledger record accounts for. The
-    stamp is a claim, not an authority: nothing deletes the object on it.
-
-    Attributes:
-        name: The name the provider shows, without any stamp encoding.
-        owner: The top-level owner the stamp names.
-        node: The node key the stamp names.
-    """
-
-    _FIELDS = (
-        "kind",
-        "physical_id",
-        "name",
-        "owner",
-        "node",
-    )
-
-    def __init__(
-        self,
-        kind: str = "",
-        physical_id: str = "",
-        name: str = "",
-        owner: str = "",
-        node: str = "",
-    ) -> None:
-        self.kind = kind
-        self.physical_id = physical_id
-        self.name = name
-        self.owner = owner
-        self.node = node
-
-    def _encode_into(self, out: bytearray) -> None:
-        if self.kind:
-            _wire.put_string(out, 1, self.kind)
-        if self.physical_id:
-            _wire.put_string(out, 2, self.physical_id)
-        if self.name:
-            _wire.put_string(out, 3, self.name)
-        if self.owner:
-            _wire.put_string(out, 4, self.owner)
-        if self.node:
-            _wire.put_string(out, 5, self.node)
-
-    def _merge(self, data: bytes) -> None:
-        for number, wire_type, value in _wire.read_fields(data):
-            if number == 1:
-                _wire.expect(wire_type, _wire.LEN)
-                self.kind = _wire.get_string(value)
-            elif number == 2:
-                _wire.expect(wire_type, _wire.LEN)
-                self.physical_id = _wire.get_string(value)
-            elif number == 3:
-                _wire.expect(wire_type, _wire.LEN)
-                self.name = _wire.get_string(value)
-            elif number == 4:
-                _wire.expect(wire_type, _wire.LEN)
-                self.owner = _wire.get_string(value)
-            elif number == 5:
-                _wire.expect(wire_type, _wire.LEN)
-                self.node = _wire.get_string(value)
-
-
-class LeaksResponse(_wire.Message):
-    """
-    What a leak sweep found, by physical id. Empty when there are no leaks (the exit class is
-    then DONE; with leaks it is LEAKS).
-    """
-
-    _FIELDS = (
-        "leaks",
-    )
-
-    def __init__(
-        self,
-        leaks: Iterable[Leak] = (),
-    ) -> None:
-        self.leaks = list(leaks)
-
-    def _encode_into(self, out: bytearray) -> None:
-        for item in self.leaks:
-            _wire.put_message(out, 1, item)
-
-    def _merge(self, data: bytes) -> None:
-        for number, wire_type, value in _wire.read_fields(data):
-            if number == 1:
-                _wire.expect(wire_type, _wire.LEN)
-                self.leaks.append(Leak.decode(value))
-
-
-class ObjectStatus(_wire.Message):
-    """
-    One recorded or named object, as the ledger and the provider show it now.
-
-    Attributes:
-        record: Absent when the ledger has no record of the object.
-        live: Absent when the provider shows no such object.
-        outputs: The non-secret outputs the record holds.
-    """
-
-    _FIELDS = (
-        "path",
-        "kind",
-        "record",
-        "live",
-        "standing",
-        "outputs",
-    )
-
-    def __init__(
-        self,
-        path: str = "",
-        kind: str = "",
-        record: Optional[RecordState] = None,
-        live: Optional[LiveStatus] = None,
-        standing: Standing = Standing.UNSPECIFIED,
-        outputs: Optional[Mapping[str, str]] = None,
-    ) -> None:
-        self.path = path
-        self.kind = kind
-        self.record = record
-        self.live = live
-        self.standing = standing
-        self.outputs = {} if outputs is None else dict(outputs)
-
-    def _encode_into(self, out: bytearray) -> None:
-        if self.path:
-            _wire.put_string(out, 1, self.path)
-        if self.kind:
-            _wire.put_string(out, 2, self.kind)
-        if self.record is not None:
-            _wire.put_varint_field(out, 3, self.record)
-        if self.live is not None:
-            _wire.put_varint_field(out, 4, self.live)
-        if self.standing:
-            _wire.put_varint_field(out, 5, self.standing)
-        for key in sorted(self.outputs):
-            item = self.outputs[key]
-            entry = bytearray()
-            if key:
-                _wire.put_string(entry, 1, key)
-            if item:
-                _wire.put_string(entry, 2, item)
-            _wire.put_bytes(out, 6, bytes(entry))
-
-    def _merge(self, data: bytes) -> None:
-        for number, wire_type, value in _wire.read_fields(data):
-            if number == 1:
-                _wire.expect(wire_type, _wire.LEN)
-                self.path = _wire.get_string(value)
-            elif number == 2:
-                _wire.expect(wire_type, _wire.LEN)
-                self.kind = _wire.get_string(value)
-            elif number == 3:
-                _wire.expect(wire_type, _wire.VARINT)
-                self.record = _wire.get_enum(RecordState, value)
-            elif number == 4:
-                _wire.expect(wire_type, _wire.VARINT)
-                self.live = _wire.get_enum(LiveStatus, value)
-            elif number == 5:
-                _wire.expect(wire_type, _wire.VARINT)
-                self.standing = _wire.get_enum(Standing, value)
-            elif number == 6:
-                _wire.expect(wire_type, _wire.LEN)
-                key, item = "", ""
-                for number_, wire_type_, value_ in _wire.read_fields(value):
-                    if number_ == 1:
-                        _wire.expect(wire_type_, _wire.LEN)
-                        key = _wire.get_string(value_)
-                    elif number_ == 2:
-                        _wire.expect(wire_type_, _wire.LEN)
-                        item = _wire.get_string(value_)
-                self.outputs[key] = item
-
-
-class StatusResponse(_wire.Message):
-    """
-    What a status found: one entry per object, in path order. An empty list is an empty ledger and
-    a list that names nothing.
-    """
-
-    _FIELDS = (
-        "objects",
-    )
-
-    def __init__(
-        self,
-        objects: Iterable[ObjectStatus] = (),
-    ) -> None:
-        self.objects = list(objects)
-
-    def _encode_into(self, out: bytearray) -> None:
-        for item in self.objects:
-            _wire.put_message(out, 1, item)
-
-    def _merge(self, data: bytes) -> None:
-        for number, wire_type, value in _wire.read_fields(data):
-            if number == 1:
-                _wire.expect(wire_type, _wire.LEN)
-                self.objects.append(ObjectStatus.decode(value))
-
-
 class Error(_wire.Message):
     """
-    Why a step failed. `message` is for a person and is not parsed.
+    Why a call made no answer. `message` is for a person and is not parsed.
     """
 
     _FIELDS = (
@@ -1694,202 +170,323 @@ class Error(_wire.Message):
                 self.message = _wire.get_string(value)
 
 
-class Failure(_wire.Message):
+class LedgerShowRequest(_wire.Message):
     """
-    A run that stopped at a step.
-
-    Attributes:
-        report: What had been done before it stopped, and what a rollback did.
-        at: The object of the step that failed; absent when nothing was started.
+    Show one ledger document as data. The ledger is the session's
+    (`SessionConfig.ledger_kind`, `ledger_location`). A call takes no lease and changes no file.
     """
 
     _FIELDS = (
-        "report",
-        "at",
-        "error",
     )
 
     def __init__(
         self,
-        report: Optional[Report] = None,
-        at: Optional[str] = None,
-        error: Optional[Error] = None,
     ) -> None:
-        self.report = report
-        self.at = at
-        self.error = error
+        pass
 
     def _encode_into(self, out: bytearray) -> None:
-        if self.report is not None:
-            _wire.put_message(out, 1, self.report)
-        if self.at is not None:
-            _wire.put_string(out, 2, self.at)
-        if self.error is not None:
-            _wire.put_message(out, 3, self.error)
+        return
+
+    def _merge(self, data: bytes) -> None:
+        for number, wire_type, value in _wire.read_fields(data):
+            pass
+
+
+class Pair(_wire.Message):
+    """
+    A key and a value. A list of pairs, not a map, so every host prints the same bytes.
+    """
+
+    _FIELDS = (
+        "key",
+        "value",
+    )
+
+    def __init__(
+        self,
+        key: str = "",
+        value: str = "",
+    ) -> None:
+        self.key = key
+        self.value = value
+
+    def _encode_into(self, out: bytearray) -> None:
+        if self.key:
+            _wire.put_string(out, 1, self.key)
+        if self.value:
+            _wire.put_string(out, 2, self.value)
 
     def _merge(self, data: bytes) -> None:
         for number, wire_type, value in _wire.read_fields(data):
             if number == 1:
                 _wire.expect(wire_type, _wire.LEN)
-                if self.report is None:
-                    self.report = Report()
-                self.report = self.report
-                self.report._merge(value)
+                self.key = _wire.get_string(value)
             elif number == 2:
                 _wire.expect(wire_type, _wire.LEN)
-                self.at = _wire.get_string(value)
-            elif number == 3:
-                _wire.expect(wire_type, _wire.LEN)
-                if self.error is None:
-                    self.error = Error()
-                self.error = self.error
-                self.error._merge(value)
+                self.value = _wire.get_string(value)
 
 
-class Outcome(_wire.Message):
+class LeaseView(_wire.Message):
     """
-    What the engine answered, and the exit class of the answer.
-
     Attributes:
-        invalid: The request was not understood; the exit class is USAGE.
-        status: The answer of a status request.
-        leaks: The answer of a leaks request.
+        expires_ms: Milliseconds since the Unix epoch, by the ledger's clock.
+        yours: The holder is `SessionConfig.holder`.
     """
 
     _FIELDS = (
-        "planned",
-        "done",
-        "refused",
-        "failed",
-        "exit",
-        "invalid",
-        "status",
-        "leaks",
+        "holder",
+        "expires_ms",
+        "state",
+        "yours",
     )
 
     def __init__(
         self,
-        planned: Optional[Plan] = None,
-        done: Optional[Report] = None,
-        refused: Optional[Refusal] = None,
-        failed: Optional[Failure] = None,
+        holder: str = "",
+        expires_ms: int = 0,
+        state: LeaseState = LeaseState.UNSPECIFIED,
+        yours: bool = False,
+    ) -> None:
+        self.holder = holder
+        self.expires_ms = expires_ms
+        self.state = state
+        self.yours = yours
+
+    def _encode_into(self, out: bytearray) -> None:
+        if self.holder:
+            _wire.put_string(out, 1, self.holder)
+        if self.expires_ms:
+            _wire.put_varint_field(out, 2, self.expires_ms)
+        if self.state:
+            _wire.put_varint_field(out, 3, self.state)
+        if self.yours:
+            _wire.put_bool(out, 4, self.yours)
+
+    def _merge(self, data: bytes) -> None:
+        for number, wire_type, value in _wire.read_fields(data):
+            if number == 1:
+                _wire.expect(wire_type, _wire.LEN)
+                self.holder = _wire.get_string(value)
+            elif number == 2:
+                _wire.expect(wire_type, _wire.VARINT)
+                self.expires_ms = _wire.get_uint64(value)
+            elif number == 3:
+                _wire.expect(wire_type, _wire.VARINT)
+                self.state = _wire.get_enum(LeaseState, value)
+            elif number == 4:
+                _wire.expect(wire_type, _wire.VARINT)
+                self.yours = _wire.get_bool(value)
+
+
+class LedgerRecord(_wire.Message):
+    """
+    Attributes:
+        outputs: In key order.
+    """
+
+    _FIELDS = (
+        "path",
+        "kind",
+        "name",
+        "origin",
+        "state",
+        "physical",
+        "deps",
+        "outputs",
+    )
+
+    def __init__(
+        self,
+        path: str = "",
+        kind: str = "",
+        name: str = "",
+        origin: RecordOrigin = RecordOrigin.UNSPECIFIED,
+        state: RecordState = RecordState.UNSPECIFIED,
+        physical: str = "",
+        deps: Iterable[str] = (),
+        outputs: Iterable[Pair] = (),
+    ) -> None:
+        self.path = path
+        self.kind = kind
+        self.name = name
+        self.origin = origin
+        self.state = state
+        self.physical = physical
+        self.deps = list(deps)
+        self.outputs = list(outputs)
+
+    def _encode_into(self, out: bytearray) -> None:
+        if self.path:
+            _wire.put_string(out, 1, self.path)
+        if self.kind:
+            _wire.put_string(out, 2, self.kind)
+        if self.name:
+            _wire.put_string(out, 3, self.name)
+        if self.origin:
+            _wire.put_varint_field(out, 4, self.origin)
+        if self.state:
+            _wire.put_varint_field(out, 5, self.state)
+        if self.physical:
+            _wire.put_string(out, 6, self.physical)
+        for item in self.deps:
+            _wire.put_string(out, 7, item)
+        for item in self.outputs:
+            _wire.put_message(out, 8, item)
+
+    def _merge(self, data: bytes) -> None:
+        for number, wire_type, value in _wire.read_fields(data):
+            if number == 1:
+                _wire.expect(wire_type, _wire.LEN)
+                self.path = _wire.get_string(value)
+            elif number == 2:
+                _wire.expect(wire_type, _wire.LEN)
+                self.kind = _wire.get_string(value)
+            elif number == 3:
+                _wire.expect(wire_type, _wire.LEN)
+                self.name = _wire.get_string(value)
+            elif number == 4:
+                _wire.expect(wire_type, _wire.VARINT)
+                self.origin = _wire.get_enum(RecordOrigin, value)
+            elif number == 5:
+                _wire.expect(wire_type, _wire.VARINT)
+                self.state = _wire.get_enum(RecordState, value)
+            elif number == 6:
+                _wire.expect(wire_type, _wire.LEN)
+                self.physical = _wire.get_string(value)
+            elif number == 7:
+                _wire.expect(wire_type, _wire.LEN)
+                self.deps.append(_wire.get_string(value))
+            elif number == 8:
+                _wire.expect(wire_type, _wire.LEN)
+                self.outputs.append(Pair.decode(value))
+
+
+class LedgerShowResponse(_wire.Message):
+    """
+    Attributes:
+        token: The document's token, as text.
+        fence: The highest fence ever granted.
+        lease: Absent when no lease is recorded.
+        records: In path order.
+    """
+
+    _FIELDS = (
+        "token",
+        "fence",
+        "lease",
+        "records",
+    )
+
+    def __init__(
+        self,
+        token: str = "",
+        fence: int = 0,
+        lease: Optional[LeaseView] = None,
+        records: Iterable[LedgerRecord] = (),
+    ) -> None:
+        self.token = token
+        self.fence = fence
+        self.lease = lease
+        self.records = list(records)
+
+    def _encode_into(self, out: bytearray) -> None:
+        if self.token:
+            _wire.put_string(out, 1, self.token)
+        if self.fence:
+            _wire.put_varint_field(out, 2, self.fence)
+        if self.lease is not None:
+            _wire.put_message(out, 3, self.lease)
+        for item in self.records:
+            _wire.put_message(out, 4, item)
+
+    def _merge(self, data: bytes) -> None:
+        for number, wire_type, value in _wire.read_fields(data):
+            if number == 1:
+                _wire.expect(wire_type, _wire.LEN)
+                self.token = _wire.get_string(value)
+            elif number == 2:
+                _wire.expect(wire_type, _wire.VARINT)
+                self.fence = _wire.get_uint64(value)
+            elif number == 3:
+                _wire.expect(wire_type, _wire.LEN)
+                if self.lease is None:
+                    self.lease = LeaseView()
+                self.lease = self.lease
+                self.lease._merge(value)
+            elif number == 4:
+                _wire.expect(wire_type, _wire.LEN)
+                self.records.append(LedgerRecord.decode(value))
+
+
+class Outcome(_wire.Message):
+    """
+    What a call answered, and the exit class of the answer.
+
+    Attributes:
+        invalid: The request decoded and is not valid; the exit class is USAGE.
+        ledger_show: The answer of a ledger show.
+        error: The call made no answer for a reason that is not a usage fault: a ledger that could not
+            be opened or read. The exit class is FAILED_NO_EFFECT.
+    """
+
+    _FIELDS = (
+        "exit",
+        "invalid",
+        "ledger_show",
+        "error",
+    )
+
+    def __init__(
+        self,
         exit: ExitClass = ExitClass.DONE,
         invalid: Optional[Error] = None,
-        status: Optional[StatusResponse] = None,
-        leaks: Optional[LeaksResponse] = None,
+        ledger_show: Optional[LedgerShowResponse] = None,
+        error: Optional[Error] = None,
     ) -> None:
-        self.planned = planned
-        self.done = done
-        self.refused = refused
-        self.failed = failed
         self.exit = exit
         self.invalid = invalid
-        self.status = status
-        self.leaks = leaks
+        self.ledger_show = ledger_show
+        self.error = error
 
     def which_result(self) -> Optional[str]:
         """The name of the arm of `result` that is set, or None."""
         return _wire.which(self, (
-            "planned",
-            "done",
-            "refused",
-            "failed",
             "invalid",
-            "status",
-            "leaks",
+            "ledger_show",
+            "error",
         ))
 
     def _clear_result(self) -> None:
-        self.planned = None
-        self.done = None
-        self.refused = None
-        self.failed = None
         self.invalid = None
-        self.status = None
-        self.leaks = None
-
-    @classmethod
-    def planned(cls, planned: Plan, **fields: Any) -> "Outcome":
-        return cls(planned=planned, **fields)
-
-    @classmethod
-    def done(cls, done: Report, **fields: Any) -> "Outcome":
-        return cls(done=done, **fields)
-
-    @classmethod
-    def refused(cls, refused: Refusal, **fields: Any) -> "Outcome":
-        return cls(refused=refused, **fields)
-
-    @classmethod
-    def failed(cls, failed: Failure, **fields: Any) -> "Outcome":
-        return cls(failed=failed, **fields)
+        self.ledger_show = None
+        self.error = None
 
     @classmethod
     def invalid(cls, code: ErrorCode, message: str, **fields: Any) -> "Outcome":
         return cls(invalid=Error(code=code, message=message), **fields)
 
     @classmethod
-    def status(cls, status: StatusResponse, **fields: Any) -> "Outcome":
-        return cls(status=status, **fields)
+    def ledger_show(cls, ledger_show: LedgerShowResponse, **fields: Any) -> "Outcome":
+        return cls(ledger_show=ledger_show, **fields)
 
     @classmethod
-    def leaks(cls, leaks: LeaksResponse, **fields: Any) -> "Outcome":
-        return cls(leaks=leaks, **fields)
+    def error(cls, code: ErrorCode, message: str, **fields: Any) -> "Outcome":
+        return cls(error=Error(code=code, message=message), **fields)
 
     def _encode_into(self, out: bytearray) -> None:
-        arm = self.which_result()
-        if arm == "planned":
-            _wire.put_message(out, 1, self.planned)
-        elif arm == "done":
-            _wire.put_message(out, 2, self.done)
-        elif arm == "refused":
-            _wire.put_message(out, 3, self.refused)
-        elif arm == "failed":
-            _wire.put_message(out, 4, self.failed)
-        elif arm == "invalid":
-            _wire.put_message(out, 6, self.invalid)
-        elif arm == "status":
-            _wire.put_message(out, 7, self.status)
-        elif arm == "leaks":
-            _wire.put_message(out, 8, self.leaks)
         if self.exit:
             _wire.put_varint_field(out, 5, self.exit)
+        arm = self.which_result()
+        if arm == "invalid":
+            _wire.put_message(out, 6, self.invalid)
+        elif arm == "ledger_show":
+            _wire.put_message(out, 9, self.ledger_show)
+        elif arm == "error":
+            _wire.put_message(out, 10, self.error)
 
     def _merge(self, data: bytes) -> None:
         for number, wire_type, value in _wire.read_fields(data):
-            if number == 1:
-                _wire.expect(wire_type, _wire.LEN)
-                current = self.planned
-                self._clear_result()
-                if current is None:
-                    current = Plan()
-                self.planned = current
-                self.planned._merge(value)
-            elif number == 2:
-                _wire.expect(wire_type, _wire.LEN)
-                current = self.done
-                self._clear_result()
-                if current is None:
-                    current = Report()
-                self.done = current
-                self.done._merge(value)
-            elif number == 3:
-                _wire.expect(wire_type, _wire.LEN)
-                current = self.refused
-                self._clear_result()
-                if current is None:
-                    current = Refusal()
-                self.refused = current
-                self.refused._merge(value)
-            elif number == 4:
-                _wire.expect(wire_type, _wire.LEN)
-                current = self.failed
-                self._clear_result()
-                if current is None:
-                    current = Failure()
-                self.failed = current
-                self.failed._merge(value)
-            elif number == 5:
+            if number == 5:
                 _wire.expect(wire_type, _wire.VARINT)
                 self.exit = _wire.get_enum(ExitClass, value)
             elif number == 6:
@@ -1900,19 +497,19 @@ class Outcome(_wire.Message):
                     current = Error()
                 self.invalid = current
                 self.invalid._merge(value)
-            elif number == 7:
+            elif number == 9:
                 _wire.expect(wire_type, _wire.LEN)
-                current = self.status
+                current = self.ledger_show
                 self._clear_result()
                 if current is None:
-                    current = StatusResponse()
-                self.status = current
-                self.status._merge(value)
-            elif number == 8:
+                    current = LedgerShowResponse()
+                self.ledger_show = current
+                self.ledger_show._merge(value)
+            elif number == 10:
                 _wire.expect(wire_type, _wire.LEN)
-                current = self.leaks
+                current = self.error
                 self._clear_result()
                 if current is None:
-                    current = LeaksResponse()
-                self.leaks = current
-                self.leaks._merge(value)
+                    current = Error()
+                self.error = current
+                self.error._merge(value)

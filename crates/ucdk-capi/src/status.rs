@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-//! The status codes of the ABI. Each says whether the call itself worked; what the engine
-//! decided is data in the response and always comes with [`OK`].
+//! The status codes of the ABI. Each says whether the call itself worked; what the call found
+//! is data in the response and always comes with [`OK`].
 
-/// The call worked. `out` holds the response, which may itself say refused or failed.
+/// The call worked. `out` holds the response, which may itself say that the ledger could not be
+/// read.
 pub const OK: i32 = 0;
 /// Null where it is not allowed, a bad length, or a handle that is not an open session.
 pub const INVALID_ARGUMENT: i32 = 1;

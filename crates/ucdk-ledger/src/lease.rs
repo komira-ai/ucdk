@@ -20,25 +20,22 @@
 //! neither is a clock that steps back; the fence still refuses a holder that was overtaken, and
 //! the bound only matters for a lease that has lapsed but not been taken.
 //!
-//! Fencing protects the ledger, not the cloud: a stalled holder's provider call that is already
-//! in flight is not recalled. The write-ahead intent and the stamp are what make that call
+//! Fencing protects the ledger, not what a holder does outside it: a stalled holder's call that
+//! is already in flight is not recalled. The write-ahead intent is what makes that call
 //! resolvable by the next holder.
 
 use std::fmt;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use ucdk_core::millis;
+// The clocks live in `ucdk-core`, so the pure crates can move one by hand; they are re-exported
+// here at the paths they always had.
+pub use ucdk_core::{Clock, ManualClock};
 
 /// How far two clocks reading one lease may disagree before the lease's guarantee is lost.
 pub const MAX_CLOCK_SKEW: Duration = Duration::from_secs(5);
 
-/// A source of the time, in milliseconds since the Unix epoch. A ledger holds one, so a test
-/// can move time by hand.
-pub trait Clock: Send + Sync + fmt::Debug {
-    fn now_millis(&self) -> u64;
-}
-
-/// The wall clock.
+/// The wall clock. This is the one reader of `SystemTime` in non-test code.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemClock;
 
@@ -49,37 +46,6 @@ impl Clock for SystemClock {
             .unwrap_or_default();
         millis(since)
     }
-}
-
-/// A clock that moves only when told to. A clone shares the time.
-#[derive(Debug, Clone, Default)]
-pub struct ManualClock {
-    now: Arc<AtomicU64>,
-}
-
-impl ManualClock {
-    /// A clock reading `start` milliseconds.
-    pub fn at(start: u64) -> Self {
-        Self {
-            now: Arc::new(AtomicU64::new(start)),
-        }
-    }
-
-    /// Moves the clock forward.
-    pub fn advance(&self, by: Duration) {
-        self.now.fetch_add(millis(by), Ordering::SeqCst);
-    }
-}
-
-impl Clock for ManualClock {
-    fn now_millis(&self) -> u64 {
-        self.now.load(Ordering::SeqCst)
-    }
-}
-
-/// A duration in milliseconds, saturating.
-pub(crate) fn millis(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// The fencing token of a lease. Each grant has a higher one than every grant before it.
@@ -118,6 +84,43 @@ pub struct Lease {
     pub expires_at: u64,
 }
 
+/// The lease as a document records it: who holds it, under which fence, until when. It says
+/// nothing of whether the lease is still good; [`Holding::state`] judges that against a reading
+/// of the ledger's clock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Holding {
+    pub holder: String,
+    pub fence: Fence,
+    /// When the lease lapses, in milliseconds on the ledger's clock.
+    pub expires_at: u64,
+}
+
+/// Where a recorded lease stands at one instant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseState {
+    /// Before `expires_at`: the holder may write, and no other holder is granted the lease.
+    Live,
+    /// From `expires_at` until `expires_at` plus [`MAX_CLOCK_SKEW`]: the holder may no longer
+    /// write, and another holder is still refused.
+    Lapsing,
+    /// After that: another holder is granted the lease.
+    Lapsed,
+}
+
+impl Holding {
+    /// The state of the lease at `at`, a reading of the ledger's clock. This is the line the
+    /// ledger draws when it grants the lease and when it admits an unfenced write.
+    pub fn state(&self, at: u64) -> LeaseState {
+        if at < self.expires_at {
+            LeaseState::Live
+        } else if at < self.expires_at.saturating_add(millis(MAX_CLOCK_SKEW)) {
+            LeaseState::Lapsing
+        } else {
+            LeaseState::Lapsed
+        }
+    }
+}
+
 /// Why a lease was not granted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LeaseError {
@@ -125,6 +128,8 @@ pub enum LeaseError {
     Held { holder: String, remaining: Duration },
     /// The ledger could not be reached or written: nothing was granted.
     Unavailable(String),
+    /// The ledger was opened to read and does not write: nothing was granted.
+    ReadOnly,
 }
 
 impl fmt::Display for LeaseError {
@@ -136,6 +141,7 @@ impl fmt::Display for LeaseError {
                 remaining.as_secs().max(1)
             ),
             Self::Unavailable(why) => write!(f, "the lease is unavailable: {why}"),
+            Self::ReadOnly => f.write_str("the ledger was opened read-only: no lease is granted"),
         }
     }
 }

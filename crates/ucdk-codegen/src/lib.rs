@@ -8,12 +8,10 @@
 //!
 //! Two targets exist: [`python`] and [`typescript`]. Per proto package each writes a module of
 //! message classes that encode and decode themselves (so the SDK has no protobuf runtime
-//! dependency), and, for the resource catalog, typed templates and typed output references read
-//! from the message options. What the targets read from the descriptors is shared (`model`,
-//! `kinds`); what they write is not.
+//! dependency). What the targets read from the descriptors is shared (`model`); what they write
+//! is not.
 
 mod docs;
-mod kinds;
 mod model;
 mod names;
 pub mod python;
@@ -25,9 +23,9 @@ use std::path::{Path, PathBuf};
 use prost_reflect::DescriptorPool;
 
 /// The directories the repository's protos are found in, relative to the workspace root.
-pub const PROTO_ROOTS: [&str; 2] = ["crates/ucdk-proto/proto", "crates/ucdk-api/proto"];
+pub const PROTO_ROOTS: [&str; 1] = ["crates/ucdk-api/proto"];
 /// The proto files SDKs are generated from, as named inside [`PROTO_ROOTS`].
-pub const PROTO_FILES: [&str; 2] = ["ucdk/resource/v1/resource.proto", "ucdk/api/v1/api.proto"];
+pub const PROTO_FILES: [&str; 1] = ["ucdk/api/v1/api.proto"];
 
 /// One generated file: its path inside the SDK package and its text.
 #[derive(Debug, Clone, PartialEq, Eq)]

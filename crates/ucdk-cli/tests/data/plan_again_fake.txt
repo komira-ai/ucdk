@@ -1,8 +1,0 @@
-ucdk plan
-provider: fake
-mode: apply
-plan-hash: 9b81e9c074d8461228b1c0616191447affa2f329d6b6eac46434dbdcca061266
-  ok      example-db/run [service]
-  ok      example-svc/run [service]
-  ok      example-svc/public [public]
-no changes

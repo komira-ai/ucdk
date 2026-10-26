@@ -25,12 +25,12 @@
 //! refused rather than read. The checksum guards against accidents, not against an attacker.
 //! `fence` is the fence of the last lease granted and `lease` (absent when none is held) its holder
 //! and the millisecond it lapses; both come before the first record and were added in 1.1.
-//! The owner of a record is not written: it is the owner path of the record's node path.
+//! The owner of a record is not written: it is the owner path of the record's path.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
-use ucdk_provider::{Kind, NodePath, PhysicalId};
+use ucdk_core::{Locator, RecordPath, Tag};
 
 use crate::doc::{Doc, Held};
 use crate::record::{Origin, OwnerPath, Record, State};
@@ -71,7 +71,10 @@ fn checksum(bytes: &[u8]) -> u64 {
     })
 }
 
-fn escape(text: &str) -> String {
+/// The text of one value as the file writes it: one token. Bytes other than letters, digits and
+/// `._-/:` become `%XX`, and the empty text is a lone `%`. Anything that prints a value of the
+/// ledger uses this function, so what it prints cannot drift from what the file holds.
+pub fn escape_token(text: &str) -> String {
     if text.is_empty() {
         return "%".to_owned();
     }
@@ -131,26 +134,35 @@ pub(crate) fn encode(doc: &Doc) -> String {
     );
     if let Some(held) = &doc.lease {
         // Writing to a string cannot fail.
-        let _ = writeln!(out, "lease {} {}", escape(&held.holder), held.expires_at);
+        let _ = writeln!(
+            out,
+            "lease {} {}",
+            escape_token(&held.holder),
+            held.expires_at
+        );
     }
     for record in doc.records.values() {
         let mut line = |text: String| {
             out.push_str(&text);
             out.push('\n');
         };
-        line(format!("record {}", escape(record.path.as_str())));
-        line(format!("kind {}", escape(record.kind.as_str())));
-        line(format!("name {}", escape(&record.name)));
+        line(format!("record {}", escape_token(record.path.as_str())));
+        line(format!("kind {}", escape_token(record.kind.as_str())));
+        line(format!("name {}", escape_token(&record.name)));
         line(format!("origin {}", origin_text(record.origin)));
         line(format!("state {}", state_text(record.state)));
         if let Some(physical) = &record.physical {
-            line(format!("physical {}", escape(physical.as_str())));
+            line(format!("physical {}", escape_token(physical.as_str())));
         }
         for dep in &record.deps {
-            line(format!("dep {}", escape(dep.as_str())));
+            line(format!("dep {}", escape_token(dep.as_str())));
         }
         for (name, value) in &record.outputs {
-            line(format!("output {} {}", escape(name), escape(value)));
+            line(format!(
+                "output {} {}",
+                escape_token(name),
+                escape_token(value)
+            ));
         }
     }
     let sum = checksum(out.as_bytes());
@@ -185,15 +197,16 @@ impl Line<'_> {
         Ok(text)
     }
 
-    fn path(&self) -> Result<NodePath, FormatError> {
-        NodePath::new(&self.one()?).or_else(|e| corrupt(self.number, format!("a node path: {e}")))
+    fn path(&self) -> Result<RecordPath, FormatError> {
+        RecordPath::new(&self.one()?)
+            .or_else(|e| corrupt(self.number, format!("a record path: {e}")))
     }
 }
 
 /// The fields of the record under construction, as the lines name them.
 struct Pending<'a> {
     start: usize,
-    path: NodePath,
+    path: RecordPath,
     lines: Vec<Line<'a>>,
 }
 
@@ -223,7 +236,7 @@ impl Pending<'_> {
             .lines
             .iter()
             .find(|l| l.tag == "physical")
-            .map(|l| l.one().map(PhysicalId::new))
+            .map(|l| l.one().map(Locator::new))
             .transpose()?;
         let mut deps = BTreeSet::new();
         let mut outputs = BTreeMap::new();
@@ -241,7 +254,7 @@ impl Pending<'_> {
         }
         Ok(Record {
             owner: OwnerPath::of(&self.path),
-            kind: Kind::new(self.single("kind")?),
+            kind: Tag::new(self.single("kind")?),
             name: self.single("name")?,
             origin,
             state,
@@ -370,7 +383,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Parsed, FormatError> {
 }
 
 fn insert(
-    records: &mut BTreeMap<NodePath, Record>,
+    records: &mut BTreeMap<RecordPath, Record>,
     pending: Pending<'_>,
 ) -> Result<(), FormatError> {
     let start = pending.start;

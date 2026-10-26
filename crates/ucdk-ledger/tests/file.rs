@@ -6,12 +6,15 @@ mod common;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::sync::Arc;
+use std::time::Duration;
 
 use common::{Scratch, confirmed, path, put, record, sealed};
+use ucdk_core::{Locator, Tag};
 use ucdk_ledger::{
-    Change, FileLedger, LeaseError, Ledger, LedgerError, OpenError, Origin, Record, State,
+    Change, FileLedger, LeaseError, LeaseState, Ledger, LedgerError, ManualClock, OpenError,
+    Origin, Record, State,
 };
-use ucdk_provider::{Kind, PhysicalId};
 
 fn open(scratch: &Scratch) -> FileLedger {
     FileLedger::open(scratch.file()).expect("open")
@@ -26,7 +29,7 @@ fn full_record() -> Record {
     Record {
         origin: Origin::Adopted,
         state: State::Reaping,
-        physical: Some(PhysicalId::new("thing:one/with space%and\nnewline")),
+        physical: Some(Locator::new("thing:one/with space%and\nnewline")),
         deps: BTreeSet::from([path("db/run"), path("cache/run")]),
         outputs: BTreeMap::from([
             ("URL".to_owned(), "a b?c=d%".to_owned()),
@@ -36,7 +39,7 @@ fn full_record() -> Record {
         ]),
         ..Record::intent(
             path("app/db/run"),
-            Kind::new("a kind"),
+            Tag::new("a kind"),
             "name with spaces",
             BTreeSet::new(),
         )
@@ -166,7 +169,7 @@ fn handles_writing_at_once_lose_no_write() {
             std::thread::spawn(move || {
                 let ledger = FileLedger::open(&file).expect("open");
                 for i in 0..10 {
-                    // Each write is retried against the token it finds, as the engine does.
+                    // Each write is retried against the token it finds, as a lease guard does.
                     loop {
                         let token = ledger.read().expect("read").token;
                         let change = Change::Put(record(&format!("app{n}/r{i}")));
@@ -512,7 +515,7 @@ fn a_document_that_is_whole_but_wrong_is_refused_with_the_line_and_the_reason() 
                 },
                 1,
             ),
-            "node path",
+            "record path",
         ),
         (
             (
@@ -570,7 +573,7 @@ fn a_document_that_is_whole_but_wrong_is_refused_with_the_line_and_the_reason() 
             "needs 1 value",
         ),
         (with(&["dep not/ok/../path here"]), "needs 1 value"),
-        (with(&["dep Upper"]), "node path"),
+        (with(&["dep Upper"]), "record path"),
         (with(&["output only-a-name"]), "needs 2 value"),
     ];
     let scratch = Scratch::new("wrong");
@@ -824,4 +827,216 @@ fn a_lease_change_to_a_file_with_a_newer_minor_is_refused_like_a_write() {
         sealed(&["ucdk-ledger 1.7", "version 4"], 0),
         "the file is as it was"
     );
+}
+
+#[test]
+fn a_physical_line_with_no_value_is_refused() {
+    let scratch = Scratch::new("physical_empty");
+    let lines = [
+        "ucdk-ledger 1.0",
+        "version 1",
+        "record a/run",
+        "kind service",
+        "name n",
+        "origin created",
+        "state confirmed",
+        "physical",
+    ];
+    fs::write(scratch.file(), sealed(&lines, 1)).expect("write");
+    let OpenError::Corrupt { why, line, .. } = refused(&scratch) else {
+        panic!("not refused as corrupt");
+    };
+    assert_eq!(line, 8, "the line of the `physical` tag");
+    assert!(why.contains("not validly escaped"), "{why}");
+}
+
+#[test]
+fn every_change_over_a_file_that_became_corrupt_after_the_open_is_unavailable() {
+    let scratch = Scratch::new("corrupt_after_open");
+    let ledger = open(&scratch);
+    put(&ledger, Change::Put(record("app/run")));
+    let lease = ledger.acquire("alice", TTL).expect("acquire");
+    let token = ledger.read().expect("read").token;
+    // Another process, or a disk, changed the file under the open handle.
+    fs::write(scratch.file(), "this is not a ledger\n").expect("write");
+    let unavailable = |why: &str| why.contains("corrupt");
+    let write = ledger.write(&token, Change::Put(record("db/run")));
+    assert!(
+        matches!(write, Err(LedgerError::Unavailable(ref why)) if unavailable(why)),
+        "{write:?}"
+    );
+    let fenced = ledger.write_fenced(lease.fence, &token, Change::Put(record("db/run")));
+    assert!(
+        matches!(fenced, Err(LedgerError::Unavailable(ref why)) if unavailable(why)),
+        "{fenced:?}"
+    );
+    let renewed = ledger.renew(lease.fence, TTL);
+    assert!(
+        matches!(renewed, Err(LedgerError::Unavailable(ref why)) if unavailable(why)),
+        "{renewed:?}"
+    );
+    let released = ledger.release(lease.fence);
+    assert!(
+        matches!(released, Err(LedgerError::Unavailable(ref why)) if unavailable(why)),
+        "{released:?}"
+    );
+    let acquired = ledger.acquire("bob", TTL);
+    assert!(
+        matches!(acquired, Err(LeaseError::Unavailable(ref why)) if unavailable(why)),
+        "{acquired:?}"
+    );
+    let read = ledger.read();
+    assert!(
+        matches!(read, Err(LedgerError::Unavailable(ref why)) if unavailable(why)),
+        "{read:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(scratch.file()).expect("read"),
+        "this is not a ledger\n",
+        "nothing was repaired"
+    );
+}
+
+// ---- opened to read ----------------------------------------------------------------------
+
+/// Every file of the directory with its bytes, by name.
+fn listing(scratch: &Scratch) -> BTreeMap<String, Vec<u8>> {
+    fs::read_dir(scratch.dir())
+        .expect("list")
+        .map(|entry| {
+            let entry = entry.expect("entry");
+            (
+                entry.file_name().to_string_lossy().into_owned(),
+                fs::read(entry.path()).expect("read"),
+            )
+        })
+        .collect()
+}
+
+/// A scratch directory holding a ledger of two records and a lease, and nothing else: the lock
+/// file the writer made is removed, so any file that appears later is the reader's.
+fn written_ledger(name: &str) -> Scratch {
+    let scratch = Scratch::new(name);
+    {
+        let ledger = open(&scratch);
+        put(&ledger, Change::Put(record("app/run")));
+        put(&ledger, Change::Put(confirmed("db/run", "id-1")));
+        ledger.acquire("alice", TTL).expect("acquire");
+    }
+    fs::remove_file(scratch.dir().join("ledger.ucdk.lock")).expect("remove the lock file");
+    scratch
+}
+
+#[test]
+fn a_read_only_open_changes_no_file_and_creates_none() {
+    let scratch = written_ledger("ro_unchanged");
+    // A write that never finished: a writer's open would remove it.
+    fs::write(scratch.dir().join("ledger.ucdk.tmp"), b"half a write").expect("write");
+    let before = listing(&scratch);
+    assert_eq!(before.len(), 2, "the ledger and the stale temporary");
+    {
+        let ledger = FileLedger::open_read_only(scratch.file()).expect("open read-only");
+        let snapshot = ledger.read().expect("read");
+        assert_eq!(snapshot.records.len(), 2);
+        assert_eq!(snapshot.lease.expect("a lease").holder, "alice");
+    }
+    assert_eq!(
+        listing(&scratch),
+        before,
+        "names and bytes are as they were"
+    );
+}
+
+#[test]
+fn a_read_only_open_reads_a_document_another_handle_holds_locked() {
+    let scratch = Scratch::new("ro_locked");
+    let writer = open(&scratch);
+    put(&writer, Change::Put(record("app/run")));
+    // The file lock of a writer's read-modify-write, taken here and held while the reader reads.
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(scratch.dir().join("ledger.ucdk.lock"))
+        .expect("the lock file");
+    lock.lock().expect("take the lock");
+    let reader = FileLedger::open_read_only(scratch.file()).expect("open read-only");
+    assert_eq!(reader.read().expect("read").records.len(), 1);
+    lock.unlock().expect("give the lock back");
+}
+
+#[test]
+fn a_read_only_ledger_refuses_every_write() {
+    let scratch = written_ledger("ro_refuses");
+    let reader = FileLedger::open_read_only(scratch.file()).expect("open read-only");
+    let snapshot = reader.read().expect("read");
+    let fence = snapshot.fence;
+    let before = listing(&scratch);
+    assert_eq!(
+        reader.write(&snapshot.token, Change::Put(record("x/run"))),
+        Err(LedgerError::ReadOnly)
+    );
+    assert_eq!(
+        reader.write_fenced(fence, &snapshot.token, Change::Put(record("x/run"))),
+        Err(LedgerError::ReadOnly)
+    );
+    assert_eq!(reader.renew(fence, TTL), Err(LedgerError::ReadOnly));
+    assert_eq!(reader.release(fence), Err(LedgerError::ReadOnly));
+    assert_eq!(reader.acquire("bob", TTL), Err(LeaseError::ReadOnly));
+    assert_eq!(listing(&scratch), before, "no refusal changed a file");
+}
+
+#[test]
+fn a_read_only_ledger_reports_the_clock_it_was_given() {
+    let scratch = Scratch::new("ro_clock");
+    {
+        let clock = ManualClock::at(5_000);
+        let ledger = FileLedger::open_with_clock(scratch.file(), Arc::new(clock)).expect("open");
+        ledger
+            .acquire("alice", Duration::from_secs(60))
+            .expect("acquire");
+    }
+    let clock = ManualClock::at(7_000);
+    let reader = FileLedger::open_read_only_with_clock(scratch.file(), Arc::new(clock.clone()))
+        .expect("open read-only");
+    let first = reader.read().expect("read");
+    assert_eq!(first.at, 7_000);
+    let holding = first.lease.expect("a lease");
+    assert_eq!(holding.expires_at, 65_000);
+    assert_eq!(holding.state(first.at), LeaseState::Live);
+    clock.advance(Duration::from_secs(60));
+    let later = reader.read().expect("read");
+    assert_eq!(
+        later.at, 67_000,
+        "the reading follows the clock it was given"
+    );
+    assert_eq!(holding.state(later.at), LeaseState::Lapsing);
+}
+
+#[test]
+fn a_read_only_open_of_a_missing_file_is_an_error_not_an_empty_ledger() {
+    let scratch = Scratch::new("ro_missing");
+    let err = FileLedger::open_read_only(scratch.file()).expect_err("refused");
+    let OpenError::Io { path, why } = &err else {
+        panic!("not an I/O error: {err:?}");
+    };
+    assert_eq!(path, &scratch.file());
+    assert!(why.contains("does not exist"), "{why}");
+    assert!(listing(&scratch).is_empty(), "nothing was created");
+
+    // A file that is not a whole ledger, or is of a newer major, is refused as `open` refuses
+    // it, and is left as it is.
+    for (content, corrupt) in [
+        (b"not a ledger".to_vec(), true),
+        (sealed(&["ucdk-ledger 2.0", "version 1"], 0), false),
+    ] {
+        fs::write(scratch.file(), &content).expect("write");
+        let err = FileLedger::open_read_only(scratch.file()).expect_err("refused");
+        match err {
+            OpenError::Corrupt { .. } => assert!(corrupt),
+            OpenError::NewerMajor { found, .. } => assert!(!corrupt && found == 2),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(fs::read(scratch.file()).expect("read"), content);
+    }
+    assert_eq!(listing(&scratch).len(), 1, "still only the ledger file");
 }

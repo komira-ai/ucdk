@@ -13,7 +13,7 @@ use xtask::sdk::{check_fresh, test, write as generate_into};
 const WIRE: &str = "sdk/python/ucdk/generated/_wire.py";
 const WIRE_TS: &str = "sdk/typescript/src/generated/wire.ts";
 /// The files both generators write: six Python, five TypeScript.
-const FILES: usize = 11;
+const FILES: usize = 5;
 
 #[test]
 fn the_committed_sdk_is_what_the_generator_writes() {

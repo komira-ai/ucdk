@@ -9,7 +9,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-ucdk-provider = { path = "../ucdk-provider" }
+ucdk-core = { path = "../ucdk-core" }
 
 [lints]
 workspace = true

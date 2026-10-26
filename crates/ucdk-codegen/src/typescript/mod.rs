@@ -1,22 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
-//! The TypeScript target: one module per proto package, the wire primitives they share, and the
-//! typed resource templates.
+//! The TypeScript target: one module per proto package, and the wire primitives they share.
 //!
 //! Files written, relative to the SDK's package directory:
 //!
 //! - `src/generated/wire.ts`: varint and length-delimited primitives, and the `Message` base
 //!   class; the same text for every proto;
 //! - `src/generated/<package>.ts` (`ucdk.api.v1` is `ucdk_api_v1.ts`): the enums and message
-//!   classes of one package, and of every package they refer to (`google_protobuf.ts` holds the
-//!   `Duration` the resource messages use);
-//! - `src/generated/resources.ts`: the typed templates (when the protos declare `Resource`).
+//!   classes of one package, and of every package they refer to.
 //!
 //! Node runs the files as they are, by stripping the types, so only syntax that is nothing but
 //! types is used, and imports name their `.ts` files.
 
 mod message;
 mod names;
-mod templates;
 mod types;
 
 use std::collections::BTreeSet;
@@ -88,17 +84,12 @@ fn file(name: &str, text: String) -> File {
 /// everything they refer to.
 pub fn generate(pool: &DescriptorPool, files: &[&str]) -> Result<Vec<File>, Error> {
     let modules = collect(pool, files)?;
-    let names: Vec<String> = modules.keys().map(|p| module_of(p)).collect();
-    let resources = templates::generate(pool, &names)?;
     let mut out = vec![file("wire.ts", WIRE.to_owned())];
     for (package, module) in &modules {
         out.push(file(
             &format!("{}.ts", module_of(package)),
             module_text(package, module)?,
         ));
-    }
-    if let Some(text) = resources {
-        out.push(file("resources.ts", text));
     }
     Ok(out)
 }

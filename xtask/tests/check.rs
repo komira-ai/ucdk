@@ -335,7 +335,7 @@ fn the_coverage_verb_prints_the_per_crate_table() {
                 &[
                     line("crates/c"),
                     line("crates/ucdk-api"),
-                    line("crates/ucdk-proto"),
+                    line("crates/ucdk-core"),
                     line("xtask"),
                 ]
                 .concat(),

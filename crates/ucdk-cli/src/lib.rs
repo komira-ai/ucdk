@@ -2,20 +2,17 @@
 //! The `ucdk` command line as a library: `run(args, &mut World)` returns the exit code, so a
 //! test drives the same code the binary does, in-process.
 //!
-//! Verbs: `plan`, `status`, `leaks`, `apply` and `destroy`, against the `fake` or `fake-limited`
-//! provider. All input is flags: `--input` is a binary `ucdk.resource.v1.ResourceList`, and
-//! `apply` and `destroy` take `--holder`, the name they take the ledger lease as.
+//! The one verb is `ucdk ledger show --ledger <file> [--holder <name>]`: it prints one ledger
+//! file, one fact per line (see [`ledger_text`]), and takes no lease and changes no file. All
+//! input is flags, and there are no positional arguments.
 //!
-//! Exit codes (the table is `ucdk_api::exit_class`):
+//! Exit codes (the table is `ucdk_api::v1::ExitClass::code`):
 //!
 //! | code | meaning |
 //! |---|---|
-//! | 0 | done, or planned; including "no changes", and including a run that left an object still converging or still failed (a note says so) |
-//! | 2 | usage: a bad flag, or a file that cannot be read, written or decoded |
-//! | 3 | refused, nothing was changed: findings, a kind the provider lacks, an object that is not ours, a plan that is not the approved one, a ledger leased to another holder |
-//! | 4 | failed with no effect: safe to run again |
-//! | 6 | failed after changing something, or the run may still hold the ledger lease: plan again before running again |
-//! | 8 | `ucdk leaks` found stamped objects no ledger record accounts for |
+//! | 0 | done |
+//! | 2 | usage: a missing, unknown or repeated flag, an unknown command, or a positional argument |
+//! | 4 | failed with no effect: the ledger file is missing, corrupt, of a newer major, or cannot be read |
 
 mod args;
 mod exec;
@@ -26,7 +23,8 @@ use std::io::Write as _;
 use std::process::ExitCode;
 
 pub use args::USAGE;
-pub use world::{ProviderName, World};
+pub use render::ledger_text;
+pub use world::World;
 
 /// Runs the command line over `args` (without the program name) in `world`; the output is
 /// appended to `world.out` and `world.err`, and the exit code is returned.

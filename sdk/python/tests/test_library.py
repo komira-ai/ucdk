@@ -10,7 +10,7 @@ from unittest import mock
 
 import ucdk._library
 from ucdk import Library
-from ucdk._library import SDK_ABI, accepts, split_version
+from ucdk._library import SDK_ABI, accepts, needs, split_version
 from ucdk.errors import AbiMismatch, LibraryError
 
 from .support import LIBRARY, library_path
@@ -20,8 +20,7 @@ class Loading(unittest.TestCase):
     def test_the_library_is_loaded_from_the_path_given(self):
         lib = Library(library_path())
         self.assertEqual(lib.path, LIBRARY)
-        self.assertEqual(lib.abi[0], SDK_ABI[0])
-        self.assertGreaterEqual(lib.abi[1], SDK_ABI[1])
+        self.assertEqual(lib.abi, SDK_ABI)
 
     def test_a_string_path_works_too(self):
         self.assertEqual(Library(str(library_path())).abi, Library(library_path()).abi)
@@ -63,11 +62,13 @@ class Versions(unittest.TestCase):
         self.assertEqual(split_version((3 << 16) | 7), (3, 7))
         self.assertEqual(split_version(0), (0, 0))
 
-    def test_the_same_major_and_a_minor_at_least_the_sdks_is_accepted(self):
+    def test_the_same_major_and_minor_is_accepted(self):
+        self.assertTrue(accepts((0, 3), (0, 3)))
         self.assertTrue(accepts((1, 2), (1, 2)))
-        self.assertTrue(accepts((1, 2), (1, 9)))
 
-    def test_an_older_minor_or_another_major_is_not(self):
+    def test_another_minor_or_another_major_is_not(self):
+        self.assertFalse(accepts((0, 3), (0, 2)))
+        self.assertFalse(accepts((0, 3), (0, 4)))
         self.assertFalse(accepts((1, 2), (1, 1)))
         self.assertFalse(accepts((1, 2), (2, 2)))
         self.assertFalse(accepts((1, 2), (0, 9)))
@@ -87,10 +88,34 @@ class Versions(unittest.TestCase):
             with self.assertRaises(AbiMismatch):
                 Library(library_path())
 
-    def test_a_library_newer_in_its_minor_than_the_sdk_is_accepted(self):
+    def test_a_library_newer_in_its_minor_than_the_sdk_is_refused_while_the_major_is_0(self):
+        # A minor of major 0 may remove a function, so an older SDK would pass the check and
+        # fail at the lookup of a symbol that is gone.
         lib_major, lib_minor = Library(library_path()).abi
-        with mock.patch.object(Library, "SDK_ABI", (lib_major, max(lib_minor - 1, 0))):
-            self.assertEqual(Library(library_path()).abi, (lib_major, lib_minor))
+        self.assertEqual(lib_major, 0)
+        with mock.patch.object(Library, "SDK_ABI", (lib_major, lib_minor - 1)):
+            with self.assertRaises(AbiMismatch):
+                Library(library_path())
+
+    def test_a_library_newer_in_its_minor_than_the_sdk_is_accepted_from_major_1(self):
+        # No library of major 1 exists yet, so the rule is tried through `accepts` itself.
+        self.assertTrue(accepts((1, 2), (1, 3)))
+        self.assertTrue(accepts((1, 0), (1, 9)))
+        self.assertFalse(accepts((0, 2), (0, 3)))
+
+    def test_a_stale_sdk_is_refused_by_name(self):
+        lib_major, lib_minor = Library(library_path()).abi
+        with mock.patch.object(Library, "SDK_ABI", (lib_major, lib_minor - 1)):
+            with self.assertRaises(AbiMismatch) as caught:
+                Library(library_path())
+        message = str(caught.exception)
+        self.assertIn("ABI %d.%d" % (lib_major, lib_minor - 1), message, "the SDK's version")
+        self.assertIn("is ABI %d.%d" % (lib_major, lib_minor), message, "the library's version")
+        self.assertIn(str(library_path()), message, "and the library by its path")
+
+    def test_the_refusal_says_what_each_rule_needs(self):
+        self.assertIn("exactly ucdk ABI 0.3", needs((0, 3)))
+        self.assertIn("ucdk ABI 1.2 or a later 1.x", needs((1, 2)))
 
     def test_the_sdks_abi_is_the_headers(self):
         header = (LIBRARY.parents[2] / "crates/ucdk-capi/include/ucdk.h").read_text()

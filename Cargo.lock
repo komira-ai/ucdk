@@ -555,14 +555,9 @@ version = "0.0.0"
 dependencies = [
  "prost",
  "prost-build",
- "prost-types",
  "protox",
- "ucdk-engine",
+ "ucdk-core",
  "ucdk-ledger",
- "ucdk-plan",
- "ucdk-proto",
- "ucdk-provider",
- "ucdk-provider-fake",
 ]
 
 [[package]]
@@ -571,26 +566,17 @@ version = "0.0.0"
 dependencies = [
  "prost",
  "ucdk-api",
- "ucdk-engine",
+ "ucdk-core",
  "ucdk-ledger",
- "ucdk-plan",
- "ucdk-proto",
- "ucdk-provider",
- "ucdk-provider-fake",
 ]
 
 [[package]]
 name = "ucdk-cli"
 version = "0.0.0"
 dependencies = [
- "prost",
  "ucdk-api",
- "ucdk-engine",
+ "ucdk-core",
  "ucdk-ledger",
- "ucdk-plan",
- "ucdk-proto",
- "ucdk-provider",
- "ucdk-provider-fake",
 ]
 
 [[package]]
@@ -602,58 +588,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "ucdk-engine"
+name = "ucdk-core"
 version = "0.0.0"
 dependencies = [
- "ucdk-ledger",
- "ucdk-plan",
- "ucdk-proto",
- "ucdk-provider",
- "ucdk-provider-fake",
+ "sha2",
 ]
 
 [[package]]
 name = "ucdk-ledger"
 version = "0.0.0"
 dependencies = [
- "ucdk-provider",
-]
-
-[[package]]
-name = "ucdk-plan"
-version = "0.0.0"
-dependencies = [
- "prost",
- "prost-reflect",
- "prost-types",
- "protox",
- "sha2",
- "ucdk-proto",
- "ucdk-provider",
-]
-
-[[package]]
-name = "ucdk-proto"
-version = "0.0.0"
-dependencies = [
- "prost",
- "prost-build",
- "prost-types",
- "protox",
-]
-
-[[package]]
-name = "ucdk-provider"
-version = "0.0.0"
-dependencies = [
- "sha2",
-]
-
-[[package]]
-name = "ucdk-provider-fake"
-version = "0.0.0"
-dependencies = [
- "ucdk-provider",
+ "ucdk-core",
 ]
 
 [[package]]

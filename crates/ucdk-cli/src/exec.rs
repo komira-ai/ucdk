@@ -1,205 +1,49 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Running a command: read the input, plan against the world, and for `apply` and `destroy`
-//! hand the approved plan to the engine; `status` only reads.
+//! Running a command: parse the arguments, ask `ucdk_api::ledger_show` for the answer, print it.
 
-use std::collections::BTreeSet;
-use std::fs;
+use std::path::Path;
+use std::sync::Arc;
 
-use prost::Message as _;
-use ucdk_api::exit_class;
-use ucdk_api::v1::ExitClass;
-use ucdk_engine::{Engine, Mode as EngineMode, Outcome, Refusal, Report, Request};
-use ucdk_plan::{Lowered, lower};
-use ucdk_proto::v1::ResourceList;
+use ucdk_api::v1::{ExitClass, outcome};
+use ucdk_api::{LedgerSource, ledger_show};
+use ucdk_ledger::default_holder;
 
-use crate::args::{Approval, Command, Invocation, Mode, USAGE, Verb, parse};
-use crate::render::{failure, header, leaks_text, plan_text, report_text, status_text};
+use crate::args::{Command, USAGE, parse};
+use crate::render::ledger_text;
 use crate::world::World;
 
-/// A command that stops: its exit code and what to print to standard error.
-struct Exit {
-    code: ExitClass,
-    message: String,
-}
-
-fn usage(message: String) -> Exit {
-    Exit {
-        code: ExitClass::Usage,
-        message,
-    }
-}
-
-fn refused(message: String) -> Exit {
-    Exit {
-        code: ExitClass::Refused,
-        message,
-    }
-}
-
 pub fn run(args: &[String], world: &mut World) -> u8 {
-    let result = match parse(args) {
-        Err(message) => Err(usage(format!("{message}\n{USAGE}"))),
+    let class = match parse(args) {
+        Err(message) => {
+            world.err.push_str(&format!("ucdk: {message}\n{USAGE}"));
+            ExitClass::Usage
+        }
         Ok(Command::Version) => {
             world
                 .out
                 .push_str(concat!("ucdk ", env!("CARGO_PKG_VERSION"), "\n"));
-            Ok(ExitClass::Done)
+            ExitClass::Done
         }
-        Ok(Command::Run(invocation)) => execute(&invocation, world),
+        Ok(Command::LedgerShow { ledger, holder }) => show(&ledger, holder, world),
     };
-    result
-        .unwrap_or_else(|exit| {
-            world
-                .err
-                .push_str(&format!("ucdk: {}\n", exit.message.trim_end()));
-            exit.code
-        })
-        .code()
+    class.code()
 }
 
-fn read_input(path: &str) -> Result<Lowered, Exit> {
-    let bytes = fs::read(path).map_err(|e| usage(format!("cannot read {path}: {e}")))?;
-    let list = ResourceList::decode(bytes.as_slice())
-        .map_err(|e| usage(format!("{path} is not a binary resource list: {e}")))?;
-    lower(&list).map_err(|findings| {
-        let lines: Vec<String> = findings.iter().map(ToString::to_string).collect();
-        refused(format!(
-            "the resource list is refused:\n  {}",
-            lines.join("\n  ")
-        ))
-    })
-}
-
-/// A saved plan is the plan text a `plan` command printed. It must be the plan for this
-/// provider and mode with exactly the hash the approver pinned.
-fn check_saved(invocation: &Invocation, approval: &Approval) -> Result<(), Exit> {
-    let path = &approval.plan;
-    let saved = fs::read_to_string(path).map_err(|e| usage(format!("cannot read {path}: {e}")))?;
-    let wanted = header(invocation.provider, invocation.mode, &approval.hash);
-    if saved.starts_with(&wanted) {
-        Ok(())
-    } else {
-        Err(refused(format!(
-            "{path} is not the saved {} plan {} for {}",
-            invocation.mode.as_str(),
-            approval.hash,
-            invocation.provider.as_str()
-        )))
-    }
-}
-
-fn execute(invocation: &Invocation, world: &mut World) -> Result<ExitClass, Exit> {
-    if matches!(invocation.verb, Verb::Leaks) {
-        let ledger = world.ledger.clone();
-        let cell = world.cell.clone();
-        let outcome =
-            Engine::new(world.cloud(invocation.provider), &ledger, cell).handle(Request::Leaks);
-        return finish(outcome, invocation, world);
-    }
-    let desired = read_input(&invocation.input)?;
-    if let Verb::Apply(approval) | Verb::Destroy(approval) = &invocation.verb {
-        check_saved(invocation, approval)?;
-    }
-    let ledger = world.ledger.clone();
-    let cell = world.cell.clone();
-    let mut engine = Engine::new(world.cloud(invocation.provider), &ledger, cell);
-    if let Some(holder) = &invocation.holder {
-        engine = engine.with_holder(holder);
-    }
-    if matches!(invocation.verb, Verb::Status) {
-        let outcome = engine.handle(Request::Status { desired });
-        return finish(outcome, invocation, world);
-    }
-    let mode = match invocation.mode {
-        Mode::Apply => EngineMode::Apply,
-        Mode::Destroy => EngineMode::Destroy,
-    };
-    let planned = engine.handle(Request::Plan {
-        desired: desired.clone(),
-        mode,
-    });
-    let outcome = match (&invocation.verb, planned) {
-        (Verb::Apply(approval), Outcome::Planned(plan)) => engine.handle(Request::Apply {
-            desired,
-            plan,
-            plan_hash: approval.hash.clone(),
-            rollback: false,
-        }),
-        (Verb::Destroy(approval), Outcome::Planned(plan)) => engine.handle(Request::Destroy {
-            desired,
-            plan,
-            plan_hash: approval.hash.clone(),
-        }),
-        (_, other) => other,
-    };
-    finish(outcome, invocation, world)
-}
-
-/// Prints what the command ended with and gives its exit class.
-fn finish(outcome: Outcome, invocation: &Invocation, world: &mut World) -> Result<ExitClass, Exit> {
-    let class = exit_class(&outcome);
-    match outcome {
-        Outcome::Planned(plan) => {
-            let text = plan_text(invocation.provider, invocation.mode, &plan);
-            if let Verb::Plan { out: Some(path) } = &invocation.verb {
-                fs::write(path, &text).map_err(|e| usage(format!("cannot write {path}: {e}")))?;
-            }
-            world.out.push_str(&text);
-            Ok(class)
-        }
-        Outcome::Done(report) => {
-            world.out.push_str(&report_text(&report));
-            Ok(class)
-        }
-        Outcome::Status(objects) => {
-            world
-                .out
-                .push_str(&status_text(invocation.provider, &objects));
-            Ok(class)
-        }
-        Outcome::Leaks(leaks) => {
-            world.out.push_str(&leaks_text(invocation.provider, &leaks));
-            Ok(class)
-        }
-        Outcome::Refused(Refusal::UnhostedKinds(unhosted)) => {
-            // The refusal is the run's whole answer: it goes to standard output, one line for
-            // each node, under the header of the command that was refused.
-            let verb = match invocation.verb {
-                Verb::Plan { .. } => "plan",
-                Verb::Status => "status",
-                // `leaks` asks for no kind, so it is never refused for one.
-                Verb::Apply(_) | Verb::Destroy(_) | Verb::Leaks => "apply",
-            };
-            let lines: BTreeSet<String> = unhosted
-                .iter()
-                .map(|(path, kind)| {
-                    format!(
-                        "refused: kind {} is not hosted by {} ({path})",
-                        kind.as_str(),
-                        invocation.provider.as_str()
-                    )
-                })
-                .collect();
-            let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
-            world.out.push_str(&format!(
-                "ucdk {verb}\nprovider: {}\nmode: {}\n{text}",
-                invocation.provider.as_str(),
-                invocation.mode.as_str(),
-            ));
-            Ok(class)
-        }
-        Outcome::Refused(why) => Err(Exit {
-            code: class,
-            message: why.to_string(),
-        }),
-        Outcome::Failed(stopped) => {
-            if stopped.report != Report::default() {
-                world.out.push_str(&report_text(&stopped.report));
-            }
-            Err(Exit {
-                code: class,
-                message: failure(&stopped, class),
-            })
+/// Shows the ledger file at `path`, reading it as `holder` (a lease is `yours` when it names
+/// that holder; with none given, the default holder, which no lease names).
+fn show(path: &str, holder: Option<String>, world: &mut World) -> ExitClass {
+    let holder = holder.unwrap_or_else(default_holder);
+    let answer = ledger_show(
+        &LedgerSource::File(Path::new(path)),
+        &holder,
+        Arc::clone(&world.clock),
+    );
+    let class = ExitClass::try_from(answer.exit).expect("ledger_show sets a class it defines");
+    match answer.result.expect("ledger_show always sets a result") {
+        outcome::Result::LedgerShow(response) => world.out.push_str(&ledger_text(&response)),
+        outcome::Result::Error(error) | outcome::Result::Invalid(error) => {
+            world.err.push_str(&format!("ucdk: {}\n", error.message));
         }
     }
+    class
 }

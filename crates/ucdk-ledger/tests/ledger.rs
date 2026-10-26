@@ -3,15 +3,15 @@
 
 use std::collections::BTreeSet;
 
+use ucdk_core::{Locator, RecordPath, Tag};
 use ucdk_ledger::{Change, Ledger, LedgerError, MemoryLedger, Origin, OwnerPath, Record, State};
-use ucdk_provider::{Kind, NodePath, PhysicalId};
 
-fn path(text: &str) -> NodePath {
-    NodePath::new(text).expect("a valid path")
+fn path(text: &str) -> RecordPath {
+    RecordPath::new(text).expect("a valid path")
 }
 
 fn record(text: &str) -> Record {
-    Record::intent(path(text), Kind::service(), "name", BTreeSet::new())
+    Record::intent(path(text), Tag::new("service"), "name", BTreeSet::new())
 }
 
 #[test]
@@ -20,7 +20,7 @@ fn owner_path_is_every_segment_above_the_role() {
     let names: Vec<&str> = nested
         .segments()
         .iter()
-        .map(ucdk_provider::OwnerLabel::as_str)
+        .map(ucdk_core::OwnerLabel::as_str)
         .collect();
     assert_eq!(names, ["app", "db"]);
     assert_eq!(nested.top().as_str(), "app");
@@ -48,9 +48,9 @@ fn a_first_intent_is_created_with_no_physical_id() {
 #[test]
 fn confirming_records_the_physical_id_and_changes_nothing_else() {
     let intent = record("app/run");
-    let confirmed = intent.clone().confirmed(PhysicalId::new("id-1"));
+    let confirmed = intent.clone().confirmed(Locator::new("id-1"));
     assert_eq!(confirmed.state, State::Confirmed);
-    assert_eq!(confirmed.physical, Some(PhysicalId::new("id-1")));
+    assert_eq!(confirmed.physical, Some(Locator::new("id-1")));
     assert_eq!(confirmed.path, intent.path);
     assert_eq!(confirmed.owner, intent.owner);
     let reaping = confirmed.clone().in_state(State::Reaping);
@@ -99,7 +99,7 @@ fn put_replaces_the_record_of_a_path_and_remove_drops_it() {
     };
     put(Change::Put(record("app/run")));
     put(Change::Put(
-        record("app/run").confirmed(PhysicalId::new("id-1")),
+        record("app/run").confirmed(Locator::new("id-1")),
     ));
     let records = ledger.read().expect("read").records;
     assert_eq!(records.len(), 1);
@@ -130,5 +130,40 @@ fn errors_read_as_sentences() {
     assert_eq!(
         LedgerError::Unavailable("down".to_owned()).to_string(),
         "the ledger is unavailable: down"
+    );
+    assert_eq!(
+        LedgerError::ReadOnly.to_string(),
+        "the ledger was opened read-only and cannot be written"
+    );
+    assert_eq!(
+        ucdk_ledger::LeaseError::ReadOnly.to_string(),
+        "the ledger was opened read-only: no lease is granted"
+    );
+}
+
+#[test]
+fn a_holding_is_live_then_lapsing_then_lapsed_at_the_edges() {
+    use ucdk_ledger::{Fence, Holding, LeaseState, MAX_CLOCK_SKEW};
+    let holding = Holding {
+        holder: "ci-7".to_owned(),
+        fence: Fence::new(3),
+        expires_at: 10_000,
+    };
+    let skew = u64::try_from(MAX_CLOCK_SKEW.as_millis()).expect("small");
+    assert_eq!(holding.state(0), LeaseState::Live);
+    assert_eq!(holding.state(9_999), LeaseState::Live);
+    assert_eq!(holding.state(10_000), LeaseState::Lapsing);
+    assert_eq!(holding.state(10_000 + skew - 1), LeaseState::Lapsing);
+    assert_eq!(holding.state(10_000 + skew), LeaseState::Lapsed);
+    assert_eq!(holding.state(u64::MAX), LeaseState::Lapsed);
+    let never = Holding {
+        expires_at: u64::MAX,
+        ..holding
+    };
+    assert_eq!(never.state(u64::MAX - 1), LeaseState::Live);
+    assert_eq!(
+        never.state(u64::MAX),
+        LeaseState::Lapsed,
+        "the sum saturates"
     );
 }

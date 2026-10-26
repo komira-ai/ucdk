@@ -308,7 +308,7 @@ fn the_verb_stops_when_a_tool_cannot_be_installed() {
 #[test]
 fn only_prost_output_and_a_members_src_main_rs_are_left_out() {
     for path in [
-        "target/debug/build/ucdk-proto-0a1b/out/ucdk.resource.v1.rs",
+        "target/debug/build/ucdk-api-0a1b/out/ucdk.api.v1.rs",
         "target/llvm-cov-target/debug/build/p-1/out/x.rs",
         "crates/ucdk-cli/src/main.rs",
         "xtask/src/main.rs",

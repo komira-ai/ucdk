@@ -6,17 +6,26 @@
 //! bound, it must be let in. Here the file is held to what this crate writes, and to what it makes
 //! of it.
 //!
-//! To change it on purpose, run
+//! A second file, `records.ucdk`, holds records of every state and origin and no lease. It is
+//! the byte-level promise for the record lines: what this crate wrote for them is what it must
+//! keep writing, and a file with these lines must keep reading to the same records.
+//!
+//! To change them on purpose, run
 //! `cargo test -p ucdk-ledger --test golden -- --ignored write_goldens`.
 
 mod common;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::Scratch;
-use ucdk_ledger::{FileLedger, LeaseError, Ledger as _, MAX_CLOCK_SKEW, ManualClock};
+use common::{Scratch, path};
+use ucdk_core::{Locator, RecordPath, Tag};
+use ucdk_ledger::{
+    Change, FileLedger, LeaseError, Ledger as _, MAX_CLOCK_SKEW, ManualClock, Origin, OwnerPath,
+    Record, State,
+};
 
 /// When `ci-7` took the lease, in milliseconds on the clock the file was written with.
 const GRANTED: u64 = 1_000_000;
@@ -76,4 +85,124 @@ fn the_golden_is_held_by_ci_7_while_the_hour_lasts_and_can_be_taken_after_it() {
 fn write_goldens() {
     std::fs::create_dir_all(dir()).expect("create the directory");
     std::fs::write(dir().join("leased.ucdk"), golden("write")).expect("write a golden");
+    std::fs::write(dir().join("records.ucdk"), written_records("write")).expect("write a golden");
+}
+
+/// The records the second golden holds, one for each state and each origin, with every line a
+/// record can carry: a kind, a name, a physical id, dependencies and outputs. The values are
+/// plain words so that the text of the file is readable; the last record holds an output that
+/// needs escaping and an empty one.
+fn sample_records() -> Vec<Record> {
+    let record = |text: &str, kind: &str, name: &str, origin: Origin, state: State| Record {
+        owner: OwnerPath::of(&path(text)),
+        path: path(text),
+        kind: Tag::new(kind),
+        name: name.to_owned(),
+        origin,
+        state,
+        physical: None,
+        deps: BTreeSet::new(),
+        outputs: BTreeMap::new(),
+    };
+    let outputs = |pairs: &[(&str, &str)]| {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    vec![
+        Record {
+            outputs: outputs(&[("HOST", "db-host"), ("PORT", "5432")]),
+            ..record(
+                "app/db",
+                "service",
+                "app-db",
+                Origin::Created,
+                State::Confirmed,
+            )
+            .confirmed(Locator::new("db-1"))
+        },
+        Record {
+            deps: BTreeSet::from([path("app/db")]),
+            outputs: outputs(&[("URL", "run-url")]),
+            ..record(
+                "app/run",
+                "service",
+                "app-run",
+                Origin::Created,
+                State::Confirmed,
+            )
+            .confirmed(Locator::new("run-1"))
+        },
+        record(
+            "app/pending",
+            "job",
+            "app-pending",
+            Origin::Created,
+            State::Intent,
+        ),
+        record("app/old", "job", "app-old", Origin::Created, State::Reaping)
+            .confirmed(Locator::new("old-1"))
+            .in_state(State::Reaping),
+        Record {
+            outputs: outputs(&[("EMPTY", ""), ("NOTE", "two words")]),
+            ..record(
+                "shared/found",
+                "volume",
+                "shared-found",
+                Origin::Adopted,
+                State::Confirmed,
+            )
+            .confirmed(Locator::new("found-1"))
+        },
+    ]
+}
+
+/// What the second golden holds when this crate writes it: the records of [`sample_records`],
+/// no lease, under the fixed clock.
+fn written_records(tag: &str) -> Vec<u8> {
+    let scratch = Scratch::new(&format!("golden-records-{tag}"));
+    let ledger = FileLedger::open_with_clock(scratch.file(), Arc::new(ManualClock::at(GRANTED)))
+        .expect("open");
+    for record in sample_records() {
+        let token = ledger.read().expect("read").token;
+        ledger.write(&token, Change::Put(record)).expect("write");
+    }
+    drop(ledger);
+    std::fs::read(scratch.file()).expect("the ledger file")
+}
+
+#[test]
+fn the_records_golden_is_the_file_this_crate_writes() {
+    let on_disk = std::fs::read(dir().join("records.ucdk")).expect("records.ucdk");
+    assert_eq!(
+        on_disk,
+        written_records("check"),
+        "records.ucdk differs from what is written now"
+    );
+}
+
+#[test]
+fn the_records_golden_reads_back_to_the_same_records() {
+    let scratch = Scratch::new("golden-records-read");
+    std::fs::copy(dir().join("records.ucdk"), scratch.file()).expect("copy");
+    let ledger = FileLedger::open(scratch.file()).expect("open");
+    let read = ledger.read().expect("read");
+    let wanted: BTreeMap<RecordPath, Record> = sample_records()
+        .into_iter()
+        .map(|r| (r.path.clone(), r))
+        .collect();
+    assert_eq!(read.records, wanted);
+    let states: BTreeSet<_> = read
+        .records
+        .values()
+        .map(|r| format!("{:?}", r.state))
+        .collect();
+    let origins: BTreeSet<_> = read
+        .records
+        .values()
+        .map(|r| format!("{:?}", r.origin))
+        .collect();
+    assert_eq!(states.len(), 3, "every state is in the golden");
+    assert_eq!(origins.len(), 2, "every origin is in the golden");
 }

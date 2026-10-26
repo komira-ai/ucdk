@@ -3,27 +3,13 @@
 /** The messages and enums of the proto package `ucdk.api.v1`. */
 
 import * as wire from "./wire.ts";
-import * as ucdk_resource_v1 from "./ucdk_resource_v1.ts";
-
-/** What a plan is for. */
-export const Mode = {
-  UNSPECIFIED: 0,
-  /** Make the world match the list. */
-  APPLY: 1,
-  /** Remove everything the list names. */
-  DESTROY: 2,
-} as const;
-export type Mode = (typeof Mode)[keyof typeof Mode];
 
 /**
- * How a run ended, as the one table every host reports. The numbers are the command line's exit
+ * How a call ended, as the one table every host reports. The numbers are the command line's exit
  * codes. 0 is success; usage (2) is a request the host could not understand.
  */
 export const ExitClass = {
-  /**
-   * Done, or planned; including "no changes" and a run that left an object converging or failed
-   * (the report says so).
-   */
+  /** Done, including "no changes". */
   DONE: 0,
   /** The request was malformed: a bad flag, or bytes that are not the expected message. */
   USAGE: 2,
@@ -31,240 +17,111 @@ export const ExitClass = {
   REFUSED: 3,
   /** Failed, and nothing was changed: safe to run again. */
   FAILED_NO_EFFECT: 4,
-  /** Failed after changing something: plan again before running again. */
+  /** Failed after changing something: look again before running again. */
   FAILED_CHANGED: 6,
-  /**
-   * A leak sweep found objects that carry our stamp and have no ledger record. Only the leaks
-   * verb ends this way; an apply that finds leaks reports them and is done.
-   */
+  /** A sweep found objects that the ledger does not account for. */
   LEAKS: 8,
 } as const;
 export type ExitClass = (typeof ExitClass)[keyof typeof ExitClass];
 
-/** Where the provider finds its credentials. The credentials themselves never appear. */
-export const CredentialSource = {
-  UNSPECIFIED: 0,
-  /** The named profile (`SessionConfig.profile`). */
-  PROFILE: 1,
-  /** The platform's default chain. */
-  DEFAULT_CHAIN: 2,
-  /** An identity the provider resolves itself. */
-  PROVIDER_RESOLVED: 3,
-} as const;
-export type CredentialSource = (typeof CredentialSource)[keyof typeof CredentialSource];
-
-export const StepAction = {
-  UNSPECIFIED: 0,
-  CREATE: 1,
-  UPDATE: 2,
-  NOOP: 3,
-  DELETE: 4,
-  REAP: 5,
-  CONVERGING: 6,
-  KNOWN_AFTER_APPLY: 7,
-  RETAIN: 8,
-} as const;
-export type StepAction = (typeof StepAction)[keyof typeof StepAction];
-
-/** Why an object is left alone on purpose. */
-export const RetainReason = {
-  UNSPECIFIED: 0,
-  /** Its kind holds data. */
-  KEEP: 1,
-  /** The provider says it cannot be deleted; `detail` is the provider's reason. */
-  UNDELETABLE: 2,
-  /** The list no longer names the owner. */
-  OWNER_NOT_NAMED: 3,
-} as const;
-export type RetainReason = (typeof RetainReason)[keyof typeof RetainReason];
-
-export const ConflictKind = {
-  UNSPECIFIED: 0,
-  FOREIGN: 1,
-  STAMP_WITHOUT_RECORD: 2,
-  PHYSICAL_ID_MISMATCH: 3,
-  STAMP_STRIPPED: 4,
-  OTHER_OWNER: 5,
-  OTHER_TOOL: 6,
-  VANISHED_RETAINED: 7,
-  RECORDED_CYCLE: 8,
-} as const;
-export type ConflictKind = (typeof ConflictKind)[keyof typeof ConflictKind];
-
-export const FindingKind = {
-  UNSPECIFIED: 0,
-  BAD_ID: 1,
-  DUPLICATE_ID: 2,
-  MISSING_BODY: 3,
-  MISSING_IMAGE: 4,
-  UNRESOLVED: 5,
-  UNSUPPORTED_PLATFORM: 6,
-  EMPTY_VALUE: 7,
-  ENV_SECRET_OVERLAP: 8,
-  UNBOUND_REF: 9,
-  NO_TARGET: 10,
-  UNSUPPORTED_ACCESS: 11,
-  ACCESS_TO_OUTPUT: 12,
-  MISSING_OUTPUT: 13,
-  NAMED_OUTPUT: 14,
-  UNEXPOSED_OUTPUT: 15,
-  NOT_PORTABLE: 16,
-  CYCLE: 17,
-} as const;
-export type FindingKind = (typeof FindingKind)[keyof typeof FindingKind];
-
 /** Where a ledger record stands. */
 export const RecordState = {
   UNSPECIFIED: 0,
-  /** Written before a create or update; the call may or may not have landed. */
+  /** Written before an effect; the effect may or may not have landed. */
   INTENT: 1,
   CONFIRMED: 2,
-  /** Written before a delete; the object may or may not be gone. */
+  /** Written before the thing is removed; it may or may not be gone. */
   REAPING: 3,
 } as const;
 export type RecordState = (typeof RecordState)[keyof typeof RecordState];
 
-/** Whether a live object is working. */
-export const LiveStatus = {
-  UNSPECIFIED: 0,
-  READY: 1,
-  CONVERGING: 2,
-  FAILED: 3,
-} as const;
-export type LiveStatus = (typeof LiveStatus)[keyof typeof LiveStatus];
-
-/** How an object's record and the live object stand against each other. */
-export const Standing = {
-  UNSPECIFIED: 0,
-  /** A confirmed record, and the live object it names carries our stamp. */
-  AGREES: 1,
-  /** An intent or reap record and a live object of ours: a later run settles it. */
-  PENDING: 2,
-  /** A record and no live object. */
-  MISSING: 3,
-  /** The list names it; there is no record and no live object. */
-  NOT_APPLIED: 4,
-  /** A live object that is not ours, or ours with no record. */
-  UNCLAIMED: 5,
-} as const;
-export type Standing = (typeof Standing)[keyof typeof Standing];
-
 export const ErrorCode = {
   UNSPECIFIED: 0,
-  PROVIDER: 1,
+  /** The ledger could not be opened or read. */
   LEDGER: 2,
+  /** The ledger is in use by a writer that holds its lock. */
   LEDGER_BUSY: 3,
-  NOT_OURS: 4,
-  STILL_PRESENT: 5,
-  UNWITNESSED: 6,
-  OUTPUT_UNKNOWN: 7,
-  /** The request was not the expected message, or named a hash that is not one. */
+  /** The request was not the expected message. */
   INVALID_REQUEST: 8,
-  /**
-   * The run's ledger lease lapsed or was taken over, so the ledger refused its write and the
-   * run stopped. The next run resolves what this one left.
-   */
-  LEASE_LOST: 9,
 } as const;
 export type ErrorCode = (typeof ErrorCode)[keyof typeof ErrorCode];
 
+/** Where a recorded lease stands by the session's clock. */
+export const LeaseState = {
+  UNSPECIFIED: 0,
+  /** Before it expires: its holder writes, and no other holder is granted it. */
+  LIVE: 1,
+  /**
+   * Expired, but inside the skew bound: its holder may no longer write, and others are still
+   * refused.
+   */
+  LAPSING: 2,
+  /** Past that: another holder is granted it. */
+  LAPSED: 3,
+} as const;
+export type LeaseState = (typeof LeaseState)[keyof typeof LeaseState];
+
+export const RecordOrigin = {
+  UNSPECIFIED: 0,
+  /** This tool made what the record stands for. */
+  CREATED: 1,
+  /** This tool took it over when it found it. */
+  ADOPTED: 2,
+} as const;
+export type RecordOrigin = (typeof RecordOrigin)[keyof typeof RecordOrigin];
+
 export interface SessionConfigInit {
-  /** The provider's name, such as `fake`. */
-  provider?: string;
-  providerOptions?: wire.MapInit<string>;
   /** The kind of ledger and where it is. */
   ledgerKind?: string;
   ledgerLocation?: string;
-  /** The cell identity every stamp of the session carries. */
-  cell?: string;
-  credentials?: CredentialSource;
-  /** The profile, when `credentials` is PROFILE. */
-  profile?: string;
   /**
-   * The name the session's runs take the ledger lease as. A run is refused while another holder
-   * has the lease; the holder a lease names takes it again at once, so naming it lets a rerun
-   * reclaim a lease an earlier run left behind. Empty: a new name for every run.
+   * The name a lease is taken as, and the name a lease is reported as `yours` for. A lease
+   * names its holder, and the holder it names takes it again at once. Empty: no lease is yours.
    */
   holder?: string;
   /**
-   * For tests: when not zero, the ledger times its leases by a clock fixed at this many
-   * milliseconds since the Unix epoch, instead of the wall clock, so a test says when a lease
-   * lapses without waiting or reading the time. Zero: the wall clock. Only a library built with
-   * the `test-clock` feature honours it; every other build refuses a non-zero value as an
-   * invalid argument, because a caller able to fix the clock would defeat the lease.
+   * For tests: when not zero, the ledger is timed by a clock fixed at this many milliseconds
+   * since the Unix epoch, instead of the wall clock, so a test says when a lease lapses without
+   * waiting or reading the time. Zero: the wall clock. Only a library built with the
+   * `test-clock` feature honours it; every other build refuses a non-zero value as an invalid
+   * argument, because a caller able to fix the clock would defeat the lease.
    */
   testClockMs?: bigint;
 }
 
 /** What a session is opened with. */
 export class SessionConfig extends wire.Message {
-  /** The provider's name, such as `fake`. */
-  provider: string;
-  providerOptions: Map<string, string>;
   /** The kind of ledger and where it is. */
   ledgerKind: string;
   ledgerLocation: string;
-  /** The cell identity every stamp of the session carries. */
-  cell: string;
-  credentials: CredentialSource;
-  /** The profile, when `credentials` is PROFILE. */
-  profile: string;
   /**
-   * The name the session's runs take the ledger lease as. A run is refused while another holder
-   * has the lease; the holder a lease names takes it again at once, so naming it lets a rerun
-   * reclaim a lease an earlier run left behind. Empty: a new name for every run.
+   * The name a lease is taken as, and the name a lease is reported as `yours` for. A lease
+   * names its holder, and the holder it names takes it again at once. Empty: no lease is yours.
    */
   holder: string;
   /**
-   * For tests: when not zero, the ledger times its leases by a clock fixed at this many
-   * milliseconds since the Unix epoch, instead of the wall clock, so a test says when a lease
-   * lapses without waiting or reading the time. Zero: the wall clock. Only a library built with
-   * the `test-clock` feature honours it; every other build refuses a non-zero value as an
-   * invalid argument, because a caller able to fix the clock would defeat the lease.
+   * For tests: when not zero, the ledger is timed by a clock fixed at this many milliseconds
+   * since the Unix epoch, instead of the wall clock, so a test says when a lease lapses without
+   * waiting or reading the time. Zero: the wall clock. Only a library built with the
+   * `test-clock` feature honours it; every other build refuses a non-zero value as an invalid
+   * argument, because a caller able to fix the clock would defeat the lease.
    */
   testClockMs: bigint;
 
   constructor(init: SessionConfigInit = {}) {
     super();
-    this.provider = init.provider ?? "";
-    this.providerOptions = wire.toMap(init.providerOptions);
     this.ledgerKind = init.ledgerKind ?? "";
     this.ledgerLocation = init.ledgerLocation ?? "";
-    this.cell = init.cell ?? "";
-    this.credentials = init.credentials ?? CredentialSource.UNSPECIFIED;
-    this.profile = init.profile ?? "";
     this.holder = init.holder ?? "";
     this.testClockMs = init.testClockMs ?? 0n;
   }
 
   protected encodeInto(out: wire.Out): void {
-    if (this.provider !== "") {
-      wire.putString(out, 1, this.provider);
-    }
-    for (const [key, item] of wire.sortedEntries(this.providerOptions)) {
-      const entry = new wire.Out();
-      if (key !== "") {
-        wire.putString(entry, 1, key);
-      }
-      if (item !== "") {
-        wire.putString(entry, 2, item);
-      }
-      wire.putBytes(out, 2, entry.bytes());
-    }
     if (this.ledgerKind !== "") {
       wire.putString(out, 3, this.ledgerKind);
     }
     if (this.ledgerLocation !== "") {
       wire.putString(out, 4, this.ledgerLocation);
-    }
-    if (this.cell !== "") {
-      wire.putString(out, 5, this.cell);
-    }
-    if (this.credentials !== 0) {
-      wire.putVarintField(out, 6, this.credentials);
-    }
-    if (this.profile !== "") {
-      wire.putString(out, 7, this.profile);
     }
     if (this.holder !== "") {
       wire.putString(out, 8, this.holder);
@@ -278,41 +135,12 @@ export class SessionConfig extends wire.Message {
   mergeFrom(data: Uint8Array): void {
     for (const { number, value } of wire.readFields(data)) {
       switch (number) {
-        case 1: {
-          this.provider = wire.str(value);
-          break;
-        }
-        case 2: {
-          let key = "";
-          let item: string = "";
-          for (const part of wire.readFields(wire.bytesOf(value))) {
-            if (part.number === 1) {
-              key = wire.str(part.value);
-            } else if (part.number === 2) {
-              item = wire.str(part.value);
-            }
-          }
-          this.providerOptions.set(key, item);
-          break;
-        }
         case 3: {
           this.ledgerKind = wire.str(value);
           break;
         }
         case 4: {
           this.ledgerLocation = wire.str(value);
-          break;
-        }
-        case 5: {
-          this.cell = wire.str(value);
-          break;
-        }
-        case 6: {
-          this.credentials = wire.enumValue<CredentialSource>(value);
-          break;
-        }
-        case 7: {
-          this.profile = wire.str(value);
           break;
         }
         case 8: {
@@ -337,1964 +165,12 @@ export class SessionConfig extends wire.Message {
   }
 }
 
-export interface PlanRequestInit {
-  resources?: ucdk_resource_v1.ResourceList;
-  mode?: Mode;
-}
-
-/** Observe and plan; changes nothing. */
-export class PlanRequest extends wire.Message {
-  resources: ucdk_resource_v1.ResourceList | undefined;
-  mode: Mode;
-
-  constructor(init: PlanRequestInit = {}) {
-    super();
-    this.resources = init.resources;
-    this.mode = init.mode ?? Mode.UNSPECIFIED;
-  }
-
-  protected encodeInto(out: wire.Out): void {
-    if (this.resources !== undefined) {
-      wire.putMessage(out, 1, this.resources);
-    }
-    if (this.mode !== 0) {
-      wire.putVarintField(out, 2, this.mode);
-    }
-  }
-
-  /** Reads the fields of `data` into this message; unknown fields are dropped. */
-  mergeFrom(data: Uint8Array): void {
-    for (const { number, value } of wire.readFields(data)) {
-      switch (number) {
-        case 1: {
-          const current = this.resources;
-          const message = current ?? new ucdk_resource_v1.ResourceList();
-          message.mergeFrom(wire.bytesOf(value));
-          this.resources = message;
-          break;
-        }
-        case 2: {
-          this.mode = wire.enumValue<Mode>(value);
-          break;
-        }
-        default:
-          break;
-      }
-    }
-  }
-
-  /** The message the bytes hold; unknown fields are dropped. */
-  static decode(data: Uint8Array): PlanRequest {
-    const message = new PlanRequest();
-    message.mergeFrom(data);
-    return message;
-  }
-}
-
-export interface ApplyRequestInit {
-  resources?: ucdk_resource_v1.ResourceList;
-  /** 64 lower-case hex digits. */
-  planHash?: string;
-  /** A failed run deletes what it created. */
-  rollback?: boolean;
-}
-
-/**
- * Carry out the plan the approver pinned. The core plans the world as it is now and refuses the
- * run unless that plan has `plan_hash`.
- */
-export class ApplyRequest extends wire.Message {
-  resources: ucdk_resource_v1.ResourceList | undefined;
-  /** 64 lower-case hex digits. */
-  planHash: string;
-  /** A failed run deletes what it created. */
-  rollback: boolean;
-
-  constructor(init: ApplyRequestInit = {}) {
-    super();
-    this.resources = init.resources;
-    this.planHash = init.planHash ?? "";
-    this.rollback = init.rollback ?? false;
-  }
-
-  protected encodeInto(out: wire.Out): void {
-    if (this.resources !== undefined) {
-      wire.putMessage(out, 1, this.resources);
-    }
-    if (this.planHash !== "") {
-      wire.putString(out, 2, this.planHash);
-    }
-    if (this.rollback) {
-      wire.putBool(out, 3, this.rollback);
-    }
-  }
-
-  /** Reads the fields of `data` into this message; unknown fields are dropped. */
-  mergeFrom(data: Uint8Array): void {
-    for (const { number, value } of wire.readFields(data)) {
-      switch (number) {
-        case 1: {
-          const current = this.resources;
-          const message = current ?? new ucdk_resource_v1.ResourceList();
-          message.mergeFrom(wire.bytesOf(value));
-          this.resources = message;
-          break;
-        }
-        case 2: {
-          this.planHash = wire.str(value);
-          break;
-        }
-        case 3: {
-          this.rollback = wire.bool(value);
-          break;
-        }
-        default:
-          break;
-      }
-    }
-  }
-
-  /** The message the bytes hold; unknown fields are dropped. */
-  static decode(data: Uint8Array): ApplyRequest {
-    const message = new ApplyRequest();
-    message.mergeFrom(data);
-    return message;
-  }
-}
-
-export interface DestroyRequestInit {
-  resources?: ucdk_resource_v1.ResourceList;
-  planHash?: string;
-}
-
-/** Carry out the approved destroy plan, under the same hash rule. */
-export class DestroyRequest extends wire.Message {
-  resources: ucdk_resource_v1.ResourceList | undefined;
-  planHash: string;
-
-  constructor(init: DestroyRequestInit = {}) {
-    super();
-    this.resources = init.resources;
-    this.planHash = init.planHash ?? "";
-  }
-
-  protected encodeInto(out: wire.Out): void {
-    if (this.resources !== undefined) {
-      wire.putMessage(out, 1, this.resources);
-    }
-    if (this.planHash !== "") {
-      wire.putString(out, 2, this.planHash);
-    }
-  }
-
-  /** Reads the fields of `data` into this message; unknown fields are dropped. */
-  mergeFrom(data: Uint8Array): void {
-    for (const { number, value } of wire.readFields(data)) {
-      switch (number) {
-        case 1: {
-          const current = this.resources;
-          const message = current ?? new ucdk_resource_v1.ResourceList();
-          message.mergeFrom(wire.bytesOf(value));
-          this.resources = message;
-          break;
-        }
-        case 2: {
-          this.planHash = wire.str(value);
-          break;
-        }
-        default:
-          break;
-      }
-    }
-  }
-
-  /** The message the bytes hold; unknown fields are dropped. */
-  static decode(data: Uint8Array): DestroyRequest {
-    const message = new DestroyRequest();
-    message.mergeFrom(data);
-    return message;
-  }
-}
-
-export interface StatusRequestInit {
-  resources?: ucdk_resource_v1.ResourceList;
-}
-
-/**
- * Read the ledger and the live objects, and change nothing. The list names the objects to look
- * at besides those the ledger records.
- */
-export class StatusRequest extends wire.Message {
-  resources: ucdk_resource_v1.ResourceList | undefined;
-
-  constructor(init: StatusRequestInit = {}) {
-    super();
-    this.resources = init.resources;
-  }
-
-  protected encodeInto(out: wire.Out): void {
-    if (this.resources !== undefined) {
-      wire.putMessage(out, 1, this.resources);
-    }
-  }
-
-  /** Reads the fields of `data` into this message; unknown fields are dropped. */
-  mergeFrom(data: Uint8Array): void {
-    for (const { number, value } of wire.readFields(data)) {
-      switch (number) {
-        case 1: {
-          const current = this.resources;
-          const message = current ?? new ucdk_resource_v1.ResourceList();
-          message.mergeFrom(wire.bytesOf(value));
-          this.resources = message;
-          break;
-        }
-        default:
-          break;
-      }
-    }
-  }
-
-  /** The message the bytes hold; unknown fields are dropped. */
-  static decode(data: Uint8Array): StatusRequest {
-    const message = new StatusRequest();
-    message.mergeFrom(data);
-    return message;
-  }
-}
-
-export interface LeaksRequestInit {
-}
-
-/**
- * Compare the cell's stamped objects with the ledger, and change nothing. It needs no resource
- * list: it is about the cell, not about a file.
- */
-export class LeaksRequest extends wire.Message {
-
-  constructor(_init: LeaksRequestInit = {}) {
-    super();
-  }
-
-  protected encodeInto(out: wire.Out): void {
-    void out;
-  }
-
-  /** Reads the fields of `data` into this message; unknown fields are dropped. */
-  mergeFrom(data: Uint8Array): void {
-    wire.validate(data);
-  }
-
-  /** The message the bytes hold; unknown fields are dropped. */
-  static decode(data: Uint8Array): LeaksRequest {
-    const message = new LeaksRequest();
-    message.mergeFrom(data);
-    return message;
-  }
-}
-
-export interface RetainedInit {
-  reason?: RetainReason;
-  detail?: string;
-}
-
-export class Retained extends wire.Message {
-  reason: RetainReason;
-  detail: string;
-
-  constructor(init: RetainedInit = {}) {
-    super();
-    this.reason = init.reason ?? RetainReason.UNSPECIFIED;
-    this.detail = init.detail ?? "";
-  }
-
-  protected encodeInto(out: wire.Out): void {
-    if (this.reason !== 0) {
-      wire.putVarintField(out, 1, this.reason);
-    }
-    if (this.detail !== "") {
-      wire.putString(out, 2, this.detail);
-    }
-  }
-
-  /** Reads the fields of `data` into this message; unknown fields are dropped. */
-  mergeFrom(data: Uint8Array): void {
-    for (const { number, value } of wire.readFields(data)) {
-      switch (number) {
-        case 1: {
-          this.reason = wire.enumValue<RetainReason>(value);
-          break;
-        }
-        case 2: {
-          this.detail = wire.str(value);
-          break;
-        }
-        default:
-          break;
-      }
-    }
-  }
-
-  /** The message the bytes hold; unknown fields are dropped. */
-  static decode(data: Uint8Array): Retained {
-    const message = new Retained();
-    message.mergeFrom(data);
-    return message;
-  }
-}
-
-export interface StepInit {
-  path?: string;
-  kind?: string;
-  action?: StepAction;
-  /** The physical id, for a delete. */
-  physicalId?: string;
-  /** Set for a retain. */
-  retained?: Retained;
-}
-
-export class Step extends wire.Message {
-  path: string;
-  kind: string;
-  action: StepAction;
-  /** The physical id, for a delete. */
-  physicalId: string;
-  /** Set for a retain. */
-  retained: Retained | undefined;
-
-  constructor(init: StepInit = {}) {
-    super();
-    this.path = init.path ?? "";
-    this.kind = init.kind ?? "";
-    this.action = init.action ?? StepAction.UNSPECIFIED;
-    this.physicalId = init.physicalId ?? "";
-    this.retained = init.retained;
-  }
-
-  protected encodeInto(out: wire.Out): void {
-    if (this.path !== "") {
-      wire.putString(out, 1, this.path);
-    }
-    if (this.kind !== "") {
-      wire.putString(out, 2, this.kind);
-    }
-    if (this.action !== 0) {
-      wire.putVarintField(out, 3, this.action);
-    }
-    if (this.physicalId !== "") {
-      wire.putString(out, 4, this.physicalId);
-    }
-    if (this.retained !== undefined) {
-      wire.putMessage(out, 5, this.retained);
-    }
-  }
-
-  /** Reads the fields of `data` into this message; unknown fields are dropped. */
-  mergeFrom(data: Uint8Array): void {
-    for (const { number, value } of wire.readFields(data)) {
-      switch (number) {
-        case 1: {
-          this.path = wire.str(value);
-          break;
-        }
-        case 2: {
-          this.kind = wire.str(value);
-          break;
-        }
-        case 3: {
-          this.action = wire.enumValue<StepAction>(value);
-          break;
-        }
-        case 4: {
-          this.physicalId = wire.str(value);
-          break;
-        }
-        case 5: {
-          const current = this.retained;
-          const message = current ?? new Retained();
-          message.mergeFrom(wire.bytesOf(value));
-          this.retained = message;
-          break;
-        }
-        default:
-          break;
-      }
-    }
-  }
-
-  /** The message the bytes hold; unknown fields are dropped. */
-  static decode(data: Uint8Array): Step {
-    const message = new Step();
-    message.mergeFrom(data);
-    return message;
-  }
-}
-
-export interface PlanInit {
-  steps?: Iterable<Step>;
-  hash?: string;
-}
-
-/** The steps of a run, in the order they run, and the hash an approver pins. */
-export class Plan extends wire.Message {
-  steps: Step[];
-  hash: string;
-
-  constructor(init: PlanInit = {}) {
-    super();
-    this.steps = Array.from(init.steps ?? []);
-    this.hash = init.hash ?? "";
-  }
-
-  protected encodeInto(out: wire.Out): void {
-    for (const item of this.steps) {
-      wire.putMessage(out, 1, item);
-    }
-    if (this.hash !== "") {
-      wire.putString(out, 2, this.hash);
-    }
-  }
-
-  /** Reads the fields of `data` into this message; unknown fields are dropped. */
-  mergeFrom(data: Uint8Array): void {
-    for (const { number, value } of wire.readFields(data)) {
-      switch (number) {
-        case 1: {
-          this.steps.push(Step.decode(wire.bytesOf(value)));
-          break;
-        }
-        case 2: {
-          this.hash = wire.str(value);
-          break;
-        }
-        default:
-          break;
-      }
-    }
-  }
-
-  /** The message the bytes hold; unknown fields are dropped. */
-  static decode(data: Uint8Array): Plan {
-    const message = new Plan();
-    message.mergeFrom(data);
-    return message;
-  }
-}
-
-export interface ConflictInit {
-  path?: string;
-  kind?: ConflictKind;
-  /** The other tool's marker, for OTHER_TOOL. */
-  marker?: string;
-  message?: string;
-}
-
-export class Conflict extends wire.Message {
-  path: string;
-  kind: ConflictKind;
-  /** The other tool's marker, for OTHER_TOOL. */
-  marker: string;
-  message: string;
-
-  constructor(init: ConflictInit = {}) {
-    super();
-    this.path = init.path ?? "";
-    this.kind = init.kind ?? ConflictKind.UNSPECIFIED;
-    this.marker = init.marker ?? "";
-    this.message = init.message ?? "";
-  }
-
-  protected encodeInto(out: wire.Out): void {
-    if (this.path !== "") {
-      wire.putString(out, 1, this.path);
-    }
-    if (this.kind !== 0) {
-      wire.putVarintField(out, 2, this.kind);
-    }
-    if (this.marker !== "") {
-      wire.putString(out, 3, this.marker);
-    }
-    if (this.message !== "") {
-      wire.putString(out, 4, this.message);
-    }
-  }
-
-  /** Reads the fields of `data` into this message; unknown fields are dropped. */
-  mergeFrom(data: Uint8Array): void {
-    for (const { number, value } of wire.readFields(data)) {
-      switch (number) {
-        case 1: {
-          this.path = wire.str(value);
-          break;
-        }
-        case 2: {
-          this.kind = wire.enumValue<ConflictKind>(value);
-          break;
-        }
-        case 3: {
-          this.marker = wire.str(value);
-          break;
-        }
-        case 4: {
-          this.message = wire.str(value);
-          break;
-        }
-        default:
-          break;
-      }
-    }
-  }
-
-  /** The message the bytes hold; unknown fields are dropped. */
-  static decode(data: Uint8Array): Conflict {
-    const message = new Conflict();
-    message.mergeFrom(data);
-    return message;
-  }
-}
-
-export interface FindingInit {
-  resource?: string;
-  /** The field, such as `service.env.DB_URL`; empty when the whole resource is meant. */
-  field?: string;
-  kind?: FindingKind;
-  message?: string;
-}
-
-/** One problem in a resource list. */
-export class Finding extends wire.Message {
-  resource: string;
-  /** The field, such as `service.env.DB_URL`; empty when the whole resource is meant. */
-  field: string;
-  kind: FindingKind;
-  message: string;
-
-  constructor(init: FindingInit = {}) {
-    super();
-    this.resource = init.resource ?? "";
-    this.field = init.field ?? "";
-    this.kind = init.kind ?? FindingKind.UNSPECIFIED;
-    this.message = init.message ?? "";
-  }
-
-  protected encodeInto(out: wire.Out): void {
-    if (this.resource !== "") {
-      wire.putString(out, 1, this.resource);
-    }
-    if (this.field !== "") {
-      wire.putString(out, 2, this.field);
-    }
-    if (this.kind !== 0) {
-      wire.putVarintField(out, 3, this.kind);
-    }
-    if (this.message !== "") {
-      wire.putString(out, 4, this.message);
-    }
-  }
-
-  /** Reads the fields of `data` into this message; unknown fields are dropped. */
-  mergeFrom(data: Uint8Array): void {
-    for (const { number, value } of wire.readFields(data)) {
-      switch (number) {
-        case 1: {
-          this.resource = wire.str(value);
-          break;
-        }
-        case 2: {
-          this.field = wire.str(value);
-          break;
-        }
-        case 3: {
-          this.kind = wire.enumValue<FindingKind>(value);
-          break;
-        }
-        case 4: {
-          this.message = wire.str(value);
-          break;
-        }
-        default:
-          break;
-      }
-    }
-  }
-
-  /** The message the bytes hold; unknown fields are dropped. */
-  static decode(data: Uint8Array): Finding {
-    const message = new Finding();
-    message.mergeFrom(data);
-    return message;
-  }
-}
-
-export interface FindingsInit {
-  findings?: Iterable<Finding>;
-}
-
-export class Findings extends wire.Message {
-  findings: Finding[];
-
-  constructor(init: FindingsInit = {}) {
-    super();
-    this.findings = Array.from(init.findings ?? []);
-  }
-
-  protected encodeInto(out: wire.Out): void {
-    for (const item of this.findings) {
-      wire.putMessage(out, 1, item);
-    }
-  }
-
-  /** Reads the fields of `data` into this message; unknown fields are dropped. */
-  mergeFrom(data: Uint8Array): void {
-    for (const { number, value } of wire.readFields(data)) {
-      switch (number) {
-        case 1: {
-          this.findings.push(Finding.decode(wire.bytesOf(value)));
-          break;
-        }
-        default:
-          break;
-      }
-    }
-  }
-
-  /** The message the bytes hold; unknown fields are dropped. */
-  static decode(data: Uint8Array): Findings {
-    const message = new Findings();
-    message.mergeFrom(data);
-    return message;
-  }
-}
-
-export interface CatalogNodeInit {
-  /** `<resource id>/<role>`. */
-  path?: string;
-  kind?: string;
-  /** False for a role the list turns off: the node stays so that its leftovers are found. */
-  wanted?: boolean;
-  /** The paths of the nodes that must exist first. */
-  deps?: Iterable<string>;
-}
-
-/** One node a resource list lowers to. */
-export class CatalogNode extends wire.Message {
-  /** `<resource id>/<role>`. */
-  path: string;
-  kind: string;
-  /** False for a role the list turns off: the node stays so that its leftovers are found. */
-  wanted: boolean;
-  /** The paths of the nodes that must exist first. */
-  deps: string[];
-
-  constructor(init: CatalogNodeInit = {}) {
-    super();
-    this.path = init.path ?? "";
-    this.kind = init.kind ?? "";
-    this.wanted = init.wanted ?? false;
-    this.deps = Array.from(init.deps ?? []);
-  }
-
-  protected encodeInto(out: wire.Out): void {
-    if (this.path !== "") {
-      wire.putString(out, 1, this.path);
-    }
-    if (this.kind !== "") {
-      wire.putString(out, 2, this.kind);
-    }
-    if (this.wanted) {
-      wire.putBool(out, 3, this.wanted);
-    }
-    for (const item of this.deps) {
-      wire.putString(out, 4, item);
-    }
-  }
-
-  /** Reads the fields of `data` into this message; unknown fields are dropped. */
-  mergeFrom(data: Uint8Array): void {
-    for (const { number, value } of wire.readFields(data)) {
-      switch (number) {
-        case 1: {
-          this.path = wire.str(value);
-          break;
-        }
-        case 2: {
-          this.kind = wire.str(value);
-          break;
-        }
-        case 3: {
-          this.wanted = wire.bool(value);
-          break;
-        }
-        case 4: {
-          this.deps.push(wire.str(value));
-          break;
-        }
-        default:
-          break;
-      }
-    }
-  }
-
-  /** The message the bytes hold; unknown fields are dropped. */
-  static decode(data: Uint8Array): CatalogNode {
-    const message = new CatalogNode();
-    message.mergeFrom(data);
-    return message;
-  }
-}
-
-export interface CatalogResponseInit {
-  /** Empty when the list is refused. */
-  nodes?: Iterable<CatalogNode>;
-  /** Empty when the list lowers. */
-  findings?: Iterable<Finding>;
-  /** DONE, or REFUSED when there are findings. */
-  exit?: ExitClass;
-}
-
-/**
- * What loading a resource list found: the nodes in dependency order, or the findings that
- * refuse the list. Reads nothing and changes nothing.
- */
-export class CatalogResponse extends wire.Message {
-  /** Empty when the list is refused. */
-  nodes: CatalogNode[];
-  /** Empty when the list lowers. */
-  findings: Finding[];
-  /** DONE, or REFUSED when there are findings. */
-  exit: ExitClass;
-
-  constructor(init: CatalogResponseInit = {}) {
-    super();
-    this.nodes = Array.from(init.nodes ?? []);
-    this.findings = Array.from(init.findings ?? []);
-    this.exit = init.exit ?? ExitClass.DONE;
-  }
-
-  protected encodeInto(out: wire.Out): void {
-    for (const item of this.nodes) {
-      wire.putMessage(out, 1, item);
-    }
-    for (const item of this.findings) {
-      wire.putMessage(out, 2, item);
-    }
-    if (this.exit !== 0) {
-      wire.putVarintField(out, 3, this.exit);
-    }
-  }
-
-  /** Reads the fields of `data` into this message; unknown fields are dropped. */
-  mergeFrom(data: Uint8Array): void {
-    for (const { number, value } of wire.readFields(data)) {
-      switch (number) {
-        case 1: {
-          this.nodes.push(CatalogNode.decode(wire.bytesOf(value)));
-          break;
-        }
-        case 2: {
-          this.findings.push(Finding.decode(wire.bytesOf(value)));
-          break;
-        }
-        case 3: {
-          this.exit = wire.enumValue<ExitClass>(value);
-          break;
-        }
-        default:
-          break;
-      }
-    }
-  }
-
-  /** The message the bytes hold; unknown fields are dropped. */
-  static decode(data: Uint8Array): CatalogResponse {
-    const message = new CatalogResponse();
-    message.mergeFrom(data);
-    return message;
-  }
-}
-
-export interface ConflictsInit {
-  conflicts?: Iterable<Conflict>;
-}
-
-export class Conflicts extends wire.Message {
-  conflicts: Conflict[];
-
-  constructor(init: ConflictsInit = {}) {
-    super();
-    this.conflicts = Array.from(init.conflicts ?? []);
-  }
-
-  protected encodeInto(out: wire.Out): void {
-    for (const item of this.conflicts) {
-      wire.putMessage(out, 1, item);
-    }
-  }
-
-  /** Reads the fields of `data` into this message; unknown fields are dropped. */
-  mergeFrom(data: Uint8Array): void {
-    for (const { number, value } of wire.readFields(data)) {
-      switch (number) {
-        case 1: {
-          this.conflicts.push(Conflict.decode(wire.bytesOf(value)));
-          break;
-        }
-        default:
-          break;
-      }
-    }
-  }
-
-  /** The message the bytes hold; unknown fields are dropped. */
-  static decode(data: Uint8Array): Conflicts {
-    const message = new Conflicts();
-    message.mergeFrom(data);
-    return message;
-  }
-}
-
-export interface EmptyScopeInit {
-}
-
-export class EmptyScope extends wire.Message {
-
-  constructor(_init: EmptyScopeInit = {}) {
-    super();
-  }
-
-  protected encodeInto(out: wire.Out): void {
-    void out;
-  }
-
-  /** Reads the fields of `data` into this message; unknown fields are dropped. */
-  mergeFrom(data: Uint8Array): void {
-    wire.validate(data);
-  }
-
-  /** The message the bytes hold; unknown fields are dropped. */
-  static decode(data: Uint8Array): EmptyScope {
-    const message = new EmptyScope();
-    message.mergeFrom(data);
-    return message;
-  }
-}
-
-export interface PlanHashMismatchInit {
-  approved?: string;
-  plan?: string;
-}
-
-export class PlanHashMismatch extends wire.Message {
-  approved: string;
-  plan: string;
-
-  constructor(init: PlanHashMismatchInit = {}) {
-    super();
-    this.approved = init.approved ?? "";
-    this.plan = init.plan ?? "";
-  }
-
-  protected encodeInto(out: wire.Out): void {
-    if (this.approved !== "") {
-      wire.putString(out, 1, this.approved);
-    }
-    if (this.plan !== "") {
-      wire.putString(out, 2, this.plan);
-    }
-  }
-
-  /** Reads the fields of `data` into this message; unknown fields are dropped. */
-  mergeFrom(data: Uint8Array): void {
-    for (const { number, value } of wire.readFields(data)) {
-      switch (number) {
-        case 1: {
-          this.approved = wire.str(value);
-          break;
-        }
-        case 2: {
-          this.plan = wire.str(value);
-          break;
-        }
-        default:
-          break;
-      }
-    }
-  }
-
-  /** The message the bytes hold; unknown fields are dropped. */
-  static decode(data: Uint8Array): PlanHashMismatch {
-    const message = new PlanHashMismatch();
-    message.mergeFrom(data);
-    return message;
-  }
-}
-
-export interface PlanChangedInit {
-  approved?: string;
-  now?: string;
-}
-
-export class PlanChanged extends wire.Message {
-  approved: string;
-  now: string;
-
-  constructor(init: PlanChangedInit = {}) {
-    super();
-    this.approved = init.approved ?? "";
-    this.now = init.now ?? "";
-  }
-
-  protected encodeInto(out: wire.Out): void {
-    if (this.approved !== "") {
-      wire.putString(out, 1, this.approved);
-    }
-    if (this.now !== "") {
-      wire.putString(out, 2, this.now);
-    }
-  }
-
-  /** Reads the fields of `data` into this message; unknown fields are dropped. */
-  mergeFrom(data: Uint8Array): void {
-    for (const { number, value } of wire.readFields(data)) {
-      switch (number) {
-        case 1: {
-          this.approved = wire.str(value);
-          break;
-        }
-        case 2: {
-          this.now = wire.str(value);
-          break;
-        }
-        default:
-          break;
-      }
-    }
-  }
-
-  /** The message the bytes hold; unknown fields are dropped. */
-  static decode(data: Uint8Array): PlanChanged {
-    const message = new PlanChanged();
-    message.mergeFrom(data);
-    return message;
-  }
-}
-
-export interface UnsupportedStampModeInit {
-  paths?: Iterable<string>;
-}
-
-export class UnsupportedStampMode extends wire.Message {
-  paths: string[];
-
-  constructor(init: UnsupportedStampModeInit = {}) {
-    super();
-    this.paths = Array.from(init.paths ?? []);
-  }
-
-  protected encodeInto(out: wire.Out): void {
-    for (const item of this.paths) {
-      wire.putString(out, 1, item);
-    }
-  }
-
-  /** Reads the fields of `data` into this message; unknown fields are dropped. */
-  mergeFrom(data: Uint8Array): void {
-    for (const { number, value } of wire.readFields(data)) {
-      switch (number) {
-        case 1: {
-          this.paths.push(wire.str(value));
-          break;
-        }
-        default:
-          break;
-      }
-    }
-  }
-
-  /** The message the bytes hold; unknown fields are dropped. */
-  static decode(data: Uint8Array): UnsupportedStampMode {
-    const message = new UnsupportedStampMode();
-    message.mergeFrom(data);
-    return message;
-  }
-}
-
-export interface UnhostedKindInit {
-  path?: string;
-  kind?: string;
-}
-
-/** A wanted object whose kind the provider does not host. */
-export class UnhostedKind extends wire.Message {
-  path: string;
-  kind: string;
-
-  constructor(init: UnhostedKindInit = {}) {
-    super();
-    this.path = init.path ?? "";
-    this.kind = init.kind ?? "";
-  }
-
-  protected encodeInto(out: wire.Out): void {
-    if (this.path !== "") {
-      wire.putString(out, 1, this.path);
-    }
-    if (this.kind !== "") {
-      wire.putString(out, 2, this.kind);
-    }
-  }
-
-  /** Reads the fields of `data` into this message; unknown fields are dropped. */
-  mergeFrom(data: Uint8Array): void {
-    for (const { number, value } of wire.readFields(data)) {
-      switch (number) {
-        case 1: {
-          this.path = wire.str(value);
-          break;
-        }
-        case 2: {
-          this.kind = wire.str(value);
-          break;
-        }
-        default:
-          break;
-      }
-    }
-  }
-
-  /** The message the bytes hold; unknown fields are dropped. */
-  static decode(data: Uint8Array): UnhostedKind {
-    const message = new UnhostedKind();
-    message.mergeFrom(data);
-    return message;
-  }
-}
-
-export interface UnhostedKindsInit {
-  kinds?: Iterable<UnhostedKind>;
-}
-
-export class UnhostedKinds extends wire.Message {
-  kinds: UnhostedKind[];
-
-  constructor(init: UnhostedKindsInit = {}) {
-    super();
-    this.kinds = Array.from(init.kinds ?? []);
-  }
-
-  protected encodeInto(out: wire.Out): void {
-    for (const item of this.kinds) {
-      wire.putMessage(out, 1, item);
-    }
-  }
-
-  /** Reads the fields of `data` into this message; unknown fields are dropped. */
-  mergeFrom(data: Uint8Array): void {
-    for (const { number, value } of wire.readFields(data)) {
-      switch (number) {
-        case 1: {
-          this.kinds.push(UnhostedKind.decode(wire.bytesOf(value)));
-          break;
-        }
-        default:
-          break;
-      }
-    }
-  }
-
-  /** The message the bytes hold; unknown fields are dropped. */
-  static decode(data: Uint8Array): UnhostedKinds {
-    const message = new UnhostedKinds();
-    message.mergeFrom(data);
-    return message;
-  }
-}
-
-export interface LeaseHeldInit {
-  /** The identity the other run took the lease as. */
-  holder?: string;
-  /**
-   * At most this many milliseconds until the lease can be taken, if that run died without
-   * releasing it.
-   */
-  remainingMs?: bigint;
-}
-
-/**
- * Another run holds the ledger's lease. Nothing was read or written; try again when that run
- * has ended.
- */
-export class LeaseHeld extends wire.Message {
-  /** The identity the other run took the lease as. */
-  holder: string;
-  /**
-   * At most this many milliseconds until the lease can be taken, if that run died without
-   * releasing it.
-   */
-  remainingMs: bigint;
-
-  constructor(init: LeaseHeldInit = {}) {
-    super();
-    this.holder = init.holder ?? "";
-    this.remainingMs = init.remainingMs ?? 0n;
-  }
-
-  protected encodeInto(out: wire.Out): void {
-    if (this.holder !== "") {
-      wire.putString(out, 1, this.holder);
-    }
-    if (this.remainingMs !== 0n) {
-      wire.putVarintField(out, 2, this.remainingMs);
-    }
-  }
-
-  /** Reads the fields of `data` into this message; unknown fields are dropped. */
-  mergeFrom(data: Uint8Array): void {
-    for (const { number, value } of wire.readFields(data)) {
-      switch (number) {
-        case 1: {
-          this.holder = wire.str(value);
-          break;
-        }
-        case 2: {
-          this.remainingMs = wire.uint64(value);
-          break;
-        }
-        default:
-          break;
-      }
-    }
-  }
-
-  /** The message the bytes hold; unknown fields are dropped. */
-  static decode(data: Uint8Array): LeaseHeld {
-    const message = new LeaseHeld();
-    message.mergeFrom(data);
-    return message;
-  }
-}
-
-export interface RefusalInit {
-  findings?: Findings;
-  conflicts?: Conflicts;
-  emptyScope?: EmptyScope;
-  planHashMismatch?: PlanHashMismatch;
-  planChanged?: PlanChanged;
-  unsupportedStampMode?: UnsupportedStampMode;
-  message?: string;
-  unhostedKinds?: UnhostedKinds;
-  leaseHeld?: LeaseHeld;
-}
-
-/** Why a run was refused whole, before anything was changed. */
-export class Refusal extends wire.Message {
-  findings: Findings | undefined;
-  conflicts: Conflicts | undefined;
-  emptyScope: EmptyScope | undefined;
-  planHashMismatch: PlanHashMismatch | undefined;
-  planChanged: PlanChanged | undefined;
-  unsupportedStampMode: UnsupportedStampMode | undefined;
-  message: string;
-  unhostedKinds: UnhostedKinds | undefined;
-  leaseHeld: LeaseHeld | undefined;
-
-  constructor(init: RefusalInit = {}) {
-    super();
-    this.findings = init.findings;
-    this.conflicts = init.conflicts;
-    this.emptyScope = init.emptyScope;
-    this.planHashMismatch = init.planHashMismatch;
-    this.planChanged = init.planChanged;
-    this.unsupportedStampMode = init.unsupportedStampMode;
-    this.message = init.message ?? "";
-    this.unhostedKinds = init.unhostedKinds;
-    this.leaseHeld = init.leaseHeld;
-  }
-
-  /** The name of the arm of `reason` that is set, or undefined. */
-  whichReason(): "findings" | "conflicts" | "emptyScope" | "planHashMismatch" | "planChanged" | "unsupportedStampMode" | "unhostedKinds" | "leaseHeld" | undefined {
-    return wire.which(this, ["findings", "conflicts", "emptyScope", "planHashMismatch", "planChanged", "unsupportedStampMode", "unhostedKinds", "leaseHeld"]);
-  }
-
-  private clearReason(): void {
-    this.findings = undefined;
-    this.conflicts = undefined;
-    this.emptyScope = undefined;
-    this.planHashMismatch = undefined;
-    this.planChanged = undefined;
-    this.unsupportedStampMode = undefined;
-    this.unhostedKinds = undefined;
-    this.leaseHeld = undefined;
-  }
-
-  static findings(findings: Findings, fields: RefusalInit = {}): Refusal {
-    return new Refusal({ ...fields, findings });
-  }
-
-  static conflicts(conflicts: Conflicts, fields: RefusalInit = {}): Refusal {
-    return new Refusal({ ...fields, conflicts });
-  }
-
-  static emptyScope(fields: RefusalInit = {}): Refusal {
-    return new Refusal({ ...fields, emptyScope: new EmptyScope() });
-  }
-
-  static planHashMismatch(approved: string, plan: string, fields: RefusalInit = {}): Refusal {
-    return new Refusal({ ...fields, planHashMismatch: new PlanHashMismatch({ approved, plan }) });
-  }
-
-  static planChanged(approved: string, now: string, fields: RefusalInit = {}): Refusal {
-    return new Refusal({ ...fields, planChanged: new PlanChanged({ approved, now }) });
-  }
-
-  static unsupportedStampMode(unsupportedStampMode: UnsupportedStampMode, fields: RefusalInit = {}): Refusal {
-    return new Refusal({ ...fields, unsupportedStampMode });
-  }
-
-  static unhostedKinds(unhostedKinds: UnhostedKinds, fields: RefusalInit = {}): Refusal {
-    return new Refusal({ ...fields, unhostedKinds });
-  }
-
-  static leaseHeld(holder: string, remainingMs: bigint, fields: RefusalInit = {}): Refusal {
-    return new Refusal({ ...fields, leaseHeld: new LeaseHeld({ holder, remainingMs }) });
-  }
-
-  protected encodeInto(out: wire.Out): void {
-    this.whichReason();
-    if (this.findings !== undefined) {
-      wire.putMessage(out, 1, this.findings);
-    } else if (this.conflicts !== undefined) {
-      wire.putMessage(out, 2, this.conflicts);
-    } else if (this.emptyScope !== undefined) {
-      wire.putMessage(out, 3, this.emptyScope);
-    } else if (this.planHashMismatch !== undefined) {
-      wire.putMessage(out, 4, this.planHashMismatch);
-    } else if (this.planChanged !== undefined) {
-      wire.putMessage(out, 5, this.planChanged);
-    } else if (this.unsupportedStampMode !== undefined) {
-      wire.putMessage(out, 6, this.unsupportedStampMode);
-    } else if (this.unhostedKinds !== undefined) {
-      wire.putMessage(out, 8, this.unhostedKinds);
-    } else if (this.leaseHeld !== undefined) {
-      wire.putMessage(out, 9, this.leaseHeld);
-    }
-    if (this.message !== "") {
-      wire.putString(out, 7, this.message);
-    }
-  }
-
-  /** Reads the fields of `data` into this message; unknown fields are dropped. */
-  mergeFrom(data: Uint8Array): void {
-    for (const { number, value } of wire.readFields(data)) {
-      switch (number) {
-        case 1: {
-          const current = this.findings;
-          this.clearReason();
-          const message = current ?? new Findings();
-          message.mergeFrom(wire.bytesOf(value));
-          this.findings = message;
-          break;
-        }
-        case 2: {
-          const current = this.conflicts;
-          this.clearReason();
-          const message = current ?? new Conflicts();
-          message.mergeFrom(wire.bytesOf(value));
-          this.conflicts = message;
-          break;
-        }
-        case 3: {
-          const current = this.emptyScope;
-          this.clearReason();
-          const message = current ?? new EmptyScope();
-          message.mergeFrom(wire.bytesOf(value));
-          this.emptyScope = message;
-          break;
-        }
-        case 4: {
-          const current = this.planHashMismatch;
-          this.clearReason();
-          const message = current ?? new PlanHashMismatch();
-          message.mergeFrom(wire.bytesOf(value));
-          this.planHashMismatch = message;
-          break;
-        }
-        case 5: {
-          const current = this.planChanged;
-          this.clearReason();
-          const message = current ?? new PlanChanged();
-          message.mergeFrom(wire.bytesOf(value));
-          this.planChanged = message;
-          break;
-        }
-        case 6: {
-          const current = this.unsupportedStampMode;
-          this.clearReason();
-          const message = current ?? new UnsupportedStampMode();
-          message.mergeFrom(wire.bytesOf(value));
-          this.unsupportedStampMode = message;
-          break;
-        }
-        case 7: {
-          this.message = wire.str(value);
-          break;
-        }
-        case 8: {
-          const current = this.unhostedKinds;
-          this.clearReason();
-          const message = current ?? new UnhostedKinds();
-          message.mergeFrom(wire.bytesOf(value));
-          this.unhostedKinds = message;
-          break;
-        }
-        case 9: {
-          const current = this.leaseHeld;
-          this.clearReason();
-          const message = current ?? new LeaseHeld();
-          message.mergeFrom(wire.bytesOf(value));
-          this.leaseHeld = message;
-          break;
-        }
-        default:
-          break;
-      }
-    }
-  }
-
-  /** The message the bytes hold; unknown fields are dropped. */
-  static decode(data: Uint8Array): Refusal {
-    const message = new Refusal();
-    message.mergeFrom(data);
-    return message;
-  }
-}
-
-export interface RetainedObjectInit {
-  path?: string;
-  retained?: Retained;
-}
-
-export class RetainedObject extends wire.Message {
-  path: string;
-  retained: Retained | undefined;
-
-  constructor(init: RetainedObjectInit = {}) {
-    super();
-    this.path = init.path ?? "";
-    this.retained = init.retained;
-  }
-
-  protected encodeInto(out: wire.Out): void {
-    if (this.path !== "") {
-      wire.putString(out, 1, this.path);
-    }
-    if (this.retained !== undefined) {
-      wire.putMessage(out, 2, this.retained);
-    }
-  }
-
-  /** Reads the fields of `data` into this message; unknown fields are dropped. */
-  mergeFrom(data: Uint8Array): void {
-    for (const { number, value } of wire.readFields(data)) {
-      switch (number) {
-        case 1: {
-          this.path = wire.str(value);
-          break;
-        }
-        case 2: {
-          const current = this.retained;
-          const message = current ?? new Retained();
-          message.mergeFrom(wire.bytesOf(value));
-          this.retained = message;
-          break;
-        }
-        default:
-          break;
-      }
-    }
-  }
-
-  /** The message the bytes hold; unknown fields are dropped. */
-  static decode(data: Uint8Array): RetainedObject {
-    const message = new RetainedObject();
-    message.mergeFrom(data);
-    return message;
-  }
-}
-
-export interface BlockedInit {
-  path?: string;
-  /** The resource path whose failure blocks it. */
-  producer?: string;
-}
-
-export class Blocked extends wire.Message {
-  path: string;
-  /** The resource path whose failure blocks it. */
-  producer: string;
-
-  constructor(init: BlockedInit = {}) {
-    super();
-    this.path = init.path ?? "";
-    this.producer = init.producer ?? "";
-  }
-
-  protected encodeInto(out: wire.Out): void {
-    if (this.path !== "") {
-      wire.putString(out, 1, this.path);
-    }
-    if (this.producer !== "") {
-      wire.putString(out, 2, this.producer);
-    }
-  }
-
-  /** Reads the fields of `data` into this message; unknown fields are dropped. */
-  mergeFrom(data: Uint8Array): void {
-    for (const { number, value } of wire.readFields(data)) {
-      switch (number) {
-        case 1: {
-          this.path = wire.str(value);
-          break;
-        }
-        case 2: {
-          this.producer = wire.str(value);
-          break;
-        }
-        default:
-          break;
-      }
-    }
-  }
-
-  /** The message the bytes hold; unknown fields are dropped. */
-  static decode(data: Uint8Array): Blocked {
-    const message = new Blocked();
-    message.mergeFrom(data);
-    return message;
-  }
-}
-
-export interface RollbackFailureInit {
-  path?: string;
-  message?: string;
-}
-
-export class RollbackFailure extends wire.Message {
-  path: string;
-  message: string;
-
-  constructor(init: RollbackFailureInit = {}) {
-    super();
-    this.path = init.path ?? "";
-    this.message = init.message ?? "";
-  }
-
-  protected encodeInto(out: wire.Out): void {
-    if (this.path !== "") {
-      wire.putString(out, 1, this.path);
-    }
-    if (this.message !== "") {
-      wire.putString(out, 2, this.message);
-    }
-  }
-
-  /** Reads the fields of `data` into this message; unknown fields are dropped. */
-  mergeFrom(data: Uint8Array): void {
-    for (const { number, value } of wire.readFields(data)) {
-      switch (number) {
-        case 1: {
-          this.path = wire.str(value);
-          break;
-        }
-        case 2: {
-          this.message = wire.str(value);
-          break;
-        }
-        default:
-          break;
-      }
-    }
-  }
-
-  /** The message the bytes hold; unknown fields are dropped. */
-  static decode(data: Uint8Array): RollbackFailure {
-    const message = new RollbackFailure();
-    message.mergeFrom(data);
-    return message;
-  }
-}
-
-export interface ReportInit {
-  created?: Iterable<string>;
-  updated?: Iterable<string>;
-  resumed?: Iterable<string>;
-  deleted?: Iterable<string>;
-  reaped?: Iterable<string>;
-  retained?: Iterable<RetainedObject>;
-  converging?: Iterable<string>;
-  failed?: Iterable<string>;
-  blockedByFailed?: Iterable<Blocked>;
-  rolledBack?: Iterable<string>;
-  rollbackFailed?: Iterable<RollbackFailure>;
-  /**
-   * The leak sweep an apply ends with: objects that carry the cell's stamp and have no ledger
-   * record. They are reported and left alone; the apply is not failed for them.
-   */
-  leaks?: Iterable<Leak>;
-  /** Set when that sweep could not read; the apply still stands. */
-  leakSweepFailed?: Error;
-}
-
-/** What a run did, by object, in the order it did it. */
-export class Report extends wire.Message {
-  created: string[];
-  updated: string[];
-  resumed: string[];
-  deleted: string[];
-  reaped: string[];
-  retained: RetainedObject[];
-  converging: string[];
-  failed: string[];
-  blockedByFailed: Blocked[];
-  rolledBack: string[];
-  rollbackFailed: RollbackFailure[];
-  /**
-   * The leak sweep an apply ends with: objects that carry the cell's stamp and have no ledger
-   * record. They are reported and left alone; the apply is not failed for them.
-   */
-  leaks: Leak[];
-  /** Set when that sweep could not read; the apply still stands. */
-  leakSweepFailed: Error | undefined;
-
-  constructor(init: ReportInit = {}) {
-    super();
-    this.created = Array.from(init.created ?? []);
-    this.updated = Array.from(init.updated ?? []);
-    this.resumed = Array.from(init.resumed ?? []);
-    this.deleted = Array.from(init.deleted ?? []);
-    this.reaped = Array.from(init.reaped ?? []);
-    this.retained = Array.from(init.retained ?? []);
-    this.converging = Array.from(init.converging ?? []);
-    this.failed = Array.from(init.failed ?? []);
-    this.blockedByFailed = Array.from(init.blockedByFailed ?? []);
-    this.rolledBack = Array.from(init.rolledBack ?? []);
-    this.rollbackFailed = Array.from(init.rollbackFailed ?? []);
-    this.leaks = Array.from(init.leaks ?? []);
-    this.leakSweepFailed = init.leakSweepFailed;
-  }
-
-  protected encodeInto(out: wire.Out): void {
-    for (const item of this.created) {
-      wire.putString(out, 1, item);
-    }
-    for (const item of this.updated) {
-      wire.putString(out, 2, item);
-    }
-    for (const item of this.resumed) {
-      wire.putString(out, 3, item);
-    }
-    for (const item of this.deleted) {
-      wire.putString(out, 4, item);
-    }
-    for (const item of this.reaped) {
-      wire.putString(out, 5, item);
-    }
-    for (const item of this.retained) {
-      wire.putMessage(out, 6, item);
-    }
-    for (const item of this.converging) {
-      wire.putString(out, 7, item);
-    }
-    for (const item of this.failed) {
-      wire.putString(out, 8, item);
-    }
-    for (const item of this.blockedByFailed) {
-      wire.putMessage(out, 9, item);
-    }
-    for (const item of this.rolledBack) {
-      wire.putString(out, 10, item);
-    }
-    for (const item of this.rollbackFailed) {
-      wire.putMessage(out, 11, item);
-    }
-    for (const item of this.leaks) {
-      wire.putMessage(out, 12, item);
-    }
-    if (this.leakSweepFailed !== undefined) {
-      wire.putMessage(out, 13, this.leakSweepFailed);
-    }
-  }
-
-  /** Reads the fields of `data` into this message; unknown fields are dropped. */
-  mergeFrom(data: Uint8Array): void {
-    for (const { number, value } of wire.readFields(data)) {
-      switch (number) {
-        case 1: {
-          this.created.push(wire.str(value));
-          break;
-        }
-        case 2: {
-          this.updated.push(wire.str(value));
-          break;
-        }
-        case 3: {
-          this.resumed.push(wire.str(value));
-          break;
-        }
-        case 4: {
-          this.deleted.push(wire.str(value));
-          break;
-        }
-        case 5: {
-          this.reaped.push(wire.str(value));
-          break;
-        }
-        case 6: {
-          this.retained.push(RetainedObject.decode(wire.bytesOf(value)));
-          break;
-        }
-        case 7: {
-          this.converging.push(wire.str(value));
-          break;
-        }
-        case 8: {
-          this.failed.push(wire.str(value));
-          break;
-        }
-        case 9: {
-          this.blockedByFailed.push(Blocked.decode(wire.bytesOf(value)));
-          break;
-        }
-        case 10: {
-          this.rolledBack.push(wire.str(value));
-          break;
-        }
-        case 11: {
-          this.rollbackFailed.push(RollbackFailure.decode(wire.bytesOf(value)));
-          break;
-        }
-        case 12: {
-          this.leaks.push(Leak.decode(wire.bytesOf(value)));
-          break;
-        }
-        case 13: {
-          const current = this.leakSweepFailed;
-          const message = current ?? new Error();
-          message.mergeFrom(wire.bytesOf(value));
-          this.leakSweepFailed = message;
-          break;
-        }
-        default:
-          break;
-      }
-    }
-  }
-
-  /** The message the bytes hold; unknown fields are dropped. */
-  static decode(data: Uint8Array): Report {
-    const message = new Report();
-    message.mergeFrom(data);
-    return message;
-  }
-}
-
-export interface LeakInit {
-  kind?: string;
-  physicalId?: string;
-  /** The name the provider shows, without any stamp encoding. */
-  name?: string;
-  /** The top-level owner the stamp names. */
-  owner?: string;
-  /** The node key the stamp names. */
-  node?: string;
-}
-
-/**
- * A live object that carries the cell's stamp and that no ledger record accounts for. The
- * stamp is a claim, not an authority: nothing deletes the object on it.
- */
-export class Leak extends wire.Message {
-  kind: string;
-  physicalId: string;
-  /** The name the provider shows, without any stamp encoding. */
-  name: string;
-  /** The top-level owner the stamp names. */
-  owner: string;
-  /** The node key the stamp names. */
-  node: string;
-
-  constructor(init: LeakInit = {}) {
-    super();
-    this.kind = init.kind ?? "";
-    this.physicalId = init.physicalId ?? "";
-    this.name = init.name ?? "";
-    this.owner = init.owner ?? "";
-    this.node = init.node ?? "";
-  }
-
-  protected encodeInto(out: wire.Out): void {
-    if (this.kind !== "") {
-      wire.putString(out, 1, this.kind);
-    }
-    if (this.physicalId !== "") {
-      wire.putString(out, 2, this.physicalId);
-    }
-    if (this.name !== "") {
-      wire.putString(out, 3, this.name);
-    }
-    if (this.owner !== "") {
-      wire.putString(out, 4, this.owner);
-    }
-    if (this.node !== "") {
-      wire.putString(out, 5, this.node);
-    }
-  }
-
-  /** Reads the fields of `data` into this message; unknown fields are dropped. */
-  mergeFrom(data: Uint8Array): void {
-    for (const { number, value } of wire.readFields(data)) {
-      switch (number) {
-        case 1: {
-          this.kind = wire.str(value);
-          break;
-        }
-        case 2: {
-          this.physicalId = wire.str(value);
-          break;
-        }
-        case 3: {
-          this.name = wire.str(value);
-          break;
-        }
-        case 4: {
-          this.owner = wire.str(value);
-          break;
-        }
-        case 5: {
-          this.node = wire.str(value);
-          break;
-        }
-        default:
-          break;
-      }
-    }
-  }
-
-  /** The message the bytes hold; unknown fields are dropped. */
-  static decode(data: Uint8Array): Leak {
-    const message = new Leak();
-    message.mergeFrom(data);
-    return message;
-  }
-}
-
-export interface LeaksResponseInit {
-  leaks?: Iterable<Leak>;
-}
-
-/**
- * What a leak sweep found, by physical id. Empty when there are no leaks (the exit class is
- * then DONE; with leaks it is LEAKS).
- */
-export class LeaksResponse extends wire.Message {
-  leaks: Leak[];
-
-  constructor(init: LeaksResponseInit = {}) {
-    super();
-    this.leaks = Array.from(init.leaks ?? []);
-  }
-
-  protected encodeInto(out: wire.Out): void {
-    for (const item of this.leaks) {
-      wire.putMessage(out, 1, item);
-    }
-  }
-
-  /** Reads the fields of `data` into this message; unknown fields are dropped. */
-  mergeFrom(data: Uint8Array): void {
-    for (const { number, value } of wire.readFields(data)) {
-      switch (number) {
-        case 1: {
-          this.leaks.push(Leak.decode(wire.bytesOf(value)));
-          break;
-        }
-        default:
-          break;
-      }
-    }
-  }
-
-  /** The message the bytes hold; unknown fields are dropped. */
-  static decode(data: Uint8Array): LeaksResponse {
-    const message = new LeaksResponse();
-    message.mergeFrom(data);
-    return message;
-  }
-}
-
-export interface ObjectStatusInit {
-  path?: string;
-  kind?: string;
-  /** Absent when the ledger has no record of the object. */
-  record?: RecordState;
-  /** Absent when the provider shows no such object. */
-  live?: LiveStatus;
-  standing?: Standing;
-  /** The non-secret outputs the record holds. */
-  outputs?: wire.MapInit<string>;
-}
-
-/** One recorded or named object, as the ledger and the provider show it now. */
-export class ObjectStatus extends wire.Message {
-  path: string;
-  kind: string;
-  /** Absent when the ledger has no record of the object. */
-  record: RecordState | undefined;
-  /** Absent when the provider shows no such object. */
-  live: LiveStatus | undefined;
-  standing: Standing;
-  /** The non-secret outputs the record holds. */
-  outputs: Map<string, string>;
-
-  constructor(init: ObjectStatusInit = {}) {
-    super();
-    this.path = init.path ?? "";
-    this.kind = init.kind ?? "";
-    this.record = init.record;
-    this.live = init.live;
-    this.standing = init.standing ?? Standing.UNSPECIFIED;
-    this.outputs = wire.toMap(init.outputs);
-  }
-
-  protected encodeInto(out: wire.Out): void {
-    if (this.path !== "") {
-      wire.putString(out, 1, this.path);
-    }
-    if (this.kind !== "") {
-      wire.putString(out, 2, this.kind);
-    }
-    if (this.record !== undefined) {
-      wire.putVarintField(out, 3, this.record);
-    }
-    if (this.live !== undefined) {
-      wire.putVarintField(out, 4, this.live);
-    }
-    if (this.standing !== 0) {
-      wire.putVarintField(out, 5, this.standing);
-    }
-    for (const [key, item] of wire.sortedEntries(this.outputs)) {
-      const entry = new wire.Out();
-      if (key !== "") {
-        wire.putString(entry, 1, key);
-      }
-      if (item !== "") {
-        wire.putString(entry, 2, item);
-      }
-      wire.putBytes(out, 6, entry.bytes());
-    }
-  }
-
-  /** Reads the fields of `data` into this message; unknown fields are dropped. */
-  mergeFrom(data: Uint8Array): void {
-    for (const { number, value } of wire.readFields(data)) {
-      switch (number) {
-        case 1: {
-          this.path = wire.str(value);
-          break;
-        }
-        case 2: {
-          this.kind = wire.str(value);
-          break;
-        }
-        case 3: {
-          this.record = wire.enumValue<RecordState>(value);
-          break;
-        }
-        case 4: {
-          this.live = wire.enumValue<LiveStatus>(value);
-          break;
-        }
-        case 5: {
-          this.standing = wire.enumValue<Standing>(value);
-          break;
-        }
-        case 6: {
-          let key = "";
-          let item: string = "";
-          for (const part of wire.readFields(wire.bytesOf(value))) {
-            if (part.number === 1) {
-              key = wire.str(part.value);
-            } else if (part.number === 2) {
-              item = wire.str(part.value);
-            }
-          }
-          this.outputs.set(key, item);
-          break;
-        }
-        default:
-          break;
-      }
-    }
-  }
-
-  /** The message the bytes hold; unknown fields are dropped. */
-  static decode(data: Uint8Array): ObjectStatus {
-    const message = new ObjectStatus();
-    message.mergeFrom(data);
-    return message;
-  }
-}
-
-export interface StatusResponseInit {
-  objects?: Iterable<ObjectStatus>;
-}
-
-/**
- * What a status found: one entry per object, in path order. An empty list is an empty ledger and
- * a list that names nothing.
- */
-export class StatusResponse extends wire.Message {
-  objects: ObjectStatus[];
-
-  constructor(init: StatusResponseInit = {}) {
-    super();
-    this.objects = Array.from(init.objects ?? []);
-  }
-
-  protected encodeInto(out: wire.Out): void {
-    for (const item of this.objects) {
-      wire.putMessage(out, 1, item);
-    }
-  }
-
-  /** Reads the fields of `data` into this message; unknown fields are dropped. */
-  mergeFrom(data: Uint8Array): void {
-    for (const { number, value } of wire.readFields(data)) {
-      switch (number) {
-        case 1: {
-          this.objects.push(ObjectStatus.decode(wire.bytesOf(value)));
-          break;
-        }
-        default:
-          break;
-      }
-    }
-  }
-
-  /** The message the bytes hold; unknown fields are dropped. */
-  static decode(data: Uint8Array): StatusResponse {
-    const message = new StatusResponse();
-    message.mergeFrom(data);
-    return message;
-  }
-}
-
 export interface ErrorInit {
   code?: ErrorCode;
   message?: string;
 }
 
-/** Why a step failed. `message` is for a person and is not parsed. */
+/** Why a call made no answer. `message` is for a person and is not parsed. */
 export class Error extends wire.Message {
   code: ErrorCode;
   message: string;
@@ -2340,38 +216,58 @@ export class Error extends wire.Message {
   }
 }
 
-export interface FailureInit {
-  /** What had been done before it stopped, and what a rollback did. */
-  report?: Report;
-  /** The object of the step that failed; absent when nothing was started. */
-  at?: string;
-  error?: Error;
+export interface LedgerShowRequestInit {
 }
 
-/** A run that stopped at a step. */
-export class Failure extends wire.Message {
-  /** What had been done before it stopped, and what a rollback did. */
-  report: Report | undefined;
-  /** The object of the step that failed; absent when nothing was started. */
-  at: string | undefined;
-  error: Error | undefined;
+/**
+ * Show one ledger document as data. The ledger is the session's
+ * (`SessionConfig.ledger_kind`, `ledger_location`). A call takes no lease and changes no file.
+ */
+export class LedgerShowRequest extends wire.Message {
 
-  constructor(init: FailureInit = {}) {
+  constructor(_init: LedgerShowRequestInit = {}) {
     super();
-    this.report = init.report;
-    this.at = init.at;
-    this.error = init.error;
   }
 
   protected encodeInto(out: wire.Out): void {
-    if (this.report !== undefined) {
-      wire.putMessage(out, 1, this.report);
+    void out;
+  }
+
+  /** Reads the fields of `data` into this message; unknown fields are dropped. */
+  mergeFrom(data: Uint8Array): void {
+    wire.validate(data);
+  }
+
+  /** The message the bytes hold; unknown fields are dropped. */
+  static decode(data: Uint8Array): LedgerShowRequest {
+    const message = new LedgerShowRequest();
+    message.mergeFrom(data);
+    return message;
+  }
+}
+
+export interface PairInit {
+  key?: string;
+  value?: string;
+}
+
+/** A key and a value. A list of pairs, not a map, so every host prints the same bytes. */
+export class Pair extends wire.Message {
+  key: string;
+  value: string;
+
+  constructor(init: PairInit = {}) {
+    super();
+    this.key = init.key ?? "";
+    this.value = init.value ?? "";
+  }
+
+  protected encodeInto(out: wire.Out): void {
+    if (this.key !== "") {
+      wire.putString(out, 1, this.key);
     }
-    if (this.at !== undefined) {
-      wire.putString(out, 2, this.at);
-    }
-    if (this.error !== undefined) {
-      wire.putMessage(out, 3, this.error);
+    if (this.value !== "") {
+      wire.putString(out, 2, this.value);
     }
   }
 
@@ -2380,21 +276,11 @@ export class Failure extends wire.Message {
     for (const { number, value } of wire.readFields(data)) {
       switch (number) {
         case 1: {
-          const current = this.report;
-          const message = current ?? new Report();
-          message.mergeFrom(wire.bytesOf(value));
-          this.report = message;
+          this.key = wire.str(value);
           break;
         }
         case 2: {
-          this.at = wire.str(value);
-          break;
-        }
-        case 3: {
-          const current = this.error;
-          const message = current ?? new Error();
-          message.mergeFrom(wire.bytesOf(value));
-          this.error = message;
+          this.value = wire.str(value);
           break;
         }
         default:
@@ -2404,115 +290,50 @@ export class Failure extends wire.Message {
   }
 
   /** The message the bytes hold; unknown fields are dropped. */
-  static decode(data: Uint8Array): Failure {
-    const message = new Failure();
+  static decode(data: Uint8Array): Pair {
+    const message = new Pair();
     message.mergeFrom(data);
     return message;
   }
 }
 
-export interface OutcomeInit {
-  planned?: Plan;
-  done?: Report;
-  refused?: Refusal;
-  failed?: Failure;
-  exit?: ExitClass;
-  /** The request was not understood; the exit class is USAGE. */
-  invalid?: Error;
-  /** The answer of a status request. */
-  status?: StatusResponse;
-  /** The answer of a leaks request. */
-  leaks?: LeaksResponse;
+export interface LeaseViewInit {
+  holder?: string;
+  /** Milliseconds since the Unix epoch, by the ledger's clock. */
+  expiresMs?: bigint;
+  state?: LeaseState;
+  /** The holder is `SessionConfig.holder`. */
+  yours?: boolean;
 }
 
-/** What the engine answered, and the exit class of the answer. */
-export class Outcome extends wire.Message {
-  planned: Plan | undefined;
-  done: Report | undefined;
-  refused: Refusal | undefined;
-  failed: Failure | undefined;
-  exit: ExitClass;
-  /** The request was not understood; the exit class is USAGE. */
-  invalid: Error | undefined;
-  /** The answer of a status request. */
-  status: StatusResponse | undefined;
-  /** The answer of a leaks request. */
-  leaks: LeaksResponse | undefined;
+export class LeaseView extends wire.Message {
+  holder: string;
+  /** Milliseconds since the Unix epoch, by the ledger's clock. */
+  expiresMs: bigint;
+  state: LeaseState;
+  /** The holder is `SessionConfig.holder`. */
+  yours: boolean;
 
-  constructor(init: OutcomeInit = {}) {
+  constructor(init: LeaseViewInit = {}) {
     super();
-    this.planned = init.planned;
-    this.done = init.done;
-    this.refused = init.refused;
-    this.failed = init.failed;
-    this.exit = init.exit ?? ExitClass.DONE;
-    this.invalid = init.invalid;
-    this.status = init.status;
-    this.leaks = init.leaks;
-  }
-
-  /** The name of the arm of `result` that is set, or undefined. */
-  whichResult(): "planned" | "done" | "refused" | "failed" | "invalid" | "status" | "leaks" | undefined {
-    return wire.which(this, ["planned", "done", "refused", "failed", "invalid", "status", "leaks"]);
-  }
-
-  private clearResult(): void {
-    this.planned = undefined;
-    this.done = undefined;
-    this.refused = undefined;
-    this.failed = undefined;
-    this.invalid = undefined;
-    this.status = undefined;
-    this.leaks = undefined;
-  }
-
-  static planned(planned: Plan, fields: OutcomeInit = {}): Outcome {
-    return new Outcome({ ...fields, planned });
-  }
-
-  static done(done: Report, fields: OutcomeInit = {}): Outcome {
-    return new Outcome({ ...fields, done });
-  }
-
-  static refused(refused: Refusal, fields: OutcomeInit = {}): Outcome {
-    return new Outcome({ ...fields, refused });
-  }
-
-  static failed(failed: Failure, fields: OutcomeInit = {}): Outcome {
-    return new Outcome({ ...fields, failed });
-  }
-
-  static invalid(code: ErrorCode, message: string, fields: OutcomeInit = {}): Outcome {
-    return new Outcome({ ...fields, invalid: new Error({ code, message }) });
-  }
-
-  static status(status: StatusResponse, fields: OutcomeInit = {}): Outcome {
-    return new Outcome({ ...fields, status });
-  }
-
-  static leaks(leaks: LeaksResponse, fields: OutcomeInit = {}): Outcome {
-    return new Outcome({ ...fields, leaks });
+    this.holder = init.holder ?? "";
+    this.expiresMs = init.expiresMs ?? 0n;
+    this.state = init.state ?? LeaseState.UNSPECIFIED;
+    this.yours = init.yours ?? false;
   }
 
   protected encodeInto(out: wire.Out): void {
-    this.whichResult();
-    if (this.planned !== undefined) {
-      wire.putMessage(out, 1, this.planned);
-    } else if (this.done !== undefined) {
-      wire.putMessage(out, 2, this.done);
-    } else if (this.refused !== undefined) {
-      wire.putMessage(out, 3, this.refused);
-    } else if (this.failed !== undefined) {
-      wire.putMessage(out, 4, this.failed);
-    } else if (this.invalid !== undefined) {
-      wire.putMessage(out, 6, this.invalid);
-    } else if (this.status !== undefined) {
-      wire.putMessage(out, 7, this.status);
-    } else if (this.leaks !== undefined) {
-      wire.putMessage(out, 8, this.leaks);
+    if (this.holder !== "") {
+      wire.putString(out, 1, this.holder);
     }
-    if (this.exit !== 0) {
-      wire.putVarintField(out, 5, this.exit);
+    if (this.expiresMs !== 0n) {
+      wire.putVarintField(out, 2, this.expiresMs);
+    }
+    if (this.state !== 0) {
+      wire.putVarintField(out, 3, this.state);
+    }
+    if (this.yours) {
+      wire.putBool(out, 4, this.yours);
     }
   }
 
@@ -2521,37 +342,303 @@ export class Outcome extends wire.Message {
     for (const { number, value } of wire.readFields(data)) {
       switch (number) {
         case 1: {
-          const current = this.planned;
-          this.clearResult();
-          const message = current ?? new Plan();
-          message.mergeFrom(wire.bytesOf(value));
-          this.planned = message;
+          this.holder = wire.str(value);
           break;
         }
         case 2: {
-          const current = this.done;
-          this.clearResult();
-          const message = current ?? new Report();
-          message.mergeFrom(wire.bytesOf(value));
-          this.done = message;
+          this.expiresMs = wire.uint64(value);
           break;
         }
         case 3: {
-          const current = this.refused;
-          this.clearResult();
-          const message = current ?? new Refusal();
-          message.mergeFrom(wire.bytesOf(value));
-          this.refused = message;
+          this.state = wire.enumValue<LeaseState>(value);
           break;
         }
         case 4: {
-          const current = this.failed;
-          this.clearResult();
-          const message = current ?? new Failure();
-          message.mergeFrom(wire.bytesOf(value));
-          this.failed = message;
+          this.yours = wire.bool(value);
           break;
         }
+        default:
+          break;
+      }
+    }
+  }
+
+  /** The message the bytes hold; unknown fields are dropped. */
+  static decode(data: Uint8Array): LeaseView {
+    const message = new LeaseView();
+    message.mergeFrom(data);
+    return message;
+  }
+}
+
+export interface LedgerRecordInit {
+  path?: string;
+  kind?: string;
+  name?: string;
+  origin?: RecordOrigin;
+  state?: RecordState;
+  physical?: string;
+  deps?: Iterable<string>;
+  /** In key order. */
+  outputs?: Iterable<Pair>;
+}
+
+export class LedgerRecord extends wire.Message {
+  path: string;
+  kind: string;
+  name: string;
+  origin: RecordOrigin;
+  state: RecordState;
+  physical: string;
+  deps: string[];
+  /** In key order. */
+  outputs: Pair[];
+
+  constructor(init: LedgerRecordInit = {}) {
+    super();
+    this.path = init.path ?? "";
+    this.kind = init.kind ?? "";
+    this.name = init.name ?? "";
+    this.origin = init.origin ?? RecordOrigin.UNSPECIFIED;
+    this.state = init.state ?? RecordState.UNSPECIFIED;
+    this.physical = init.physical ?? "";
+    this.deps = Array.from(init.deps ?? []);
+    this.outputs = Array.from(init.outputs ?? []);
+  }
+
+  protected encodeInto(out: wire.Out): void {
+    if (this.path !== "") {
+      wire.putString(out, 1, this.path);
+    }
+    if (this.kind !== "") {
+      wire.putString(out, 2, this.kind);
+    }
+    if (this.name !== "") {
+      wire.putString(out, 3, this.name);
+    }
+    if (this.origin !== 0) {
+      wire.putVarintField(out, 4, this.origin);
+    }
+    if (this.state !== 0) {
+      wire.putVarintField(out, 5, this.state);
+    }
+    if (this.physical !== "") {
+      wire.putString(out, 6, this.physical);
+    }
+    for (const item of this.deps) {
+      wire.putString(out, 7, item);
+    }
+    for (const item of this.outputs) {
+      wire.putMessage(out, 8, item);
+    }
+  }
+
+  /** Reads the fields of `data` into this message; unknown fields are dropped. */
+  mergeFrom(data: Uint8Array): void {
+    for (const { number, value } of wire.readFields(data)) {
+      switch (number) {
+        case 1: {
+          this.path = wire.str(value);
+          break;
+        }
+        case 2: {
+          this.kind = wire.str(value);
+          break;
+        }
+        case 3: {
+          this.name = wire.str(value);
+          break;
+        }
+        case 4: {
+          this.origin = wire.enumValue<RecordOrigin>(value);
+          break;
+        }
+        case 5: {
+          this.state = wire.enumValue<RecordState>(value);
+          break;
+        }
+        case 6: {
+          this.physical = wire.str(value);
+          break;
+        }
+        case 7: {
+          this.deps.push(wire.str(value));
+          break;
+        }
+        case 8: {
+          this.outputs.push(Pair.decode(wire.bytesOf(value)));
+          break;
+        }
+        default:
+          break;
+      }
+    }
+  }
+
+  /** The message the bytes hold; unknown fields are dropped. */
+  static decode(data: Uint8Array): LedgerRecord {
+    const message = new LedgerRecord();
+    message.mergeFrom(data);
+    return message;
+  }
+}
+
+export interface LedgerShowResponseInit {
+  /** The document's token, as text. */
+  token?: string;
+  /** The highest fence ever granted. */
+  fence?: bigint;
+  /** Absent when no lease is recorded. */
+  lease?: LeaseView;
+  /** In path order. */
+  records?: Iterable<LedgerRecord>;
+}
+
+export class LedgerShowResponse extends wire.Message {
+  /** The document's token, as text. */
+  token: string;
+  /** The highest fence ever granted. */
+  fence: bigint;
+  /** Absent when no lease is recorded. */
+  lease: LeaseView | undefined;
+  /** In path order. */
+  records: LedgerRecord[];
+
+  constructor(init: LedgerShowResponseInit = {}) {
+    super();
+    this.token = init.token ?? "";
+    this.fence = init.fence ?? 0n;
+    this.lease = init.lease;
+    this.records = Array.from(init.records ?? []);
+  }
+
+  protected encodeInto(out: wire.Out): void {
+    if (this.token !== "") {
+      wire.putString(out, 1, this.token);
+    }
+    if (this.fence !== 0n) {
+      wire.putVarintField(out, 2, this.fence);
+    }
+    if (this.lease !== undefined) {
+      wire.putMessage(out, 3, this.lease);
+    }
+    for (const item of this.records) {
+      wire.putMessage(out, 4, item);
+    }
+  }
+
+  /** Reads the fields of `data` into this message; unknown fields are dropped. */
+  mergeFrom(data: Uint8Array): void {
+    for (const { number, value } of wire.readFields(data)) {
+      switch (number) {
+        case 1: {
+          this.token = wire.str(value);
+          break;
+        }
+        case 2: {
+          this.fence = wire.uint64(value);
+          break;
+        }
+        case 3: {
+          const current = this.lease;
+          const message = current ?? new LeaseView();
+          message.mergeFrom(wire.bytesOf(value));
+          this.lease = message;
+          break;
+        }
+        case 4: {
+          this.records.push(LedgerRecord.decode(wire.bytesOf(value)));
+          break;
+        }
+        default:
+          break;
+      }
+    }
+  }
+
+  /** The message the bytes hold; unknown fields are dropped. */
+  static decode(data: Uint8Array): LedgerShowResponse {
+    const message = new LedgerShowResponse();
+    message.mergeFrom(data);
+    return message;
+  }
+}
+
+export interface OutcomeInit {
+  exit?: ExitClass;
+  /** The request decoded and is not valid; the exit class is USAGE. */
+  invalid?: Error;
+  /** The answer of a ledger show. */
+  ledgerShow?: LedgerShowResponse;
+  /**
+   * The call made no answer for a reason that is not a usage fault: a ledger that could not
+   * be opened or read. The exit class is FAILED_NO_EFFECT.
+   */
+  error?: Error;
+}
+
+/** What a call answered, and the exit class of the answer. */
+export class Outcome extends wire.Message {
+  exit: ExitClass;
+  /** The request decoded and is not valid; the exit class is USAGE. */
+  invalid: Error | undefined;
+  /** The answer of a ledger show. */
+  ledgerShow: LedgerShowResponse | undefined;
+  /**
+   * The call made no answer for a reason that is not a usage fault: a ledger that could not
+   * be opened or read. The exit class is FAILED_NO_EFFECT.
+   */
+  error: Error | undefined;
+
+  constructor(init: OutcomeInit = {}) {
+    super();
+    this.exit = init.exit ?? ExitClass.DONE;
+    this.invalid = init.invalid;
+    this.ledgerShow = init.ledgerShow;
+    this.error = init.error;
+  }
+
+  /** The name of the arm of `result` that is set, or undefined. */
+  whichResult(): "invalid" | "ledgerShow" | "error" | undefined {
+    return wire.which(this, ["invalid", "ledgerShow", "error"]);
+  }
+
+  private clearResult(): void {
+    this.invalid = undefined;
+    this.ledgerShow = undefined;
+    this.error = undefined;
+  }
+
+  static invalid(code: ErrorCode, message: string, fields: OutcomeInit = {}): Outcome {
+    return new Outcome({ ...fields, invalid: new Error({ code, message }) });
+  }
+
+  static ledgerShow(ledgerShow: LedgerShowResponse, fields: OutcomeInit = {}): Outcome {
+    return new Outcome({ ...fields, ledgerShow });
+  }
+
+  static error(code: ErrorCode, message: string, fields: OutcomeInit = {}): Outcome {
+    return new Outcome({ ...fields, error: new Error({ code, message }) });
+  }
+
+  protected encodeInto(out: wire.Out): void {
+    if (this.exit !== 0) {
+      wire.putVarintField(out, 5, this.exit);
+    }
+    this.whichResult();
+    if (this.invalid !== undefined) {
+      wire.putMessage(out, 6, this.invalid);
+    } else if (this.ledgerShow !== undefined) {
+      wire.putMessage(out, 9, this.ledgerShow);
+    } else if (this.error !== undefined) {
+      wire.putMessage(out, 10, this.error);
+    }
+  }
+
+  /** Reads the fields of `data` into this message; unknown fields are dropped. */
+  mergeFrom(data: Uint8Array): void {
+    for (const { number, value } of wire.readFields(data)) {
+      switch (number) {
         case 5: {
           this.exit = wire.enumValue<ExitClass>(value);
           break;
@@ -2564,20 +651,20 @@ export class Outcome extends wire.Message {
           this.invalid = message;
           break;
         }
-        case 7: {
-          const current = this.status;
+        case 9: {
+          const current = this.ledgerShow;
           this.clearResult();
-          const message = current ?? new StatusResponse();
+          const message = current ?? new LedgerShowResponse();
           message.mergeFrom(wire.bytesOf(value));
-          this.status = message;
+          this.ledgerShow = message;
           break;
         }
-        case 8: {
-          const current = this.leaks;
+        case 10: {
+          const current = this.error;
           this.clearResult();
-          const message = current ?? new LeaksResponse();
+          const message = current ?? new Error();
           message.mergeFrom(wire.bytesOf(value));
-          this.leaks = message;
+          this.error = message;
           break;
         }
         default:

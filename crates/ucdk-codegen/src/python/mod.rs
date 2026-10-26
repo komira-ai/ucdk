@@ -1,19 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
-//! The Python target: one module per proto package, the wire primitives they share, and the
-//! typed resource templates.
+//! The Python target: one module per proto package, and the wire primitives they share.
 //!
 //! Files written, relative to the SDK's package directory:
 //!
 //! - `ucdk/generated/_wire.py`: varint and length-delimited primitives, and the `Message` base
 //!   class; the same text for every proto;
 //! - `ucdk/generated/<package>.py` (`ucdk.api.v1` is `ucdk_api_v1.py`): the enums and message
-//!   classes of one package, and of every package they refer to (`google_protobuf.py` holds the
-//!   `Duration` the resource messages use);
-//! - `ucdk/generated/resources.py`: the typed templates (when the protos declare `Resource`);
+//!   classes of one package, and of every package they refer to;
 //! - `ucdk/generated/__init__.py`.
 
 mod message;
-mod templates;
 mod types;
 
 use std::collections::BTreeSet;
@@ -78,8 +74,6 @@ fn file(name: &str, text: String) -> File {
 /// everything they refer to.
 pub fn generate(pool: &DescriptorPool, files: &[&str]) -> Result<Vec<File>, Error> {
     let modules = collect(pool, files)?;
-    let names: Vec<String> = modules.keys().map(|p| module_of(p)).collect();
-    let resources = templates::generate(pool, &names)?;
     let mut out = vec![
         file(
             "__init__.py",
@@ -92,9 +86,6 @@ pub fn generate(pool: &DescriptorPool, files: &[&str]) -> Result<Vec<File>, Erro
             &format!("{}.py", module_of(package)),
             module_text(package, module)?,
         ));
-    }
-    if let Some(text) = resources {
-        out.push(file("resources.py", text));
     }
     Ok(out)
 }

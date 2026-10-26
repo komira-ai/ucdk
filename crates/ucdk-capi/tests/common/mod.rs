@@ -1,22 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 #![allow(dead_code, unsafe_code)]
-//! Helpers shared by the ABI tests: the C functions called the way a C caller would, a resource
-//! list, and a provider whose `observe` runs a hook.
+//! Helpers shared by the ABI tests: the C functions called the way a C caller would, a config for
+//! each kind of ledger, a copy of a golden ledger file, and a ledger whose read runs a hook.
 
+use std::path::{Path, PathBuf};
 use std::ptr::{self, NonNull};
+use std::sync::{Mutex, PoisonError};
+use std::time::Duration;
 
 use prost::Message as _;
 use ucdk_api::v1::{Error, SessionConfig};
 use ucdk_capi::{Buf, SessionHandle, ucdk_buf_free, ucdk_session_open};
-use ucdk_proto::v1::resource::Body;
-use ucdk_proto::v1::{Image, Resource, ResourceList, Service, image};
-use ucdk_provider::{
-    CellScope, Created, Deletability, Kind, Live, Node, Observation, OwnedObject, OwnerScope,
-    PhysicalId, Provider, ProviderError, StampMode, StateClass, Updated, kit,
+use ucdk_ledger::{
+    Change, Fence, Lease, LeaseError, Ledger, LedgerError, MemoryLedger, Snapshot, Token,
 };
-use ucdk_provider_fake::Fake;
 
-/// The signature all five verbs share.
+/// The signature of every verb.
 pub type VerbFn = unsafe extern "C" fn(*mut SessionHandle, *const u8, usize, *mut Buf) -> i32;
 
 /// What a call answered: its status and the bytes in `out`, already freed.
@@ -88,17 +87,26 @@ pub fn open(config: &SessionConfig) -> Opened {
     open_bytes(&config.encode_to_vec())
 }
 
-/// A config for the fake provider in the cell the direct engine runs use.
-pub fn fake_config() -> SessionConfig {
+/// A config for a session on a memory ledger.
+pub fn memory_config() -> SessionConfig {
     SessionConfig {
-        provider: "fake".to_owned(),
-        cell: kit::cell().to_string(),
+        ledger_kind: "memory".to_owned(),
         ..SessionConfig::default()
     }
 }
 
-pub fn open_fake() -> *mut SessionHandle {
-    let opened = open(&fake_config());
+/// A config for a session on the file ledger at `location`.
+pub fn file_config(location: &Path) -> SessionConfig {
+    SessionConfig {
+        ledger_kind: "file".to_owned(),
+        ledger_location: location.to_string_lossy().into_owned(),
+        ..SessionConfig::default()
+    }
+}
+
+/// A session on a memory ledger, opened through the ABI.
+pub fn open_memory() -> *mut SessionHandle {
+    let opened = open(&memory_config());
     assert_eq!(opened.status, 0);
     assert!(!opened.session.is_null());
     opened.session
@@ -108,122 +116,117 @@ pub fn error_of(bytes: &[u8]) -> Error {
     Error::decode(bytes).expect("an Error message")
 }
 
-pub fn service_of(id: &str, port: u32) -> Resource {
-    Resource {
-        id: id.to_owned(),
-        body: Some(Body::Service(Service {
-            image: Some(Image {
-                source: Some(image::Source::Digest("sha256:aa".to_owned())),
-                platform: String::new(),
-            }),
-            port,
-            ..Service::default()
-        })),
-        uses: Vec::new(),
+pub fn null_session() -> *mut SessionHandle {
+    ptr::null_mut()
+}
+
+/// A ledger golden of the repository, by file name.
+pub fn golden(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../sdk/ledger-golden")
+        .join(name)
+}
+
+/// A directory under the build's scratch area, empty on creation and removed on drop.
+pub struct Scratch(PathBuf);
+
+impl Scratch {
+    pub fn new(name: &str) -> Self {
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("abi-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        Self(dir)
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.0
+    }
+
+    /// The ledger file of the directory.
+    pub fn file(&self) -> PathBuf {
+        self.0.join("ledger.ucdk")
+    }
+
+    /// The directory's files with their bytes, by name.
+    pub fn listing(&self) -> std::collections::BTreeMap<String, Vec<u8>> {
+        std::fs::read_dir(&self.0)
+            .expect("list")
+            .map(|entry| {
+                let entry = entry.expect("entry");
+                (
+                    entry.file_name().to_string_lossy().into_owned(),
+                    std::fs::read(entry.path()).expect("read"),
+                )
+            })
+            .collect()
     }
 }
 
-pub fn list_of(resources: Vec<Resource>) -> ResourceList {
-    ResourceList {
-        resource: resources,
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
-/// The fake provider, with a hook that runs at the start of every `observe`.
-pub struct Hooked {
-    pub fake: Fake,
-    pub on_observe: Box<dyn FnMut() + Send>,
-    /// Forget the fake's call log after each read, so a long loop of calls does not grow it.
-    pub forget: bool,
-    /// Panic when the provider is dropped (unless already unwinding).
+/// A memory ledger with a hook that runs at the start of every read, a way to make a call take
+/// time, panic, or call back into the session it is part of.
+pub struct HookedLedger {
+    pub inner: MemoryLedger,
+    pub on_read: Mutex<Box<dyn FnMut() + Send>>,
+    /// Panic when the ledger is dropped (unless already unwinding).
     pub panic_on_drop: bool,
 }
 
-impl Drop for Hooked {
-    fn drop(&mut self) {
-        assert!(
-            !self.panic_on_drop || std::thread::panicking(),
-            "the provider panics in its destructor"
-        );
-    }
-}
-
-impl Hooked {
-    pub fn new(on_observe: impl FnMut() + Send + 'static) -> Self {
+impl HookedLedger {
+    pub fn new(on_read: impl FnMut() + Send + 'static) -> Self {
         Self {
-            fake: Fake::standard(),
-            on_observe: Box::new(on_observe),
-            forget: false,
+            inner: MemoryLedger::new(),
+            on_read: Mutex::new(Box::new(on_read)),
             panic_on_drop: false,
         }
     }
 }
 
-impl Hooked {
-    fn forgot(&mut self) {
-        if self.forget {
-            self.fake.clear_calls();
-        }
+impl Drop for HookedLedger {
+    fn drop(&mut self) {
+        assert!(
+            !self.panic_on_drop || std::thread::panicking(),
+            "the ledger panics in its destructor"
+        );
     }
 }
 
-impl Provider for Hooked {
-    fn hosts(&self, kind: &Kind) -> bool {
-        Provider::hosts(&self.fake, kind)
+impl Ledger for HookedLedger {
+    fn read(&self) -> Result<Snapshot, LedgerError> {
+        // A hook that panics poisons the lock; a later read goes on to the hook again.
+        let mut hook = self.on_read.lock().unwrap_or_else(PoisonError::into_inner);
+        (hook)();
+        drop(hook);
+        self.inner.read()
     }
 
-    fn state_class(&self, kind: &Kind) -> StateClass {
-        self.fake.state_class(kind)
+    fn write(&self, expected: &Token, change: Change) -> Result<Token, LedgerError> {
+        self.inner.write(expected, change)
     }
 
-    fn deletability(&self, kind: &Kind, live: &Live) -> Deletability {
-        self.fake.deletability(kind, live)
+    fn write_fenced(
+        &self,
+        fence: Fence,
+        expected: &Token,
+        change: Change,
+    ) -> Result<Token, LedgerError> {
+        self.inner.write_fenced(fence, expected, change)
     }
 
-    fn stamp_mode(&self, kind: &Kind) -> StampMode {
-        self.fake.stamp_mode(kind)
+    fn acquire(&self, holder: &str, ttl: Duration) -> Result<Lease, LeaseError> {
+        self.inner.acquire(holder, ttl)
     }
 
-    fn observe(
-        &mut self,
-        node: &Node,
-        hint: Option<&PhysicalId>,
-    ) -> Result<Observation, ProviderError> {
-        (self.on_observe)();
-        let observed = self.fake.observe(node, hint);
-        self.forgot();
-        observed
+    fn renew(&self, fence: Fence, ttl: Duration) -> Result<Lease, LedgerError> {
+        self.inner.renew(fence, ttl)
     }
 
-    fn create(
-        &mut self,
-        node: &Node,
-        stamp: &ucdk_provider::Stamp,
-    ) -> Result<Created, ProviderError> {
-        self.fake.create(node, stamp)
+    fn release(&self, fence: Fence) -> Result<(), LedgerError> {
+        self.inner.release(fence)
     }
-
-    fn update(&mut self, node: &Node, live: &Live) -> Result<Updated, ProviderError> {
-        self.fake.update(node, live)
-    }
-
-    fn delete(&mut self, kind: &Kind, physical: &PhysicalId) -> Result<(), ProviderError> {
-        self.fake.delete(kind, physical)
-    }
-
-    fn list_owned(&mut self, scope: &OwnerScope) -> Result<Vec<OwnedObject>, ProviderError> {
-        let listed = self.fake.list_owned(scope);
-        self.forgot();
-        listed
-    }
-
-    fn list_stamped(&mut self, scope: &CellScope) -> Result<Vec<OwnedObject>, ProviderError> {
-        let listed = self.fake.list_stamped(scope);
-        self.forgot();
-        listed
-    }
-}
-
-pub fn null_session() -> *mut SessionHandle {
-    ptr::null_mut()
 }

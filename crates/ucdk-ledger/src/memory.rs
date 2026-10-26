@@ -15,7 +15,7 @@ struct Inner {
 }
 
 /// A ledger in memory. A clone shares the document (and the clock) with the original, so two
-/// engines (or an engine and a test) can hold the same ledger.
+/// writers (or a writer and a test) can hold the same ledger.
 #[derive(Debug, Clone)]
 pub struct MemoryLedger {
     inner: Arc<Inner>,
@@ -67,10 +67,7 @@ impl MemoryLedger {
 impl Ledger for MemoryLedger {
     fn read(&self) -> Result<Snapshot, LedgerError> {
         let document = self.document();
-        Ok(Snapshot {
-            token: Token(document.version),
-            records: document.records.clone(),
-        })
+        Ok(document.snapshot(self.inner.clock.now_millis()))
     }
 
     fn write(&self, expected: &Token, change: Change) -> Result<Token, LedgerError> {

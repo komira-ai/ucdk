@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""A session: one provider, one ledger, one cell, and the five verbs."""
+"""A session: one ledger, and the verb that shows it."""
 
 from typing import Optional, Union
 from pathlib import Path
@@ -8,16 +8,15 @@ from ._library import Library
 from .errors import SessionClosed
 from .generated._wire import Message
 from .generated import ucdk_api_v1 as api
-from .generated import ucdk_resource_v1 as proto
 
 
 class Session:
     """A session opened from a `SessionConfig`.
 
-    A session runs one call at a time; a call blocks until the engine returns and releases the
-    GIL while it does, so run it on a worker thread where blocking matters. A refusal or a
-    failed run is data in the returned `Outcome`; an exception is raised only when the call
-    itself did not work (see `ucdk.errors`).
+    A session runs one call at a time; a call blocks until the library returns and releases the
+    GIL while it does, so run it on a worker thread where blocking matters. A ledger that cannot
+    be read is data in the returned `Outcome`; an exception is raised only when the call itself
+    did not work (see `ucdk.errors`).
     """
 
     def __init__(
@@ -56,44 +55,13 @@ class Session:
             raise SessionClosed("the session is closed")
         return self._library.call(verb, self._handle, request.encode())
 
-    def load_catalog(self, resources: proto.ResourceList) -> api.CatalogResponse:
-        """Validates the list and lowers it to nodes; reads nothing and changes nothing."""
-        return api.CatalogResponse.decode(self._call("load_catalog", resources))
+    def ledger_show(self) -> api.Outcome:
+        """Shows the session's ledger; takes no lease and changes no file.
 
-    def plan(self, resources: proto.ResourceList, mode: api.Mode = api.Mode.APPLY) -> api.Outcome:
-        """Observes the world and plans; changes nothing."""
-        return api.Outcome.decode(
-            self._call("plan", api.PlanRequest(resources=resources, mode=mode))
-        )
-
-    def apply(
-        self, resources: proto.ResourceList, plan_hash: str, rollback: bool = False
-    ) -> api.Outcome:
-        """Applies the plan the approver pinned by its hash; refused if the world's plan differs."""
-        return api.Outcome.decode(
-            self._call(
-                "apply",
-                api.ApplyRequest(resources=resources, plan_hash=plan_hash, rollback=rollback),
-            )
-        )
-
-    def destroy(self, resources: proto.ResourceList, plan_hash: str) -> api.Outcome:
-        """Removes what the list names, under the destroy plan the approver pinned."""
-        return api.Outcome.decode(
-            self._call("destroy", api.DestroyRequest(resources=resources, plan_hash=plan_hash))
-        )
-
-    def leaks(self) -> api.Outcome:
-        """Compares the cell's stamped objects with the ledger and changes nothing.
-
-        `outcome.leaks.leaks` lists the objects that carry the cell's stamp and have no ledger
-        record; `outcome.exit` is `EXIT_CLASS_LEAKS` (8) when there are any. A stamp never
-        authorises a delete: nothing is removed.
+        `outcome.ledger_show` holds the document: its `token`, the highest `fence`, the `lease`
+        (absent when none is recorded: `lease.state` is by the session's clock and `lease.yours`
+        says whether it names the session's holder) and the `records` in path order. A ledger
+        that cannot be opened or read (a file that is missing, corrupt or of a newer major) is
+        `outcome.error` with `outcome.exit` `FAILED_NO_EFFECT`.
         """
-        return api.Outcome.decode(self._call("leaks", api.LeaksRequest()))
-
-    def status(self, resources: proto.ResourceList) -> api.Outcome:
-        """Reads the ledger and the live objects; `outcome.status` holds one entry per object."""
-        return api.Outcome.decode(
-            self._call("status", api.StatusRequest(resources=resources))
-        )
+        return api.Outcome.decode(self._call("ledger_show", api.LedgerShowRequest()))

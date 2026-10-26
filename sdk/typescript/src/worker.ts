@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
  * The worker thread of a session: it loads the library, then runs the calls it is sent one at a
- * time, so a call that blocks until the engine returns blocks this thread and not the caller's.
+ * time, so a call that blocks until the library returns blocks this thread and not the caller's.
  */
 
 import { ok } from "node:assert";

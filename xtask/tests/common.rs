@@ -112,7 +112,7 @@ pub fn install_protos(root: &Path) {
         }
     }
     // The crates the protos live in are members of the fixture workspace like any other.
-    for krate in ["ucdk-proto", "ucdk-api"] {
+    for krate in ["ucdk-core", "ucdk-api"] {
         write(
             root,
             &format!("crates/{krate}/Cargo.toml"),

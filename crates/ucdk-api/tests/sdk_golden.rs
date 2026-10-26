@@ -5,10 +5,10 @@
 //! Python half). The files are in `sdk/wire-golden`, with `manifest.txt` naming the message each
 //! one holds (`<file> <message>`), so a golden cannot be read as the wrong message.
 //!
-//! The cases are chosen so that, together, every message and every field of `ucdk.resource.v1`
-//! and `ucdk.api.v1` is written at least once (`ucdk-codegen/tests/golden_coverage.rs` holds
-//! them to it), including the shapes whose bytes depend on the writer: a oneof written where its
-//! lowest arm sits, an `optional` zero, and a map entry whose key or value is the default.
+//! The cases are chosen so that, together, every field of `ucdk.api.v1` is written at least once
+//! (`ucdk-codegen/tests/golden_coverage.rs` holds them to it), including the shapes whose bytes
+//! depend on the writer: a oneof written where its lowest arm sits, a message that is absent, and
+//! a message with no fields.
 //!
 //! To change a golden on purpose, edit the case and run
 //! `cargo test -p ucdk-api --test sdk_golden -- --ignored write_goldens`; the diff of the files is
@@ -17,19 +17,9 @@
 use std::path::PathBuf;
 
 use prost::Message as _;
-use prost_types::Duration;
 use ucdk_api::v1::{
-    ApplyRequest, Blocked, CatalogNode, CatalogResponse, Conflict, ConflictKind, Conflicts,
-    CredentialSource, DestroyRequest, EmptyScope, Error, ErrorCode, ExitClass, Failure, Finding,
-    FindingKind, Findings, Leak, LeaksRequest, LeaksResponse, LeaseHeld, LiveStatus, Mode,
-    ObjectStatus, Outcome, Plan, PlanChanged, PlanHashMismatch, PlanRequest, RecordState, Refusal,
-    Report, RetainReason, Retained, RetainedObject, RollbackFailure, SessionConfig, Standing,
-    StatusRequest, StatusResponse, Step, StepAction, UnhostedKind, UnhostedKinds,
-    UnsupportedStampMode, outcome, refusal,
-};
-use ucdk_proto::v1::{
-    Access, Image, Job, Output, Ref, Resource, ResourceList, Scale, SecretRef, Service, Size,
-    StepOutput, Uses, Value, image, job, r#ref, resource, service, value,
+    Error, ErrorCode, ExitClass, LeaseState, LeaseView, LedgerRecord, LedgerShowRequest,
+    LedgerShowResponse, Outcome, Pair, RecordOrigin, RecordState, SessionConfig, outcome,
 };
 
 struct Case {
@@ -50,458 +40,107 @@ fn text(s: &str) -> String {
     s.to_owned()
 }
 
-fn literal(s: &str) -> Value {
-    Value {
-        v: Some(value::V::Literal(text(s))),
-    }
-}
-
-fn digest_image() -> Image {
-    Image {
-        source: Some(image::Source::Digest(text("sha256:aa"))),
-        platform: text("linux/amd64"),
-    }
-}
-
-fn step_image() -> Image {
-    Image {
-        source: Some(image::Source::Output(StepOutput {
-            step: text("build"),
-            name: text("img"),
-        })),
-        platform: text("linux/amd64"),
-    }
-}
-
-fn secret(name: &str) -> SecretRef {
-    SecretRef {
-        name: text(name),
-        store: Some(text("vault")),
-        version: Some(text("7")),
-    }
-}
-
-fn full_service(exposure: service::Exposure, scale_min: Option<u32>) -> Service {
-    Service {
-        image: Some(step_image()),
-        port: 8080,
-        args: vec![text("--a"), text("--b")],
-        env: [
-            (text("K"), literal("v")),
-            (
-                text("P"),
-                Value {
-                    v: Some(value::V::Param(text("p"))),
-                },
-            ),
-            (
-                text("R"),
-                Value {
-                    v: Some(value::V::Ref(Ref {
-                        resource: text("db"),
-                        output: Some(r#ref::Output::Standard(Output::Url as i32)),
-                    })),
-                },
-            ),
-            (
-                text("N"),
-                Value {
-                    v: Some(value::V::Ref(Ref {
-                        resource: text("db"),
-                        output: Some(r#ref::Output::Named(text("cert"))),
-                    })),
-                },
-            ),
-        ]
-        .into_iter()
-        .collect(),
-        size: Some(Size {
-            cpu_millis: 500,
-            memory_mb: 256,
-        }),
-        scale: Some(Scale {
-            min: scale_min,
-            max: 10,
-        }),
-        health_path: text("/healthz"),
-        request_timeout: Some(Duration {
-            seconds: 30,
-            nanos: 5,
-        }),
-        max_concurrency: 80,
-        exposure: Some(exposure),
-        secret_env: [(text("S"), secret("sec"))].into_iter().collect(),
-    }
-}
-
-fn full_job(trigger: job::Trigger, max_retries: Option<u32>) -> Job {
-    Job {
-        image: Some(digest_image()),
-        args: vec![text("go")],
-        size: Some(Size {
-            cpu_millis: 1000,
-            memory_mb: 512,
-        }),
-        max_retries,
-        timeout: Some(Duration {
-            seconds: -600,
-            nanos: -1,
-        }),
-        env: [(text("E"), literal("e"))].into_iter().collect(),
-        secret_env: [(text("T"), secret("tok"))].into_iter().collect(),
-        trigger: Some(trigger),
-    }
-}
-
-fn uses(target: &str) -> Uses {
-    Uses {
-        target: Some(Ref {
-            resource: text(target),
-            output: None,
-        }),
-        access: Access::Call as i32,
-    }
-}
-
-fn retained() -> Retained {
-    Retained {
-        reason: RetainReason::Undeletable as i32,
-        detail: text("held by the provider"),
-    }
-}
-
-fn report() -> Report {
-    Report {
-        created: vec![text("a/run"), text("b/run")],
-        updated: vec![text("c/run")],
-        resumed: vec![text("d/run")],
-        deleted: vec![text("e/run")],
-        reaped: vec![text("f/run")],
-        retained: vec![RetainedObject {
-            path: text("g/run"),
-            retained: Some(retained()),
-        }],
-        converging: vec![text("h/run")],
-        failed: vec![text("i/run")],
-        blocked_by_failed: vec![Blocked {
-            path: text("j/run"),
-            producer: text("i/run"),
-        }],
-        rolled_back: vec![text("k/run")],
-        rollback_failed: vec![RollbackFailure {
-            path: text("l/run"),
-            message: text("gone"),
-        }],
-        leaks: vec![leak()],
-        leak_sweep_failed: Some(error()),
-    }
-}
-
-fn leak() -> Leak {
-    Leak {
-        kind: text("service"),
-        physical_id: text("svc-0001"),
-        name: text("ghost-run"),
-        owner: text("ghost"),
-        node: text("abcdefghijklmnopqrstuvwxyz"),
-    }
-}
-
-fn error() -> Error {
+fn error(code: ErrorCode, message: &str) -> Error {
     Error {
-        code: ErrorCode::Provider as i32,
-        message: text("the provider said no"),
+        code: code as i32,
+        message: text(message),
     }
 }
 
-fn finding() -> Finding {
-    Finding {
-        resource: text("web"),
-        field: text("service.env.DB_URL"),
-        kind: FindingKind::UnboundRef as i32,
-        message: text("db is not in the list"),
-    }
-}
-
-fn refused(reason: refusal::Reason) -> Outcome {
-    Outcome {
-        result: Some(outcome::Result::Refused(Refusal {
-            reason: Some(reason),
-            message: text("refused"),
-        })),
-        exit: ExitClass::Refused as i32,
+/// A ledger document that sets every field of the response, with the lease as given.
+fn response(lease: Option<LeaseView>) -> LedgerShowResponse {
+    LedgerShowResponse {
+        token: text("v7"),
+        fence: 3,
+        lease,
+        records: vec![LedgerRecord {
+            path: text("app/run"),
+            kind: text("service"),
+            name: text("app-run"),
+            origin: RecordOrigin::Adopted as i32,
+            state: RecordState::Reaping as i32,
+            physical: text("run-1"),
+            deps: vec![text("app/db"), text("app/cache")],
+            outputs: vec![
+                Pair {
+                    key: text("HOST"),
+                    value: text("run-host"),
+                },
+                Pair {
+                    key: text("PORT"),
+                    value: text("8080"),
+                },
+            ],
+        }],
     }
 }
 
 fn cases() -> Vec<Case> {
-    let resources = ResourceList {
-        resource: vec![
-            Resource {
-                id: text("web"),
-                uses: vec![uses("db")],
-                body: Some(resource::Body::Service(full_service(
-                    service::Exposure::Public(service::Public {}),
-                    Some(0),
-                ))),
-            },
-            Resource {
-                id: text("nightly"),
-                uses: Vec::new(),
-                body: Some(resource::Body::Job(full_job(
-                    job::Trigger::Schedule(job::Schedule {
-                        cron: text("0 * * * *"),
-                        timezone: text("UTC"),
-                    }),
-                    Some(3),
-                ))),
-            },
-        ],
-    };
-    let plan = Plan {
-        steps: vec![
-            Step {
-                path: text("web/run"),
-                kind: text("service"),
-                action: StepAction::Create as i32,
-                physical_id: text(""),
-                retained: None,
-            },
-            Step {
-                path: text("old/run"),
-                kind: text("service"),
-                action: StepAction::Retain as i32,
-                physical_id: text("fake-1"),
-                retained: Some(retained()),
-            },
-        ],
-        hash: "ab".repeat(32),
+    let lease = LeaseView {
+        holder: text("ci-7"),
+        expires_ms: 4_600_000,
+        state: LeaseState::Lapsing as i32,
+        yours: true,
     };
     vec![
-        case("resource_list", "ucdk.resource.v1.ResourceList", &resources),
-        case(
-            "service_internal",
-            "ucdk.resource.v1.Service",
-            &full_service(service::Exposure::Internal(service::Internal {}), None),
-        ),
-        case(
-            "job_on_demand",
-            "ucdk.resource.v1.Job",
-            &full_job(job::Trigger::OnDemand(job::OnDemand {}), None),
-        ),
-        // A map entry whose key and value are the default is written as an empty entry; a
-        // service with no fields at all is no bytes.
-        case(
-            "map_defaults",
-            "ucdk.resource.v1.Service",
-            &Service {
-                env: [(text(""), Value { v: None })].into_iter().collect(),
-                secret_env: [(text(""), SecretRef::default())].into_iter().collect(),
-                ..Service::default()
-            },
-        ),
         case(
             "session_config",
             "ucdk.api.v1.SessionConfig",
             &SessionConfig {
-                provider: text("fake"),
-                provider_options: [(text("region"), text("r1")), (text("a"), text("b"))]
-                    .into_iter()
-                    .collect(),
                 ledger_kind: text("file"),
                 ledger_location: text("/var/ucdk/ledger"),
-                cell: text("machine/cell/uid"),
-                credentials: CredentialSource::Profile as i32,
-                profile: text("work"),
                 holder: text("ci-7"),
                 test_clock_ms: 2_000_000,
             },
         ),
         case(
-            "plan_request",
-            "ucdk.api.v1.PlanRequest",
-            &PlanRequest {
-                resources: Some(resources.clone()),
-                mode: Mode::Destroy as i32,
-            },
-        ),
-        case(
-            "apply_request",
-            "ucdk.api.v1.ApplyRequest",
-            &ApplyRequest {
-                resources: Some(resources.clone()),
-                plan_hash: "cd".repeat(32),
-                rollback: true,
-            },
-        ),
-        case(
-            "destroy_request",
-            "ucdk.api.v1.DestroyRequest",
-            &DestroyRequest {
-                resources: Some(resources.clone()),
-                plan_hash: "cd".repeat(32),
-            },
-        ),
-        case(
-            "status_request",
-            "ucdk.api.v1.StatusRequest",
-            &StatusRequest {
-                resources: Some(resources),
-            },
-        ),
-        case(
-            "leaks_request",
-            "ucdk.api.v1.LeaksRequest",
-            &LeaksRequest {},
-        ),
-        case(
-            "outcome_planned",
-            "ucdk.api.v1.Outcome",
-            &Outcome {
-                result: Some(outcome::Result::Planned(plan)),
-                exit: ExitClass::Done as i32,
-            },
-        ),
-        case(
-            "outcome_done",
-            "ucdk.api.v1.Outcome",
-            &Outcome {
-                result: Some(outcome::Result::Done(report())),
-                exit: ExitClass::Done as i32,
-            },
-        ),
-        case(
-            "outcome_refused_findings",
-            "ucdk.api.v1.Outcome",
-            &refused(refusal::Reason::Findings(Findings {
-                findings: vec![finding()],
-            })),
-        ),
-        case(
-            "outcome_refused_conflicts",
-            "ucdk.api.v1.Outcome",
-            &refused(refusal::Reason::Conflicts(Conflicts {
-                conflicts: vec![Conflict {
-                    path: text("web/run"),
-                    kind: ConflictKind::OtherTool as i32,
-                    marker: text("other-tool"),
-                    message: text("owned by another tool"),
-                }],
-            })),
-        ),
-        case(
-            "outcome_refused_empty_scope",
-            "ucdk.api.v1.Outcome",
-            &refused(refusal::Reason::EmptyScope(EmptyScope {})),
-        ),
-        case(
-            "outcome_refused_plan_hash_mismatch",
-            "ucdk.api.v1.Outcome",
-            &refused(refusal::Reason::PlanHashMismatch(PlanHashMismatch {
-                approved: "aa".repeat(32),
-                plan: "bb".repeat(32),
-            })),
-        ),
-        case(
-            "outcome_refused_plan_changed",
-            "ucdk.api.v1.Outcome",
-            &refused(refusal::Reason::PlanChanged(PlanChanged {
-                approved: "aa".repeat(32),
-                now: "bb".repeat(32),
-            })),
-        ),
-        case(
-            "outcome_refused_unsupported_stamp_mode",
-            "ucdk.api.v1.Outcome",
-            &refused(refusal::Reason::UnsupportedStampMode(
-                UnsupportedStampMode {
-                    paths: vec![text("web/run")],
-                },
-            )),
-        ),
-        // The arms numbered above the message field: written first, as prost writes them.
-        case(
-            "outcome_refused_unhosted_kinds",
-            "ucdk.api.v1.Outcome",
-            &refused(refusal::Reason::UnhostedKinds(UnhostedKinds {
-                kinds: vec![UnhostedKind {
-                    path: text("batch/run"),
-                    kind: text("job"),
-                }],
-            })),
-        ),
-        case(
-            "outcome_refused_lease_held",
-            "ucdk.api.v1.Outcome",
-            &refused(refusal::Reason::LeaseHeld(LeaseHeld {
-                holder: text("ci-7"),
-                remaining_ms: 95_000,
-            })),
-        ),
-        case(
-            "outcome_failed",
-            "ucdk.api.v1.Outcome",
-            &Outcome {
-                result: Some(outcome::Result::Failed(Failure {
-                    report: Some(report()),
-                    at: Some(text("web/run")),
-                    error: Some(error()),
-                })),
-                exit: ExitClass::FailedChanged as i32,
-            },
+            "error",
+            "ucdk.api.v1.Error",
+            &error(ErrorCode::Ledger, "the ledger is corrupt"),
         ),
         // Arm 6 sits above the exit field (5) in the message but is written before it.
         case(
             "outcome_invalid",
             "ucdk.api.v1.Outcome",
             &Outcome {
-                result: Some(outcome::Result::Invalid(error())),
+                result: Some(outcome::Result::Invalid(error(
+                    ErrorCode::InvalidRequest,
+                    "the request is not valid",
+                ))),
                 exit: ExitClass::Usage as i32,
             },
         ),
+        // A message with no fields is no bytes.
         case(
-            "outcome_status",
+            "ledger_show_request",
+            "ucdk.api.v1.LedgerShowRequest",
+            &LedgerShowRequest {},
+        ),
+        case(
+            "ledger_show_response",
+            "ucdk.api.v1.LedgerShowResponse",
+            &response(Some(lease)),
+        ),
+        // The lease is absent here, so that its presence is exercised both ways.
+        case(
+            "outcome_ledger_show",
             "ucdk.api.v1.Outcome",
             &Outcome {
-                result: Some(outcome::Result::Status(StatusResponse {
-                    objects: vec![ObjectStatus {
-                        path: text("web/run"),
-                        kind: text("service"),
-                        record: Some(RecordState::Confirmed as i32),
-                        live: Some(LiveStatus::Ready as i32),
-                        standing: Standing::Agrees as i32,
-                        outputs: [(text("URL"), text("https://web.example.com"))]
-                            .into_iter()
-                            .collect(),
-                    }],
-                })),
+                result: Some(outcome::Result::LedgerShow(response(None))),
                 exit: ExitClass::Done as i32,
             },
         ),
         case(
-            "outcome_leaks",
+            "outcome_error",
             "ucdk.api.v1.Outcome",
             &Outcome {
-                result: Some(outcome::Result::Leaks(LeaksResponse {
-                    leaks: vec![leak()],
-                })),
-                exit: ExitClass::Leaks as i32,
+                result: Some(outcome::Result::Error(error(
+                    ErrorCode::Ledger,
+                    "the ledger is corrupt",
+                ))),
+                exit: ExitClass::FailedNoEffect as i32,
             },
         ),
-        case(
-            "catalog_response",
-            "ucdk.api.v1.CatalogResponse",
-            &CatalogResponse {
-                nodes: vec![CatalogNode {
-                    path: text("web/run"),
-                    kind: text("service"),
-                    wanted: true,
-                    deps: vec![text("db/run")],
-                }],
-                findings: vec![finding()],
-                exit: ExitClass::Refused as i32,
-            },
-        ),
-        case("error", "ucdk.api.v1.Error", &error()),
     ]
 }
 
@@ -548,10 +187,29 @@ fn the_golden_files_are_the_bytes_the_messages_encode_to() {
 #[test]
 fn the_goldens_decode_back_to_messages_that_encode_to_the_same_bytes() {
     // The Rust side of the round trip: what the other SDKs are held to.
-    let resource = ResourceList::decode(cases()[0].bytes.as_slice()).expect("decodes");
-    assert_eq!(resource.encode_to_vec(), cases()[0].bytes);
-    let outcome = Outcome::decode(cases()[9].bytes.as_slice()).expect("decodes");
-    assert_eq!(outcome.encode_to_vec(), cases()[9].bytes);
+    let bytes_of = |file: &str| {
+        cases()
+            .into_iter()
+            .find(|c| c.file == file)
+            .expect("a case")
+            .bytes
+    };
+    let shown = bytes_of("outcome_ledger_show");
+    let outcome = Outcome::decode(shown.as_slice()).expect("decodes");
+    assert_eq!(outcome.encode_to_vec(), shown);
+    assert!(matches!(
+        outcome.result,
+        Some(outcome::Result::LedgerShow(LedgerShowResponse {
+            lease: None,
+            ..
+        }))
+    ));
+    let empty = bytes_of("ledger_show_request");
+    assert!(empty.is_empty());
+    assert_eq!(
+        LedgerShowRequest::decode(empty.as_slice()).expect("decodes"),
+        LedgerShowRequest {}
+    );
 }
 
 #[test]

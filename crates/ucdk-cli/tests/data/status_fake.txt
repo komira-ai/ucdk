@@ -1,6 +1,0 @@
-ucdk status
-provider: fake
-  example-db/run [service] record: confirmed, live: ready, agrees
-  example-svc/public [public] record: confirmed, live: ready, agrees
-  example-svc/run [service] record: confirmed, live: ready, agrees
-3 objects

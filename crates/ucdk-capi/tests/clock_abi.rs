@@ -9,135 +9,104 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::{call, fake_config, list_of, open, service_of};
+use common::{call, file_config, open};
 use prost::Message as _;
-use ucdk_api::v1::{self, ApplyRequest, ExitClass, Mode, Outcome, PlanRequest, outcome};
-use ucdk_capi::{OK, ucdk_apply, ucdk_plan, ucdk_session_close};
+use ucdk_api::v1::{ExitClass, LeaseState, LeaseView, LedgerShowRequest, Outcome, outcome};
+use ucdk_capi::{OK, ucdk_ledger_show, ucdk_session_close};
 use ucdk_ledger::{Clock, FileLedger, Ledger as _, ManualClock};
-use ucdk_proto::v1::ResourceList;
 
-fn planned_hash(answer: &Outcome) -> String {
-    match &answer.result {
-        Some(outcome::Result::Planned(plan)) => plan.hash.clone(),
-        other => panic!("not a plan: {other:?}"),
-    }
-}
-
-fn close(session: *mut ucdk_capi::SessionHandle) {
-    ucdk_session_close(session);
-}
-
-/// A file ledger in a fresh directory of its own that `holder` leased for `ttl` before the
-/// session opens it, on `clock`.
-fn file_ledger_leased_by(name: &str, holder: &str, ttl: Duration, clock: Arc<dyn Clock>) -> String {
-    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("scratch dir");
-    let location = dir.join("ledger").to_string_lossy().into_owned();
-    let ledger = FileLedger::open_with_clock(&location, clock).expect("open");
-    ledger.acquire(holder, ttl).expect("acquire");
-    location
-}
-
-/// The outcome of planning `list` and applying it under that plan's hash through a session on
-/// the file ledger at `location`.
-fn apply_through_the_abi(location: &str, list: &ResourceList, now_ms: u64) -> Outcome {
-    apply_through_the_abi_as(location, list, "", now_ms)
-}
-
-/// When `ci-7` took the lease in these tests, and for how long; and the times the session sees.
+/// When `ci-7` took the lease in these tests, and for how long; and the times a session sees.
 const GRANTED_MS: u64 = 1_000_000;
 const LEASE: Duration = Duration::from_secs(3600);
-const WHILE_HELD_MS: u64 = GRANTED_MS + 1_000;
-const AFTER_LAPSE_MS: u64 = GRANTED_MS + 3_600_000 + 5_000;
+const EXPIRES_MS: u64 = GRANTED_MS + 3_600_000;
+const SKEW_MS: u64 = 5_000;
 
-/// [`apply_through_the_abi`] in a session whose runs take the lease as `holder` (empty: unnamed).
-fn apply_through_the_abi_as(
-    location: &str,
-    list: &ResourceList,
+/// A file ledger in a fresh directory of its own that `holder` leased for `ttl` on `clock`.
+fn file_ledger_leased_by(
+    scratch: &common::Scratch,
     holder: &str,
-    now_ms: u64,
-) -> Outcome {
-    let mut config = fake_config();
+    ttl: Duration,
+    clock: Arc<dyn Clock>,
+) -> String {
+    let location = scratch.file();
+    let ledger = FileLedger::open_with_clock(&location, clock).expect("open");
+    ledger.acquire(holder, ttl).expect("acquire");
+    drop(ledger);
+    // The lock file is the writer's, not what the sessions under test do.
+    std::fs::remove_file(scratch.dir().join("ledger.ucdk.lock")).expect("remove the lock file");
+    location.to_string_lossy().into_owned()
+}
+
+/// What a session on the ledger at `location`, holder `holder` and the clock fixed at `now_ms`,
+/// shows of the lease.
+fn lease_seen(location: &str, holder: &str, now_ms: u64) -> LeaseView {
+    let mut config = file_config(std::path::Path::new(location));
     config.holder = holder.to_owned();
     config.test_clock_ms = now_ms;
-    config.ledger_kind = "file".to_owned();
-    config.ledger_location = location.to_owned();
     let opened = open(&config);
     assert_eq!(opened.status, OK);
-    let session = opened.session;
-    let plan = PlanRequest {
-        resources: Some(list.clone()),
-        mode: Mode::Apply as i32,
-    };
-    let planned = call(ucdk_plan, session, &plan.encode_to_vec());
-    let hash = planned_hash(&Outcome::decode(planned.bytes.as_slice()).expect("an outcome"));
-    let apply = ApplyRequest {
-        resources: Some(list.clone()),
-        plan_hash: hash,
-        rollback: false,
-    };
-    let reply = call(ucdk_apply, session, &apply.encode_to_vec());
+    let reply = call(
+        ucdk_ledger_show,
+        opened.session,
+        &LedgerShowRequest {}.encode_to_vec(),
+    );
     assert_eq!(reply.status, OK);
-    close(session);
-    Outcome::decode(reply.bytes.as_slice()).expect("an outcome")
-}
-
-/// Proves: an apply through the ABI on a ledger whose lease another holder has is refused as
-/// data (the refusal names the holder, the exit class is REFUSED), the same as the command
-/// line's, and creates nothing; once that holder's lease has lapsed, the same call is let in.
-/// Catches an ABI that reports the lease as a status code, or one that ignores a lease on file.
-#[test]
-fn an_apply_on_a_ledger_leased_to_another_holder_is_refused_as_data_until_it_lapses() {
-    let list = list_of(vec![service_of("a-svc", 80)]);
-    let live = file_ledger_leased_by(
-        "abi-leased",
-        "ci-7",
-        LEASE,
-        Arc::new(ManualClock::at(GRANTED_MS)),
-    );
-    let answer = apply_through_the_abi(&live, &list, WHILE_HELD_MS);
-    assert_eq!(answer.exit, ExitClass::Refused as i32, "{answer:?}");
-    let Some(outcome::Result::Refused(why)) = answer.result else {
-        panic!("not refused: {answer:?}");
-    };
-    let Some(v1::refusal::Reason::LeaseHeld(held)) = why.reason else {
-        panic!("not a lease refusal: {why:?}");
-    };
-    assert_eq!(held.holder, "ci-7");
-    assert_eq!(held.remaining_ms, 3_600_000 - 1_000 + 5_000);
-
-    // The session's clock reads past the lease and the skew bound: the holder is taken over.
-    let dead = file_ledger_leased_by(
-        "abi-lapsed",
-        "ci-7",
-        LEASE,
-        Arc::new(ManualClock::at(GRANTED_MS)),
-    );
-    let answer = apply_through_the_abi(&dead, &list, AFTER_LAPSE_MS);
+    ucdk_session_close(opened.session);
+    let answer = Outcome::decode(reply.bytes.as_slice()).expect("an outcome");
     assert_eq!(answer.exit, ExitClass::Done as i32, "{answer:?}");
+    let Some(outcome::Result::LedgerShow(response)) = answer.result else {
+        panic!("not a ledger show: {answer:?}");
+    };
+    response.lease.expect("the lease of the file")
 }
 
-/// Proves: a session whose config names the holder a lease is in takes that lease again at once
-/// and applies, where an unnamed session, or one with another name, is refused. Catches a
-/// config holder that is ignored (each run then gets a name no earlier run had).
+/// Proves: a ledger show reports another holder's lease as live before it expires, lapsing from
+/// the expiry until the skew bound after it, and lapsed after, each by the clock the session was
+/// opened with, and never reports it as the session's own. Catches a show that reads the wall
+/// clock, ignores `test_clock_ms`, or draws the lapsing line somewhere else than the ledger does.
 #[test]
-fn a_session_named_as_the_holder_of_a_lease_reclaims_it() {
-    let list = list_of(vec![service_of("a-svc", 80)]);
+fn ledger_show_reports_another_holders_lease_live_then_lapsing_then_lapsed_by_the_session_clock() {
+    let scratch = common::Scratch::new("clock-states");
     let leased = file_ledger_leased_by(
-        "abi-reclaim",
+        &scratch,
         "ci-7",
         LEASE,
         Arc::new(ManualClock::at(GRANTED_MS)),
     );
-    for holder in ["", "ci-8"] {
-        let answer = apply_through_the_abi_as(&leased, &list, holder, WHILE_HELD_MS);
-        assert_eq!(
-            answer.exit,
-            ExitClass::Refused as i32,
-            "{holder:?}: {answer:?}"
-        );
+    for (now_ms, state) in [
+        (GRANTED_MS + 1_000, LeaseState::Live),
+        (EXPIRES_MS - 1, LeaseState::Live),
+        (EXPIRES_MS, LeaseState::Lapsing),
+        (EXPIRES_MS + SKEW_MS - 1, LeaseState::Lapsing),
+        (EXPIRES_MS + SKEW_MS, LeaseState::Lapsed),
+    ] {
+        let lease = lease_seen(&leased, "ci-8", now_ms);
+        assert_eq!(lease.state, state as i32, "at {now_ms}");
+        assert_eq!(lease.holder, "ci-7");
+        assert_eq!(lease.expires_ms, EXPIRES_MS);
+        assert!(!lease.yours, "another holder's lease is not the session's");
     }
-    let answer = apply_through_the_abi_as(&leased, &list, "ci-7", WHILE_HELD_MS);
-    assert_eq!(answer.exit, ExitClass::Done as i32, "{answer:?}");
+}
+
+/// Proves: a session whose config names the holder of the lease sees it as its own (`yours`), at
+/// every state, and a session with another name or none does not. Catches a config holder that is
+/// ignored by the show.
+#[test]
+fn a_session_named_as_the_holder_of_a_lease_sees_it_as_its_own() {
+    let scratch = common::Scratch::new("clock-yours");
+    let leased = file_ledger_leased_by(
+        &scratch,
+        "ci-7",
+        LEASE,
+        Arc::new(ManualClock::at(GRANTED_MS)),
+    );
+    for now_ms in [GRANTED_MS + 1_000, EXPIRES_MS, EXPIRES_MS + SKEW_MS] {
+        assert!(lease_seen(&leased, "ci-7", now_ms).yours, "at {now_ms}");
+        for other in ["ci-8", ""] {
+            assert!(
+                !lease_seen(&leased, other, now_ms).yours,
+                "{other:?} at {now_ms}"
+            );
+        }
+    }
 }

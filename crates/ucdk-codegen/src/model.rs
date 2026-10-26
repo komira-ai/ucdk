@@ -287,3 +287,40 @@ pub fn imports(package: &str, module: &Module) -> BTreeSet<String> {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use protox::Compiler;
+
+    use super::*;
+
+    const USES: &str = "example/uses/v1/uses.proto";
+
+    fn uses_pool() -> DescriptorPool {
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/proto");
+        let mut compiler = Compiler::new([fixtures]).expect("a compiler");
+        compiler.include_imports(true);
+        compiler.open_file(USES).expect("the fixture compiles");
+        compiler.descriptor_pool()
+    }
+
+    #[test]
+    fn an_import_adds_the_other_module() {
+        let modules = collect(&uses_pool(), &[USES]).expect("collects");
+        let packages: Vec<&str> = modules.keys().map(String::as_str).collect();
+        assert_eq!(packages, ["example.other.v1", "example.uses.v1"]);
+        // The package that is used holds the message and the enum; it imports nothing.
+        let other = &modules["example.other.v1"];
+        assert_eq!(other.messages.len(), 1);
+        assert_eq!(other.enums.len(), 1);
+        assert!(imports("example.other.v1", other).is_empty());
+        // The package that uses it imports it once, however many fields refer to it.
+        let uses = &modules["example.uses.v1"];
+        assert_eq!(
+            imports("example.uses.v1", uses),
+            BTreeSet::from(["example_other_v1".to_owned()])
+        );
+    }
+}

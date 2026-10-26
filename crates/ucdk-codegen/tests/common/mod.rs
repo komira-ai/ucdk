@@ -64,6 +64,9 @@ pub fn pool_of(source: &str) -> DescriptorPool {
 
 pub const SHAPES: &str = "example/shapes/v1/shapes.proto";
 
+/// A fixture package that imports another one (`example/other/v1/other.proto`).
+pub const USES: &str = "example/uses/v1/uses.proto";
+
 pub fn shapes_pool() -> DescriptorPool {
     pool_with(&[], SHAPES, true)
 }

@@ -1,5 +1,0 @@
-ucdk plan
-provider: fake
-mode: destroy
-plan-hash: c004a73f9a37915eb7e5dc1743beeb60b64406a0aaa86004c5300d6ace56feea
-no changes

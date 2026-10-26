@@ -1,0 +1,39 @@
+ucdk-ledger 1.1
+version 5
+fence 0
+record app/db
+kind service
+name app-db
+origin created
+state confirmed
+physical db-1
+output HOST db-host
+output PORT 5432
+record app/old
+kind job
+name app-old
+origin created
+state reaping
+physical old-1
+record app/pending
+kind job
+name app-pending
+origin created
+state intent
+record app/run
+kind service
+name app-run
+origin created
+state confirmed
+physical run-1
+dep app/db
+output URL run-url
+record shared/found
+kind volume
+name shared-found
+origin adopted
+state confirmed
+physical found-1
+output EMPTY %
+output NOTE two%20words
+end 5 734cf567d0037ea9

@@ -1,32 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // The ucdk API (`ucdk.api.v1`): everything that crosses between a host (the command line, a
-// library, an SDK) and the core, other than the resources themselves, which stay in
-// `ucdk.resource.v1`. Requests carry a resource list; responses carry what the engine answered
-// and the exit class of that answer.
+// library, an SDK) and the core. Requests go in, and what the core answered comes back as an
+// `Outcome` that carries the exit class of the answer.
 //
 // The messages are data. A response is never parsed for its text: `message` fields are for a
-// person. Numbers are a promise; a field is added, never renumbered.
+// person. Numbers are a promise; a field is added, never renumbered, and a number that is retired
+// is `reserved`.
 
 syntax = "proto3";
 
 package ucdk.api.v1;
 
-import "ucdk/resource/v1/resource.proto";
-
-// What a plan is for.
-enum Mode {
-  MODE_UNSPECIFIED = 0;
-  // Make the world match the list.
-  MODE_APPLY = 1;
-  // Remove everything the list names.
-  MODE_DESTROY = 2;
-}
-
-// How a run ended, as the one table every host reports. The numbers are the command line's exit
+// How a call ended, as the one table every host reports. The numbers are the command line's exit
 // codes. 0 is success; usage (2) is a request the host could not understand.
 enum ExitClass {
-  // Done, or planned; including "no changes" and a run that left an object converging or failed
-  // (the report says so).
+  // Done, including "no changes".
   EXIT_CLASS_DONE = 0;
   // The request was malformed: a bad flag, or bytes that are not the expected message.
   EXIT_CLASS_USAGE = 2;
@@ -34,407 +22,136 @@ enum ExitClass {
   EXIT_CLASS_REFUSED = 3;
   // Failed, and nothing was changed: safe to run again.
   EXIT_CLASS_FAILED_NO_EFFECT = 4;
-  // Failed after changing something: plan again before running again.
+  // Failed after changing something: look again before running again.
   EXIT_CLASS_FAILED_CHANGED = 6;
-  // A leak sweep found objects that carry our stamp and have no ledger record. Only the leaks
-  // verb ends this way; an apply that finds leaks reports them and is done.
+  // A sweep found objects that the ledger does not account for.
   EXIT_CLASS_LEAKS = 8;
-}
-
-// Where the provider finds its credentials. The credentials themselves never appear.
-enum CredentialSource {
-  CREDENTIAL_SOURCE_UNSPECIFIED = 0;
-  // The named profile (`SessionConfig.profile`).
-  CREDENTIAL_SOURCE_PROFILE = 1;
-  // The platform's default chain.
-  CREDENTIAL_SOURCE_DEFAULT_CHAIN = 2;
-  // An identity the provider resolves itself.
-  CREDENTIAL_SOURCE_PROVIDER_RESOLVED = 3;
 }
 
 // What a session is opened with.
 message SessionConfig {
-  // The provider's name, such as `fake`.
-  string provider = 1;
-  map<string, string> provider_options = 2;
+  reserved 1, 2, 5, 6, 7;
+  reserved "provider", "provider_options", "cell", "credentials", "profile";
+
   // The kind of ledger and where it is.
   string ledger_kind = 3;
   string ledger_location = 4;
-  // The cell identity every stamp of the session carries.
-  string cell = 5;
-  CredentialSource credentials = 6;
-  // The profile, when `credentials` is PROFILE.
-  string profile = 7;
-  // The name the session's runs take the ledger lease as. A run is refused while another holder
-  // has the lease; the holder a lease names takes it again at once, so naming it lets a rerun
-  // reclaim a lease an earlier run left behind. Empty: a new name for every run.
+  // The name a lease is taken as, and the name a lease is reported as `yours` for. A lease
+  // names its holder, and the holder it names takes it again at once. Empty: no lease is yours.
   string holder = 8;
-  // For tests: when not zero, the ledger times its leases by a clock fixed at this many
-  // milliseconds since the Unix epoch, instead of the wall clock, so a test says when a lease
-  // lapses without waiting or reading the time. Zero: the wall clock. Only a library built with
-  // the `test-clock` feature honours it; every other build refuses a non-zero value as an
-  // invalid argument, because a caller able to fix the clock would defeat the lease.
+  // For tests: when not zero, the ledger is timed by a clock fixed at this many milliseconds
+  // since the Unix epoch, instead of the wall clock, so a test says when a lease lapses without
+  // waiting or reading the time. Zero: the wall clock. Only a library built with the
+  // `test-clock` feature honours it; every other build refuses a non-zero value as an invalid
+  // argument, because a caller able to fix the clock would defeat the lease.
   uint64 test_clock_ms = 9;
-}
-
-// Observe and plan; changes nothing.
-message PlanRequest {
-  ucdk.resource.v1.ResourceList resources = 1;
-  Mode mode = 2;
-}
-
-// Carry out the plan the approver pinned. The core plans the world as it is now and refuses the
-// run unless that plan has `plan_hash`.
-message ApplyRequest {
-  ucdk.resource.v1.ResourceList resources = 1;
-  // 64 lower-case hex digits.
-  string plan_hash = 2;
-  // A failed run deletes what it created.
-  bool rollback = 3;
-}
-
-// Carry out the approved destroy plan, under the same hash rule.
-message DestroyRequest {
-  ucdk.resource.v1.ResourceList resources = 1;
-  string plan_hash = 2;
-}
-
-// Read the ledger and the live objects, and change nothing. The list names the objects to look
-// at besides those the ledger records.
-message StatusRequest {
-  ucdk.resource.v1.ResourceList resources = 1;
-}
-
-// Compare the cell's stamped objects with the ledger, and change nothing. It needs no resource
-// list: it is about the cell, not about a file.
-message LeaksRequest {}
-
-enum StepAction {
-  STEP_ACTION_UNSPECIFIED = 0;
-  STEP_ACTION_CREATE = 1;
-  STEP_ACTION_UPDATE = 2;
-  STEP_ACTION_NOOP = 3;
-  STEP_ACTION_DELETE = 4;
-  STEP_ACTION_REAP = 5;
-  STEP_ACTION_CONVERGING = 6;
-  STEP_ACTION_KNOWN_AFTER_APPLY = 7;
-  STEP_ACTION_RETAIN = 8;
-}
-
-// Why an object is left alone on purpose.
-enum RetainReason {
-  RETAIN_REASON_UNSPECIFIED = 0;
-  // Its kind holds data.
-  RETAIN_REASON_KEEP = 1;
-  // The provider says it cannot be deleted; `detail` is the provider's reason.
-  RETAIN_REASON_UNDELETABLE = 2;
-  // The list no longer names the owner.
-  RETAIN_REASON_OWNER_NOT_NAMED = 3;
-}
-
-message Retained {
-  RetainReason reason = 1;
-  string detail = 2;
-}
-
-message Step {
-  string path = 1;
-  string kind = 2;
-  StepAction action = 3;
-  // The physical id, for a delete.
-  string physical_id = 4;
-  // Set for a retain.
-  Retained retained = 5;
-}
-
-// The steps of a run, in the order they run, and the hash an approver pins.
-message Plan {
-  repeated Step steps = 1;
-  string hash = 2;
-}
-
-enum ConflictKind {
-  CONFLICT_KIND_UNSPECIFIED = 0;
-  CONFLICT_KIND_FOREIGN = 1;
-  CONFLICT_KIND_STAMP_WITHOUT_RECORD = 2;
-  CONFLICT_KIND_PHYSICAL_ID_MISMATCH = 3;
-  CONFLICT_KIND_STAMP_STRIPPED = 4;
-  CONFLICT_KIND_OTHER_OWNER = 5;
-  CONFLICT_KIND_OTHER_TOOL = 6;
-  CONFLICT_KIND_VANISHED_RETAINED = 7;
-  CONFLICT_KIND_RECORDED_CYCLE = 8;
-}
-
-message Conflict {
-  string path = 1;
-  ConflictKind kind = 2;
-  // The other tool's marker, for OTHER_TOOL.
-  string marker = 3;
-  string message = 4;
-}
-
-enum FindingKind {
-  FINDING_KIND_UNSPECIFIED = 0;
-  FINDING_KIND_BAD_ID = 1;
-  FINDING_KIND_DUPLICATE_ID = 2;
-  FINDING_KIND_MISSING_BODY = 3;
-  FINDING_KIND_MISSING_IMAGE = 4;
-  FINDING_KIND_UNRESOLVED = 5;
-  FINDING_KIND_UNSUPPORTED_PLATFORM = 6;
-  FINDING_KIND_EMPTY_VALUE = 7;
-  FINDING_KIND_ENV_SECRET_OVERLAP = 8;
-  FINDING_KIND_UNBOUND_REF = 9;
-  FINDING_KIND_NO_TARGET = 10;
-  FINDING_KIND_UNSUPPORTED_ACCESS = 11;
-  FINDING_KIND_ACCESS_TO_OUTPUT = 12;
-  FINDING_KIND_MISSING_OUTPUT = 13;
-  FINDING_KIND_NAMED_OUTPUT = 14;
-  FINDING_KIND_UNEXPOSED_OUTPUT = 15;
-  FINDING_KIND_NOT_PORTABLE = 16;
-  FINDING_KIND_CYCLE = 17;
-}
-
-// One problem in a resource list.
-message Finding {
-  string resource = 1;
-  // The field, such as `service.env.DB_URL`; empty when the whole resource is meant.
-  string field = 2;
-  FindingKind kind = 3;
-  string message = 4;
-}
-
-message Findings {
-  repeated Finding findings = 1;
-}
-
-// One node a resource list lowers to.
-message CatalogNode {
-  // `<resource id>/<role>`.
-  string path = 1;
-  string kind = 2;
-  // False for a role the list turns off: the node stays so that its leftovers are found.
-  bool wanted = 3;
-  // The paths of the nodes that must exist first.
-  repeated string deps = 4;
-}
-
-// What loading a resource list found: the nodes in dependency order, or the findings that
-// refuse the list. Reads nothing and changes nothing.
-message CatalogResponse {
-  // Empty when the list is refused.
-  repeated CatalogNode nodes = 1;
-  // Empty when the list lowers.
-  repeated Finding findings = 2;
-  // DONE, or REFUSED when there are findings.
-  ExitClass exit = 3;
-}
-
-message Conflicts {
-  repeated Conflict conflicts = 1;
-}
-
-message EmptyScope {}
-
-message PlanHashMismatch {
-  string approved = 1;
-  string plan = 2;
-}
-
-message PlanChanged {
-  string approved = 1;
-  string now = 2;
-}
-
-message UnsupportedStampMode {
-  repeated string paths = 1;
-}
-
-// A wanted object whose kind the provider does not host.
-message UnhostedKind {
-  string path = 1;
-  string kind = 2;
-}
-
-message UnhostedKinds {
-  repeated UnhostedKind kinds = 1;
-}
-
-// Another run holds the ledger's lease. Nothing was read or written; try again when that run
-// has ended.
-message LeaseHeld {
-  // The identity the other run took the lease as.
-  string holder = 1;
-  // At most this many milliseconds until the lease can be taken, if that run died without
-  // releasing it.
-  uint64 remaining_ms = 2;
-}
-
-// Why a run was refused whole, before anything was changed.
-message Refusal {
-  oneof reason {
-    Findings findings = 1;
-    Conflicts conflicts = 2;
-    EmptyScope empty_scope = 3;
-    PlanHashMismatch plan_hash_mismatch = 4;
-    PlanChanged plan_changed = 5;
-    UnsupportedStampMode unsupported_stamp_mode = 6;
-    UnhostedKinds unhosted_kinds = 8;
-    LeaseHeld lease_held = 9;
-  }
-  string message = 7;
-}
-
-message RetainedObject {
-  string path = 1;
-  Retained retained = 2;
-}
-
-message Blocked {
-  string path = 1;
-  // The resource path whose failure blocks it.
-  string producer = 2;
-}
-
-message RollbackFailure {
-  string path = 1;
-  string message = 2;
-}
-
-// What a run did, by object, in the order it did it.
-message Report {
-  repeated string created = 1;
-  repeated string updated = 2;
-  repeated string resumed = 3;
-  repeated string deleted = 4;
-  repeated string reaped = 5;
-  repeated RetainedObject retained = 6;
-  repeated string converging = 7;
-  repeated string failed = 8;
-  repeated Blocked blocked_by_failed = 9;
-  repeated string rolled_back = 10;
-  repeated RollbackFailure rollback_failed = 11;
-  // The leak sweep an apply ends with: objects that carry the cell's stamp and have no ledger
-  // record. They are reported and left alone; the apply is not failed for them.
-  repeated Leak leaks = 12;
-  // Set when that sweep could not read; the apply still stands.
-  optional Error leak_sweep_failed = 13;
-}
-
-// A live object that carries the cell's stamp and that no ledger record accounts for. The
-// stamp is a claim, not an authority: nothing deletes the object on it.
-message Leak {
-  string kind = 1;
-  string physical_id = 2;
-  // The name the provider shows, without any stamp encoding.
-  string name = 3;
-  // The top-level owner the stamp names.
-  string owner = 4;
-  // The node key the stamp names.
-  string node = 5;
-}
-
-// What a leak sweep found, by physical id. Empty when there are no leaks (the exit class is
-// then DONE; with leaks it is LEAKS).
-message LeaksResponse {
-  repeated Leak leaks = 1;
 }
 
 // Where a ledger record stands.
 enum RecordState {
   RECORD_STATE_UNSPECIFIED = 0;
-  // Written before a create or update; the call may or may not have landed.
+  // Written before an effect; the effect may or may not have landed.
   RECORD_STATE_INTENT = 1;
   RECORD_STATE_CONFIRMED = 2;
-  // Written before a delete; the object may or may not be gone.
+  // Written before the thing is removed; it may or may not be gone.
   RECORD_STATE_REAPING = 3;
 }
 
-// Whether a live object is working.
-enum LiveStatus {
-  LIVE_STATUS_UNSPECIFIED = 0;
-  LIVE_STATUS_READY = 1;
-  LIVE_STATUS_CONVERGING = 2;
-  LIVE_STATUS_FAILED = 3;
-}
-
-// How an object's record and the live object stand against each other.
-enum Standing {
-  STANDING_UNSPECIFIED = 0;
-  // A confirmed record, and the live object it names carries our stamp.
-  STANDING_AGREES = 1;
-  // An intent or reap record and a live object of ours: a later run settles it.
-  STANDING_PENDING = 2;
-  // A record and no live object.
-  STANDING_MISSING = 3;
-  // The list names it; there is no record and no live object.
-  STANDING_NOT_APPLIED = 4;
-  // A live object that is not ours, or ours with no record.
-  STANDING_UNCLAIMED = 5;
-}
-
-// One recorded or named object, as the ledger and the provider show it now.
-message ObjectStatus {
-  string path = 1;
-  string kind = 2;
-  // Absent when the ledger has no record of the object.
-  optional RecordState record = 3;
-  // Absent when the provider shows no such object.
-  optional LiveStatus live = 4;
-  Standing standing = 5;
-  // The non-secret outputs the record holds.
-  map<string, string> outputs = 6;
-}
-
-// What a status found: one entry per object, in path order. An empty list is an empty ledger and
-// a list that names nothing.
-message StatusResponse {
-  repeated ObjectStatus objects = 1;
-}
-
 enum ErrorCode {
+  reserved 1, 4 to 7, 9;
+  reserved "ERROR_CODE_PROVIDER", "ERROR_CODE_NOT_OURS", "ERROR_CODE_STILL_PRESENT",
+      "ERROR_CODE_UNWITNESSED", "ERROR_CODE_OUTPUT_UNKNOWN", "ERROR_CODE_LEASE_LOST";
+
   ERROR_CODE_UNSPECIFIED = 0;
-  ERROR_CODE_PROVIDER = 1;
+  // The ledger could not be opened or read.
   ERROR_CODE_LEDGER = 2;
+  // The ledger is in use by a writer that holds its lock.
   ERROR_CODE_LEDGER_BUSY = 3;
-  ERROR_CODE_NOT_OURS = 4;
-  ERROR_CODE_STILL_PRESENT = 5;
-  ERROR_CODE_UNWITNESSED = 6;
-  ERROR_CODE_OUTPUT_UNKNOWN = 7;
-  // The request was not the expected message, or named a hash that is not one.
+  // The request was not the expected message.
   ERROR_CODE_INVALID_REQUEST = 8;
-  // The run's ledger lease lapsed or was taken over, so the ledger refused its write and the
-  // run stopped. The next run resolves what this one left.
-  ERROR_CODE_LEASE_LOST = 9;
 }
 
-// Why a step failed. `message` is for a person and is not parsed.
+// Why a call made no answer. `message` is for a person and is not parsed.
 message Error {
   ErrorCode code = 1;
   string message = 2;
 }
 
-// A run that stopped at a step.
-message Failure {
-  // What had been done before it stopped, and what a rollback did.
-  Report report = 1;
-  // The object of the step that failed; absent when nothing was started.
-  optional string at = 2;
-  Error error = 3;
+// Show one ledger document as data. The ledger is the session's
+// (`SessionConfig.ledger_kind`, `ledger_location`). A call takes no lease and changes no file.
+message LedgerShowRequest {}
+
+// Where a recorded lease stands by the session's clock.
+enum LeaseState {
+  LEASE_STATE_UNSPECIFIED = 0;
+  // Before it expires: its holder writes, and no other holder is granted it.
+  LEASE_STATE_LIVE = 1;
+  // Expired, but inside the skew bound: its holder may no longer write, and others are still
+  // refused.
+  LEASE_STATE_LAPSING = 2;
+  // Past that: another holder is granted it.
+  LEASE_STATE_LAPSED = 3;
 }
 
-// What the engine answered, and the exit class of the answer.
+enum RecordOrigin {
+  RECORD_ORIGIN_UNSPECIFIED = 0;
+  // This tool made what the record stands for.
+  RECORD_ORIGIN_CREATED = 1;
+  // This tool took it over when it found it.
+  RECORD_ORIGIN_ADOPTED = 2;
+}
+
+// A key and a value. A list of pairs, not a map, so every host prints the same bytes.
+message Pair {
+  string key = 1;
+  string value = 2;
+}
+
+message LeaseView {
+  string holder = 1;
+  // Milliseconds since the Unix epoch, by the ledger's clock.
+  uint64 expires_ms = 2;
+  LeaseState state = 3;
+  // The holder is `SessionConfig.holder`.
+  bool yours = 4;
+}
+
+message LedgerRecord {
+  string path = 1;
+  string kind = 2;
+  string name = 3;
+  RecordOrigin origin = 4;
+  RecordState state = 5;
+  string physical = 6;
+  repeated string deps = 7;
+  // In key order.
+  repeated Pair outputs = 8;
+}
+
+message LedgerShowResponse {
+  // The document's token, as text.
+  string token = 1;
+  // The highest fence ever granted.
+  uint64 fence = 2;
+  // Absent when no lease is recorded.
+  LeaseView lease = 3;
+  // In path order.
+  repeated LedgerRecord records = 4;
+}
+
+// What a call answered, and the exit class of the answer.
 message Outcome {
+  reserved 1 to 4, 7, 8;
+  reserved "planned", "done", "refused", "failed", "status", "leaks";
+
   oneof result {
-    Plan planned = 1;
-    Report done = 2;
-    Refusal refused = 3;
-    Failure failed = 4;
-    // The request was not understood; the exit class is USAGE.
+    // The request decoded and is not valid; the exit class is USAGE.
     Error invalid = 6;
-    // The answer of a status request.
-    StatusResponse status = 7;
-    // The answer of a leaks request.
-    LeaksResponse leaks = 8;
+    // The answer of a ledger show.
+    LedgerShowResponse ledger_show = 9;
+    // The call made no answer for a reason that is not a usage fault: a ledger that could not
+    // be opened or read. The exit class is FAILED_NO_EFFECT.
+    Error error = 10;
   }
   ExitClass exit = 5;
 }

@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-/** A session: one provider, one ledger, one cell, and the five verbs. */
+/** A session: one ledger, and the verb that shows it. */
 
 import { Worker } from "node:worker_threads";
 
 import { AbiMismatch, LibraryError, SessionClosed, errorFor } from "./errors.ts";
 import * as api from "./generated/ucdk_api_v1.ts";
-import * as proto from "./generated/ucdk_resource_v1.ts";
 import type { Verb } from "./library.ts";
 import type { Ready, Reply, Request } from "./protocol.ts";
 
@@ -26,10 +25,10 @@ type Ask = Request extends infer R ? (R extends Request ? Omit<R, "id"> : never)
  * A session opened from a `SessionConfig`.
  *
  * The library is loaded on a worker thread that belongs to the session, and every call is run
- * there: a call blocks until the engine returns, and it blocks the worker, not the caller. The
- * calls of one session run one at a time, in the order they were made. A refusal or a failed run
- * is data in the returned `Outcome`; an error is thrown only when the call itself did not work
- * (see `errors`). Close the session: it holds a thread and a ledger.
+ * there: a call blocks until the library returns, and it blocks the worker, not the caller. The
+ * calls of one session run one at a time, in the order they were made. A ledger that cannot be
+ * read is data in the returned `Outcome`; an error is thrown only when the call itself did not
+ * work (see `errors`). Close the session: it holds a thread.
  */
 export class Session {
   readonly #worker: Worker;
@@ -106,40 +105,16 @@ export class Session {
     return reply.data;
   }
 
-  /** Validates the list and lowers it to nodes; reads nothing and changes nothing. */
-  async loadCatalog(resources: proto.ResourceList): Promise<api.CatalogResponse> {
-    return api.CatalogResponse.decode(await this.#call("load_catalog", resources));
-  }
-
-  /** Observes the world and plans; changes nothing. */
-  async plan(resources: proto.ResourceList, mode: api.Mode = api.Mode.APPLY): Promise<api.Outcome> {
-    return api.Outcome.decode(await this.#call("plan", new api.PlanRequest({ resources, mode })));
-  }
-
-  /** Applies the plan the approver pinned by its hash; refused if the world's plan differs. */
-  async apply(resources: proto.ResourceList, planHash: string, rollback = false): Promise<api.Outcome> {
-    const request = new api.ApplyRequest({ resources, planHash, rollback });
-    return api.Outcome.decode(await this.#call("apply", request));
-  }
-
-  /** Removes what the list names, under the destroy plan the approver pinned. */
-  async destroy(resources: proto.ResourceList, planHash: string): Promise<api.Outcome> {
-    const request = new api.DestroyRequest({ resources, planHash });
-    return api.Outcome.decode(await this.#call("destroy", request));
-  }
-
   /**
-   * Compares the cell's stamped objects with the ledger and changes nothing. `outcome.leaks`
-   * lists the objects that carry the cell's stamp and have no ledger record, and `outcome.exit`
-   * is the leaks class (8) when there are any. A stamp never authorises a delete.
+   * Shows the session's ledger; takes no lease and changes no file. `outcome.ledgerShow` holds
+   * the document: its `token`, the highest `fence`, the `lease` (undefined when none is recorded;
+   * `lease.state` is by the session's clock and `lease.yours` says whether it names the session's
+   * holder) and the `records` in path order. A ledger that cannot be opened or read (a file that
+   * is missing, corrupt or of a newer major) is `outcome.error`, with `outcome.exit`
+   * `FAILED_NO_EFFECT`.
    */
-  async leaks(): Promise<api.Outcome> {
-    return api.Outcome.decode(await this.#call("leaks", new api.LeaksRequest({})));
-  }
-
-  /** Reads the ledger and the live objects; `outcome.status` holds one entry per object. */
-  async status(resources: proto.ResourceList): Promise<api.Outcome> {
-    return api.Outcome.decode(await this.#call("status", new api.StatusRequest({ resources })));
+  async ledgerShow(): Promise<api.Outcome> {
+    return api.Outcome.decode(await this.#call("ledger_show", new api.LedgerShowRequest()));
   }
 }
 
