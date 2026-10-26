@@ -492,7 +492,7 @@ unless the fence is the one it granted last and the lease has not lapsed.
   may disagree. Skew beyond it, or a clock stepped back, is not covered; the fence still refuses
   a holder that was overtaken.
 - **Leasing does not move the token.** A grant, a renewal and a release leave the document's
-  version alone, so a plan made before a run took the lease is still the plan the run checks.
+  version alone, so a token read before the lease was taken stays valid for a write under it.
 - **Unfenced writes.** `Ledger::write` is for a document nobody leases: it is refused as
   `LedgerError::Leased` while a lease is live (or lapsed less than the skew bound ago).
 - **The lease guard.** `LeaseGuard` is the lifecycle of one holder's lease, and takes no clock:
