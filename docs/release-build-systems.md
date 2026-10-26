@@ -71,16 +71,33 @@ Tests (PR 3, `ucdk_release::flags`, 11): `flags::an_element_equal_to_a_listed_fl
 
 ```rust
 pub trait OutputFiles: Send {
-    fn list(&mut self, path: &str) -> Result<Vec<String>, SeamError>;      // relative paths under a directory, sorted bytewise; symlinks are reported, never followed
+    fn stat(&mut self, path: &str) -> Result<Option<FileKind>, SeamError>;    // what is at `path`; a symlink is `Symlink` and is not followed; `Ok(None)` is "nothing there"
+    fn list(&mut self, path: &str) -> Result<Vec<DirEntry>, SeamError>;       // every entry below the directory `path`, recursively, sorted bytewise by `rel`, each with its kind
     fn read(&mut self, path: &str, rel: &str) -> Result<Vec<u8>, SeamError>;   // the bytes of the regular file `rel` under `path`
 }
+pub enum FileKind { File, Directory, Symlink }
+pub struct DirEntry { pub rel: String, pub kind: FileKind }   // rel: relative to the listed directory, "/" separated
 ```
 
-**Contract.** `path` is absolute and is the build system's own answer or the engine's report directory; `rel` is relative, with no `..` and no empty part, and a `rel` that is absolute or climbs out of `path` is `Refused`. `list` of a path that does not exist, or is not a directory, is a named error (`Permanent` with the path), never an empty answer, because an empty listing would read as "no output" and a missing one as `BUILD_OUTPUT` for a different reason; `read` of a file that does not exist, is a directory or is a symlink is a named error as well. A read answers the bytes the file holds at the call, which is what lets the engine copy and then verify from the store (4.2). No call changes the tree. A failure to read that is not one of those (the disk failed) is `Unknown`, because the engine cannot tell what is there.
+**Contract.** `path` is absolute and is the build system's own answer or the engine's report directory; `rel` is relative, with no `..` and no empty part, and a `rel` that is absolute or climbs out of `path` is `Refused`. The three methods answer the three questions `Locate` (4.2, item 2) and `copy_out` need, each with one method: *is there something, and what* (`stat`), *what is in it* (`list`, with the kind of every entry, so a symlink is told from a file and a directory without a second call), and *its bytes* (`read`). Only the final component of `path` is looked at without following: `stat` of a symlink is `Symlink` whether it points at a file, a directory or nothing, and `list` reports a symlink entry and does not descend into it. Absence is told from failure in one place: `stat` answers `Ok(None)` for a path where nothing is, and `Unknown` when the disk could not be asked, so the engine never takes an I/O failure for a missing output or the reverse. `list` of a path that does not exist, or is not a directory, is a named error (`Permanent` with the path), never an empty answer, because an empty listing would read as "no output"; `read` of a file that does not exist, is a directory or is a symlink is `Permanent` with the path as well (both are the answer for a caller that skipped `stat`; `Buck2` and `Bazel` always call `stat` first, so a `Permanent` here means the tree changed under them). How `Located.shape` is found is therefore the same for both build systems, whatever their listing gives (Buck2's listing is a label and an absolute path; Bazel's is a relative path joined to the execution root): the engine-side code of `Buck2` and `Bazel` calls `stat` on the path and maps `None` and `Symlink` to `BUILD_OUTPUT`, `File` and `Directory` to the shape, and for a directory lists it once and maps any `Symlink` entry to `BUILD_OUTPUT`. A read answers the bytes the file holds at the call, which is what lets the engine copy and then verify from the store (4.2). No call changes the tree. A failure to read that is not one of those (the disk failed) is `Unknown`, because the engine cannot tell what is there.
 
 **Where it lands (Decided here; the rule is in 11).** The trait, `FakeOutputFiles` and `run_output_files_kit` land in PR 4 with the other seams, and the real reader lands in PR 12a with `Buck2` and `Bazel`, the first real implementations that use it, so 12a cannot be accepted before it exists and passes its kit. It is not part of the store PR 12b. The `Buck2` and `Bazel` tests run over a `FakeProcessRunner` and a `FakeOutputFiles` in every pull request. `FakeBuildSystem` does not use it: it is the specification of what the build-system seam promises, and it makes its outputs and its reports itself.
 
-Kit scenarios (`run_output_files_kit`, 4.6): `a_listing_is_sorted_relative_paths`, `a_symlink_is_reported_and_never_followed`, `a_path_that_escapes_the_listed_directory_is_refused`, `a_missing_directory_or_file_is_a_named_error_and_not_an_empty_answer`, `a_read_returns_the_file_as_it_is_at_the_call`, `listing_a_file_is_refused`, `no_call_changes_the_tree`. Each is run against `FakeOutputFiles` in PR 4 and against the real reader over a temporary directory in 12a (`output_files::*`, 11), and the kit's self-test feeds each scenario a stub that breaks it (a listing that follows a symlink, one that answers empty for a missing path, a read that writes) and requires the scenario to fail.
+Kit scenarios (`run_output_files_kit`, 4.6), nine, each with the one non-conforming stub that the kit's self-test feeds it and that the scenario must fail:
+
+| Scenario | What it asserts | Stub it must fail |
+|---|---|---|
+| `a_listing_is_sorted_relative_paths` | `list` answers every entry below a directory, nested ones included, sorted bytewise by `rel` | a listing in directory-walk order |
+| `a_listing_names_the_kind_of_every_entry` | each entry is `File`, `Directory` or `Symlink` | a listing that calls every entry `File` |
+| `a_listed_symlink_is_never_descended` | a symlink to a directory is one entry of kind `Symlink` and nothing below it is listed | a listing that follows the link |
+| `stat_tells_a_file_a_directory_a_symlink_and_nothing_apart` | four paths, four answers (`File`, `Directory`, `Symlink` for a link to a file and one to a directory and one dangling, `None`) | a `stat` that follows links |
+| `a_missing_path_is_none_from_stat_and_permanent_from_list_and_read` | absence is `Ok(None)` from `stat`; `list` and `read` of it are `Permanent` naming the path | a `list` that answers an empty listing |
+| `listing_a_file_and_reading_a_directory_or_a_symlink_are_refused` | each is `Permanent` with the path | a `read` that follows a symlink |
+| `a_path_that_escapes_the_listed_directory_is_refused` | `rel` of `..`, an absolute `rel` and an empty part are `Refused` | a `read` that joins the path unchecked |
+| `a_read_returns_the_file_as_it_is_at_the_call` | a file changed between two reads is read with its new bytes | a reader that caches the first answer |
+| `no_call_changes_the_tree` | a tree compared before and after every method is equal | a `read` that touches the file |
+
+Each is run against `FakeOutputFiles` in PR 4 and against the real reader over a temporary directory in 12a (`output_files::*`, 11). The faults of `FakeOutputFiles` that the `Buck2` and `Bazel` tests use are `missing`, `unreadable`, `symlink_at` and `changes_after_listing` (4.5 of release.md).
 
 ## 4.2.2 The report files (Proposal; confirmed by the on-demand job, question 19)
 
