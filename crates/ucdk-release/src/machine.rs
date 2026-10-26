@@ -242,8 +242,11 @@ pub enum Identity {
 /// does not compile until it is placed here.
 pub fn identity(kind: ArtifactType) -> Option<Identity> {
     match kind {
-        ArtifactType::Unspecified | ArtifactType::Conda | ArtifactType::Python => None,
-        ArtifactType::File | ArtifactType::Npm => Some(Identity::FileBytes),
+        ArtifactType::Unspecified
+        | ArtifactType::Conda
+        | ArtifactType::Python
+        | ArtifactType::Npm => None,
+        ArtifactType::File => Some(Identity::FileBytes),
         ArtifactType::Oci => Some(Identity::OciManifestDigest),
     }
 }

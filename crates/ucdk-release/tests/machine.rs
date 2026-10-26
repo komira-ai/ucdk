@@ -329,6 +329,23 @@ fn duplicate_action_name_is_refused() {
 }
 
 #[test]
+fn an_artifact_named_twice_in_one_action_is_refused() {
+    refuses_only(Rule::DuplicateName, |m| {
+        build_mut(m, "check", "build")
+            .artifacts
+            .push("ucdk-cli".to_owned());
+    });
+    refuses_only(Rule::DuplicateName, |m| {
+        let first = publish_mut(m, "publish", "publish").artifacts[0].clone();
+        publish_mut(m, "publish", "publish").artifacts.push(first);
+    });
+    refuses_only(Rule::DuplicateName, |m| {
+        let first = smoke_mut(m, "publish", "smoke").artifacts[0].clone();
+        smoke_mut(m, "publish", "smoke").artifacts.push(first);
+    });
+}
+
+#[test]
 fn duplicate_channel_name_is_refused() {
     refuses_only(Rule::DuplicateName, |m| {
         let mut again = m.channels[0].clone();
@@ -496,7 +513,11 @@ fn every_artifact_type_names_its_identity() {
         identity(ArtifactType::Oci),
         Some(Identity::OciManifestDigest)
     );
-    for kind in [ArtifactType::Conda, ArtifactType::Python] {
+    for kind in [
+        ArtifactType::Conda,
+        ArtifactType::Python,
+        ArtifactType::Npm,
+    ] {
         assert_eq!(identity(kind), None, "{kind:?}");
         refuses_only(Rule::EveryArtifactTypeNamesItsIdentity, |m| {
             artifact_mut(m, "ucdk-lib").r#type = kind as i32;

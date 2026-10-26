@@ -219,6 +219,18 @@ fn check_duplicates(m: &Machine, f: &mut Findings) {
             "validation",
             repeated(validations(stage).map(|v| v.name.as_str())),
         );
+        for action in &stage.actions {
+            let listed = match &action.kind {
+                Some(ActionKind::Build(b)) => &b.artifacts,
+                Some(ActionKind::Publish(p)) => &p.artifacts,
+                Some(ActionKind::Smoke(s)) => &s.artifacts,
+                Some(ActionKind::Test(_)) | None => continue,
+            };
+            report(
+                "listed artifact",
+                repeated(listed.iter().map(String::as_str)),
+            );
+        }
     }
 }
 

@@ -325,6 +325,9 @@ fn a_target_that_is_a_pattern_is_refused() {
         "//a/../b:c",
         "//a:b\n",
         "@repo//a:b",
+        "--show-output//pkg:t",
+        "-c//a:b",
+        "-",
         "",
     ];
     for label in buck2_refused {
@@ -343,6 +346,7 @@ fn a_target_that_is_a_pattern_is_refused() {
         "//:x",
         "root//pkg/sub:name-1",
         "//a:b.c",
+        "my-cell//pkg:t",
         "//release:ucdk_cli_package",
     ] {
         accepts(|m| {
@@ -371,6 +375,7 @@ fn a_target_that_is_a_pattern_is_refused() {
     }
     for label in [
         "repo//pkg:t",
+        "-x//pkg:t",
         "@re po//pkg:t",
         "//pkg:all",
         "@repo//pkg/...",
@@ -383,6 +388,27 @@ fn a_target_that_is_a_pattern_is_refused() {
                 .as_mut()
                 .expect("target")
                 .label = label.to_owned();
+        });
+    }
+}
+
+#[test]
+fn an_empty_flag_or_a_nul_in_a_flag_or_value_is_refused_in_every_layer() {
+    for layer in LAYERS {
+        let rule = match layer {
+            Layer::Base => Rule::BuildSystemShape,
+            Layer::Artifact | Layer::Test => Rule::TargetShape,
+        };
+        for flag in ["", "--a\0b", "\0"] {
+            refuses_only(rule, |m| flags_of(m, layer).push(flag.to_owned()));
+        }
+        refuses_only(rule, |m| {
+            env_of(m, layer).insert("K".to_owned(), "a\0b".to_owned());
+        });
+        // An empty environment value is a value, and a flag with text is a flag.
+        accepts(|m| {
+            env_of(m, layer).insert("K".to_owned(), String::new());
+            flags_of(m, layer).push("-x".to_owned());
         });
     }
 }

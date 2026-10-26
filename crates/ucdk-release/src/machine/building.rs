@@ -20,7 +20,14 @@ pub(super) fn check(m: &Machine, f: &mut Findings) {
     check_required(m, f);
     if let Some(system) = &m.build_system {
         check_system_shape(system, f);
-        check_layer("the build system", &system.flags, &system.env, kind, f);
+        check_layer(
+            "the build system",
+            &system.flags,
+            &system.env,
+            kind,
+            Rule::BuildSystemShape,
+            f,
+        );
     }
     check_artifacts(m, kind, f);
     check_builds(m, f);
@@ -79,22 +86,36 @@ fn check_system_shape(system: &BuildSystem, f: &mut Findings) {
             system.mode
         ));
     }
-    for (at, flag) in system.flags.iter().enumerate() {
-        if flag.is_empty() || flag.contains('\0') {
-            refuse(format!("has flag {at}, which is empty or holds a NUL"));
-        }
-    }
 }
 
 /// The text rules over one layer of authored flags and environment: the build system's own, or
-/// one target's.
+/// one target's. A flag is not empty and no flag or environment value holds a NUL, which the
+/// spawn of the build tool would refuse at run time; `shape` is the rule that says so for this
+/// layer.
 fn check_layer(
     whose: &str,
     flag_list: &[String],
     env: &BTreeMap<String, String>,
     kind: BuildSystemKind,
+    shape: Rule,
     f: &mut Findings,
 ) {
+    for (at, flag) in flag_list.iter().enumerate() {
+        if flag.is_empty() || flag.contains('\0') {
+            f.add(
+                shape,
+                format!("{whose} has flag {at}, which is empty or holds a NUL"),
+            );
+        }
+    }
+    for (key, value) in env {
+        if value.contains('\0') {
+            f.add(
+                shape,
+                format!("{whose} has the environment value of {key:?}, which holds a NUL"),
+            );
+        }
+    }
     for flag in flag_list {
         if let Some(why) = flags::reserved(kind, flag) {
             f.add(
@@ -133,6 +154,9 @@ fn label_problem(kind: BuildSystemKind, label: &str) -> Option<String> {
     }
     if label.contains('*') || label.contains("...") {
         return Some("holds a wildcard, and a target is exactly one label".to_owned());
+    }
+    if label.starts_with('-') {
+        return Some("starts with `-`, which a build tool reads as an option".to_owned());
     }
     let Some((root, rest)) = label.split_once("//") else {
         return Some("has no `//`".to_owned());
@@ -184,7 +208,14 @@ fn check_target(whose: &str, target: &Target, kind: BuildSystemKind, f: &mut Fin
             format!("{whose} has the label {:?}, which {why}", target.label),
         );
     }
-    check_layer(whose, &target.flags, &target.env, kind, f);
+    check_layer(
+        whose,
+        &target.flags,
+        &target.env,
+        kind,
+        Rule::TargetShape,
+        f,
+    );
 }
 
 fn check_artifacts(m: &Machine, kind: BuildSystemKind, f: &mut Findings) {
