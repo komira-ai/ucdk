@@ -16,19 +16,31 @@
 //!   reports of it, and the decision to stand down for a newer build.
 //! - [`codec`] and [`transitions`]: the records a ledger holds, and which events move a record
 //!   of each kind from which state to which.
+//! - [`invocation`]: the argument vector and environment of one call of the build system,
+//!   layered from the machine's base flags and environment, the target's and the flags ucdk
+//!   owns; [`listing`] and [`test_report`] read what the build system printed and wrote.
+//! - [`manifest`], [`closure`] and [`rows`]: the manifest the engine composes for a member, the
+//!   `SET_CLOSURE` validation of a set, and the accounting of evaluated rows against derived
+//!   ones.
 //!
 //! This crate is pure and synchronous: it holds no I/O, no wall clock and no `HashMap`.
 
 pub mod action_input;
+pub mod closure;
 pub mod codec;
 pub mod flags;
 pub mod hashes;
+pub mod invocation;
+pub mod listing;
 pub mod machine;
+pub mod manifest;
 mod oci;
 pub mod publish;
+pub mod rows;
 pub mod selection;
 pub mod set_document;
 pub mod store;
 pub mod supersede;
+pub mod test_report;
 pub mod transitions;
 pub mod verify;
