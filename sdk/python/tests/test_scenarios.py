@@ -186,12 +186,28 @@ class FileLedger(unittest.TestCase):
             ],
         )
 
-    def test_a_ledger_that_another_session_holds_cannot_be_opened(self):
+    def test_a_second_session_opens_beside_the_first_and_sees_what_it_writes(self):
+        wanted = pair()
         with tempfile.TemporaryDirectory() as directory:
             location = os.path.join(directory, "ledger")
-            with open_session(ledger_kind="file", ledger_location=location):
-                with self.assertRaises(Internal) as caught:
-                    open_session(ledger_kind="file", ledger_location=location)
+            with open_session(ledger_kind="file", ledger_location=location) as first:
+                with open_session(ledger_kind="file", ledger_location=location) as second:
+                    for entry in objects_of(second.status(wanted)):
+                        self.assertEqual(entry[4], api.Standing.NOT_APPLIED)
+                    plan = first.plan(wanted)
+                    self.assertEqual(first.apply(wanted, plan.planned.hash).which_result(), "done")
+                    seen = objects_of(second.status(wanted))
+        self.assertTrue(seen)
+        for _, _, record, _, standing in seen:
+            self.assertEqual((record, standing), (api.RecordState.CONFIRMED, api.Standing.MISSING))
+
+    def test_a_file_that_is_not_a_ledger_cannot_be_opened(self):
+        with tempfile.TemporaryDirectory() as directory:
+            location = os.path.join(directory, "ledger")
+            with open(location, "w") as handle:
+                handle.write("not a ledger\n")
+            with self.assertRaises(Internal) as caught:
+                open_session(ledger_kind="file", ledger_location=location)
         self.assertEqual(caught.exception.status, 101)
         self.assertTrue(caught.exception.error.message)
 

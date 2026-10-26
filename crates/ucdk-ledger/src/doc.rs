@@ -37,14 +37,17 @@ impl Doc {
     }
 
     /// Grants the lease to `holder` unless another holds it, or lapsed less than the skew
-    /// bound ago. A grant does not change the version: a plan made before it stays valid.
+    /// bound ago. The holder named in the lease takes it again at once, live or lapsed, with a
+    /// new fence: a run that ended without giving the lease back (a release that failed, a
+    /// crash) is not made to wait out its own lease. A grant does not change the version: a
+    /// plan made before it stays valid.
     pub(crate) fn acquire(
         &mut self,
         now: u64,
         holder: &str,
         ttl: Duration,
     ) -> Result<Lease, LeaseError> {
-        if let Some(held) = &self.lease {
+        if let Some(held) = self.lease.as_ref().filter(|held| held.holder != holder) {
             let free_at = held.expires_at.saturating_add(millis(MAX_CLOCK_SKEW));
             if now < free_at {
                 return Err(LeaseError::Held {

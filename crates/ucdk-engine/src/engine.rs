@@ -197,16 +197,27 @@ impl<'a> Engine<'a> {
                 return Outcome::Refused(Refusal::LeaseHeld { holder, remaining });
             }
             Err(LeaseError::Unavailable(why)) => {
-                let error = EngineError::Ledger(LedgerError::Unavailable(why));
+                // The grant may have landed with its answer lost: the lease may be ours.
+                let error = EngineError::LeaseUnconfirmed { why, run: None };
                 return failed(Report::default(), None, error);
             }
         };
         self.fence = lease.fence;
         let outcome = self.run_leased(view, hash, rollback);
-        // A release that fails leaves the lease to lapse on its own.
-        let _ = self.ledger.release(lease.fence);
+        let released = self.ledger.release(lease.fence);
         self.fence = Fence::NONE;
-        outcome
+        match (released, outcome) {
+            // A finished run stands; the lease lapses on its own, or is taken again at once by
+            // the same holder.
+            (Err(LedgerError::Unavailable(why)), Outcome::Failed(mut failure)) => {
+                failure.error = EngineError::LeaseUnconfirmed {
+                    why,
+                    run: Some(Box::new(failure.error)),
+                };
+                Outcome::Failed(failure)
+            }
+            (_, outcome) => outcome,
+        }
     }
 
     /// The run itself, under the lease taken in [`Engine::run`].

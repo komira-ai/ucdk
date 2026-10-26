@@ -366,6 +366,13 @@ fn every_engine_error_has_its_own_code_and_its_text() {
             ErrorCode::Provider,
         ),
         (EngineError::Ledger(LedgerError::Stale), ErrorCode::Ledger),
+        (
+            EngineError::LeaseUnconfirmed {
+                why: "x".to_owned(),
+                run: None,
+            },
+            ErrorCode::Ledger,
+        ),
         (EngineError::LedgerBusy, ErrorCode::LedgerBusy),
         (EngineError::LeaseLost, ErrorCode::LeaseLost),
         (EngineError::NotOurs(path("a/run")), ErrorCode::NotOurs),

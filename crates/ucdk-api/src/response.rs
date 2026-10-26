@@ -271,7 +271,7 @@ impl From<&EngineError> for v1::Error {
     fn from(error: &EngineError) -> Self {
         let code = match error {
             EngineError::Provider(_) => v1::ErrorCode::Provider,
-            EngineError::Ledger(_) => v1::ErrorCode::Ledger,
+            EngineError::Ledger(_) | EngineError::LeaseUnconfirmed { .. } => v1::ErrorCode::Ledger,
             EngineError::LeaseLost => v1::ErrorCode::LeaseLost,
             EngineError::LedgerBusy => v1::ErrorCode::LedgerBusy,
             EngineError::NotOurs(_) => v1::ErrorCode::NotOurs,

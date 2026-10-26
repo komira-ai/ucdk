@@ -103,17 +103,40 @@ pub fn apply_with(
     desired: &Lowered,
     rollback: bool,
 ) -> Outcome {
+    apply_by(None, provider, ledger, desired, rollback)
+}
+
+/// [`apply_with`] as the holder `holder`, or as the process when none is named.
+pub fn apply_by(
+    holder: Option<&str>,
+    provider: &mut dyn Provider,
+    ledger: &dyn Ledger,
+    desired: &Lowered,
+    rollback: bool,
+) -> Outcome {
     let plan = match plan_of(provider, ledger, desired) {
         Outcome::Planned(plan) => plan,
         other => return other,
     };
     let plan_hash = plan.hash().clone();
-    Engine::new(provider, ledger, cell()).handle(Request::Apply {
+    engine_for(holder, provider, ledger).handle(Request::Apply {
         desired: desired.clone(),
         plan,
         plan_hash,
         rollback,
     })
+}
+
+fn engine_for<'a>(
+    holder: Option<&str>,
+    provider: &'a mut dyn Provider,
+    ledger: &'a dyn Ledger,
+) -> Engine<'a> {
+    let engine = Engine::new(provider, ledger, cell());
+    match holder {
+        Some(name) => engine.with_holder(name),
+        None => engine,
+    }
 }
 
 pub fn apply(provider: &mut dyn Provider, ledger: &dyn Ledger, desired: &Lowered) -> Outcome {
@@ -122,6 +145,16 @@ pub fn apply(provider: &mut dyn Provider, ledger: &dyn Ledger, desired: &Lowered
 
 /// Plans a destroy of `desired`, then runs it under that plan's hash.
 pub fn destroy(provider: &mut dyn Provider, ledger: &dyn Ledger, desired: &Lowered) -> Outcome {
+    destroy_by(None, provider, ledger, desired)
+}
+
+/// [`destroy`] as the holder `holder`, or as the process when none is named.
+pub fn destroy_by(
+    holder: Option<&str>,
+    provider: &mut dyn Provider,
+    ledger: &dyn Ledger,
+    desired: &Lowered,
+) -> Outcome {
     let plan = match Engine::new(provider, ledger, cell()).handle(Request::Plan {
         desired: desired.clone(),
         mode: Mode::Destroy,
@@ -130,7 +163,7 @@ pub fn destroy(provider: &mut dyn Provider, ledger: &dyn Ledger, desired: &Lower
         other => return other,
     };
     let plan_hash = plan.hash().clone();
-    Engine::new(provider, ledger, cell()).handle(Request::Destroy {
+    engine_for(holder, provider, ledger).handle(Request::Destroy {
         desired: desired.clone(),
         plan,
         plan_hash,
@@ -426,6 +459,8 @@ pub struct FlakyLedger {
     always_stale: AtomicBool,
     keep_lease: AtomicBool,
     fail_acquire: AtomicBool,
+    lose_acquire_answer: AtomicBool,
+    fail_release: AtomicBool,
 }
 
 impl FlakyLedger {
@@ -451,6 +486,8 @@ impl FlakyLedger {
             always_stale: AtomicBool::default(),
             keep_lease: AtomicBool::default(),
             fail_acquire: AtomicBool::default(),
+            lose_acquire_answer: AtomicBool::default(),
+            fail_release: AtomicBool::default(),
         }
     }
 
@@ -469,6 +506,17 @@ impl FlakyLedger {
     /// Makes every acquire fail as unavailable.
     pub fn fail_acquire(&self, on: bool) {
         self.fail_acquire.store(on, Ordering::SeqCst);
+    }
+
+    /// Makes every acquire take the lease and then fail as unavailable, as when the grant
+    /// landed and its answer was lost.
+    pub fn lose_acquire_answer(&self, on: bool) {
+        self.lose_acquire_answer.store(on, Ordering::SeqCst);
+    }
+
+    /// Makes every release fail as unavailable, whether or not the lease is given back.
+    pub fn fail_release(&self, on: bool) {
+        self.fail_release.store(on, Ordering::SeqCst);
     }
 
     /// Makes a release do nothing, as when the process died before it could: the lease stays
@@ -522,7 +570,11 @@ impl Ledger for FlakyLedger {
         if self.fail_acquire.load(Ordering::SeqCst) {
             return Err(LeaseError::Unavailable("the lease is down".to_owned()));
         }
-        self.inner.acquire(holder, ttl)
+        let lease = self.inner.acquire(holder, ttl)?;
+        if self.lose_acquire_answer.load(Ordering::SeqCst) {
+            return Err(LeaseError::Unavailable("the answer was lost".to_owned()));
+        }
+        Ok(lease)
     }
 
     fn renew(&self, fence: Fence, ttl: Duration) -> Result<Lease, LedgerError> {
@@ -530,6 +582,9 @@ impl Ledger for FlakyLedger {
     }
 
     fn release(&self, fence: Fence) -> Result<(), LedgerError> {
+        if self.fail_release.load(Ordering::SeqCst) {
+            return Err(LedgerError::Unavailable("the release was lost".to_owned()));
+        }
         if self.keep_lease.load(Ordering::SeqCst) {
             return Ok(());
         }

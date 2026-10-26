@@ -519,10 +519,12 @@ source of truth.
   refused on open with the line and the reason (`OpenError::Corrupt`). The file is never
   repaired or overwritten by a refused open. The checksum guards against accidents, not
   tampering.
-- **One writer at a time.** `open` takes an advisory lock on `<path>.lock` and refuses a second
-  open while any handle is alive (`OpenError::Locked`). The lock does not expire, does not cross
-  machines or network file systems reliably, and does not stop a process that ignores it; the
-  lease (9.2) is what holds a writer that outlived its turn, and it is in the file.
+- **Several handles at once.** Any number of handles, in this process or in others, may be open
+  on one path. Each call reads the file afresh; each change takes an exclusive advisory lock on
+  `<path>.lock` for its read-modify-write alone and gives it back before it returns, so two
+  changes never interleave and no write is lost. The lock is never held between calls, so it
+  keeps no live process out: the lease (9.2) is what arbitrates between two live runs. The lock
+  does not cross network file systems reliably and does not stop a process that ignores it.
 - **The lease in the file.** Format 1.1 adds two lines before the first record: `fence <n>`, the
   fence of the last grant, and `lease <holder> <expires-ms>` while one is held. A lease change
   rewrites the file like a write does, and does not move the document's version.
@@ -541,11 +543,14 @@ unless the fence is the one it granted last and the lease has not lapsed.
 - **The fence only goes up.** Each grant is the last one plus one, whether the earlier lease was
   released or lapsed, and the number is kept in the document through a release. A holder that
   stalled past its lease, whose process is still running, is refused at its next write with
-  `LedgerError::Fenced`, which the file ledger's advisory lock cannot do: the lock is gone with
-  the handle, the fence is not.
+  `LedgerError::Fenced`, which the file ledger's advisory lock cannot do: the lock is held only
+  while one change is made, the fence is kept in the document.
 - **Renew, release.** `renew(fence, ttl)` moves the lapse to `now + ttl` for the current fence
   of a lease that has not lapsed; a lapsed one is acquired again (a new fence), never revived.
-  `release(fence)` lets the next `acquire` in at once.
+  `release(fence)` lets the next `acquire` in at once. The holder the lease names takes it again
+  at once, live or lapsed, with a new fence (the old one is fenced out): a run whose release was
+  lost is not made to wait out its own lease. Holder names are therefore identities: two live
+  runs given one name do not exclude each other, though the fence still refuses the older.
 - **Time is the ledger's.** A ledger has a `Clock` (`SystemClock`, or a `ManualClock` a test
   moves), and a holder's own clock decides nothing. A new holder is granted the lease only once
   the clock reads the lapse plus `MAX_CLOCK_SKEW` (5 seconds); the lapse itself already refuses
@@ -558,7 +563,11 @@ unless the fence is the one it granted last and the lease has not lapsed.
   `LedgerError::Leased` while a lease is live (or lapsed less than the skew bound ago).
 - **The engine.** An apply or a destroy acquires after its refusals that need no ledger and
   before it observes anything, renews at the start of every step, and releases when it ends,
-  whatever it ended with. A plan or a status takes no lease. The holder defaults to a name of
+  whatever it ended with. When taking the lease fails with an answer that does not say whether
+  the grant landed, or giving it back fails after a run that stopped, the run is
+  `EngineError::LeaseUnconfirmed` (wire code `ERROR_CODE_LEDGER`), exit class failed-changed
+  (6), never "safe to run again": the same holder reruns at once, any other is refused until the
+  lease lapses. A run that finished stands when its release fails. A plan or a status takes no lease. The holder defaults to a name of
   the process (`Engine::with_holder` names it) and the lease lasts ten minutes between renewals
   (`Engine::with_lease_ttl`). A run refused for the lease is `Refusal::LeaseHeld` (holder and the
   longest wait), `ucdk.api.v1.LeaseHeld`, exit class refused, nothing read or written. A run

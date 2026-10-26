@@ -17,6 +17,14 @@ pub enum EngineError {
     /// The run's lease was taken over, released or lapsed, so the ledger refused its write (or
     /// its renewal). The run stopped; whatever it had begun is resolved by the next holder.
     LeaseLost,
+    /// The ledger lease may still be held: taking it, or giving it back, failed with an answer
+    /// that does not say whether the ledger changed. Until it lapses, a rerun is refused for
+    /// every holder but this run's, which takes the lease again at once. `run` is the error the
+    /// run had already stopped with, when the failure was in giving the lease back.
+    LeaseUnconfirmed {
+        why: String,
+        run: Option<Box<EngineError>>,
+    },
     /// The ledger stayed stale through every retry: another run keeps writing it.
     LedgerBusy,
     /// An object found while the run was going is not ours (no stamp of the node, or a
@@ -61,6 +69,17 @@ impl fmt::Display for EngineError {
                 "the ledger lease was lost (it lapsed, or another run took it): this run stopped \
                  at its last whole write",
             ),
+            Self::LeaseUnconfirmed { why, run } => {
+                write!(
+                    f,
+                    "the ledger lease may still be held ({why}): run again as the same holder, \
+                     or wait for the lease to lapse"
+                )?;
+                if let Some(run) = run {
+                    write!(f, "; the run had stopped: {run}")?;
+                }
+                Ok(())
+            }
             Self::LedgerBusy => f.write_str("the ledger kept changing under the run"),
             Self::NotOurs(p) => write!(f, "{p}: the object is not ours (stamp and record)"),
             Self::StillPresent(p) => write!(f, "{p}: the object is there when it should be gone"),

@@ -303,10 +303,12 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Parsed, FormatError> {
     }
 
     let mut version = None;
-    let mut fence = 0;
+    let mut fence = None;
     let mut lease = None;
     let mut records = BTreeMap::new();
     let mut pending: Option<Pending<'_>> = None;
+    let mut seen: Vec<&str> = Vec::new();
+    let mut lease_line = 0;
     for (index, raw) in body.iter().enumerate().skip(1) {
         let number = index + 1;
         let (tag, rest) = raw.split_once(' ').unwrap_or((raw, ""));
@@ -322,15 +324,19 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Parsed, FormatError> {
             });
         } else if let Some(open) = &mut pending {
             open.lines.push(line);
+        } else if matches!(tag, "version" | "fence" | "lease") && seen.contains(&tag) {
+            return corrupt(number, format!("`{tag}` is given twice"));
         } else if tag == "version" {
+            seen.push(tag);
             let parsed = line.one()?.parse::<u64>();
             version = Some(parsed.or_else(|_| corrupt(number, "the version is not a number"))?);
         } else if tag == "fence" {
-            fence = line
-                .one()?
-                .parse::<u64>()
-                .or_else(|_| corrupt(number, "the fence is not a number"))?;
+            seen.push(tag);
+            let parsed = line.one()?.parse::<u64>();
+            fence = Some(parsed.or_else(|_| corrupt(number, "the fence is not a number"))?);
         } else if tag == "lease" {
+            seen.push(tag);
+            lease_line = number;
             let [holder, expires] = line.tokens::<2>()?;
             let expires_at = expires
                 .parse::<u64>()
@@ -344,6 +350,11 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Parsed, FormatError> {
     let Some(version) = version else {
         return corrupt(end_number, "the document has no version");
     };
+    // The first grant is fence 1. A lease under fence 0, or under none, would let a write under
+    // `Fence::NONE` pass the check.
+    if lease.is_some() && fence.is_none_or(|f| f == 0) {
+        return corrupt(lease_line, "a lease is held but the fence is missing or 0");
+    }
     if records.len() != count {
         return corrupt(end_number, "the record count does not match");
     }
@@ -351,7 +362,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Parsed, FormatError> {
         minor,
         doc: Doc {
             version,
-            fence,
+            fence: fence.unwrap_or(0),
             lease,
             records,
         },

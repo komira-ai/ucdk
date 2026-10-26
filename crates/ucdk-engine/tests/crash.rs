@@ -9,9 +9,9 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use common::{
-    AnyLedger, Backend, FlakyLedger, Hooked, apply, apply_with, chain, destroy, done, lowered,
-    mutations, objects, owned_by_fake, path, paths, physical_of, records, service_of,
-    service_reading,
+    AnyLedger, Backend, FlakyLedger, Hooked, apply, apply_by, apply_with, chain, destroy,
+    destroy_by, done, lowered, mutations, objects, owned_by_fake, path, paths, physical_of,
+    records, service_of, service_reading,
 };
 use ucdk_engine::{DEFAULT_LEASE_TTL, EngineError, Outcome, Refusal, Report};
 use ucdk_ledger::{
@@ -236,9 +236,19 @@ fn run_act(
     ledger: &dyn ucdk_ledger::Ledger,
     act: &Act,
 ) -> Outcome {
+    run_act_by(None, provider, ledger, act)
+}
+
+/// [`run_act`] as the holder `holder`, or as the process when none is named.
+fn run_act_by(
+    holder: Option<&str>,
+    provider: &mut dyn ucdk_provider::Provider,
+    ledger: &dyn ucdk_ledger::Ledger,
+    act: &Act,
+) -> Outcome {
     match act {
-        Act::Apply(desired) => apply(provider, ledger, desired),
-        Act::Destroy(desired) => destroy(provider, ledger, desired),
+        Act::Apply(desired) => apply_by(holder, provider, ledger, desired, false),
+        Act::Destroy(desired) => destroy_by(holder, provider, ledger, desired),
     }
 }
 
@@ -367,6 +377,9 @@ fn crash_sweep_every_call_k_no_duplicates_or_orphans(backend: Backend) {
     }
 }
 
+/// The holder of the runs that die: a rerun under another name waits out the lease.
+const DEAD: &str = "dead";
+
 /// A holder that died mid-run, whatever stopped it, leaves its lease to lapse. The next run is
 /// refused while it holds, changing nothing; once the lease and the skew bound are past, it takes
 /// over, and the world ends as a clean run leaves it.
@@ -428,7 +441,7 @@ fn crash_sweep_dead_holder_at_every_ledger_write_a_new_holder_resumes_cleanly(ba
             }
             flaky.fail_write_at(flaky.writes() + k);
             flaky.keep_lease(true);
-            failure(run_act(&mut fake, &flaky, &scenario.act));
+            failure(run_act_by(Some(DEAD), &mut fake, &flaky, &scenario.act));
             flaky.fail_write_at(0);
             flaky.keep_lease(false);
             a_new_holder_resumes_after_the_dead_one_lapses(
@@ -473,7 +486,7 @@ fn crash_sweep_dead_holder_at_every_call_k_a_new_holder_resumes_cleanly(backend:
                     }
                 }
                 flaky.keep_lease(true);
-                failure(run_act(&mut fake, &flaky, &scenario.act));
+                failure(run_act_by(Some(DEAD), &mut fake, &flaky, &scenario.act));
                 flaky.keep_lease(false);
                 {
                     let faults = fake.faults_mut();

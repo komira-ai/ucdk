@@ -122,8 +122,10 @@ fn a_config_that_asks_for_what_is_not_here_is_refused() {
 }
 
 /// Proves: the supported providers and ledgers open; a config with no cell gets the local one;
-/// a file ledger that cannot be opened (a directory that does not exist, or a ledger held by
-/// another session) is INTERNAL. Catches a ledger failure reported as success.
+/// a file ledger that cannot be opened (a directory that does not exist, or a file that is not
+/// a ledger) is INTERNAL, while a second session on a ledger a first has open is fine: the lease
+/// arbitrates between their runs. Catches a ledger failure reported as success, and a session
+/// that keeps others out of the file.
 #[test]
 fn the_supported_configs_open_and_a_ledger_that_cannot_open_is_internal() {
     for provider in ["fake", "fake-limited", "fake-leaky"] {
@@ -149,12 +151,14 @@ fn the_supported_configs_open_and_a_ledger_that_cannot_open_is_internal() {
     let first = open(&config);
     assert_eq!(first.status, OK);
     let second = open(&config);
-    assert_eq!(
-        second.status, INTERNAL,
-        "the ledger is held by the first session"
-    );
-    assert!(second.session.is_null());
+    assert_eq!(second.status, OK, "a ledger open in a first session opens");
+    close(second.session);
     close(first.session);
+
+    std::fs::write(dir.join("ledger"), "not a ledger\n").expect("write");
+    let corrupt = open(&config);
+    assert_eq!(corrupt.status, INTERNAL, "the file is not a ledger");
+    assert!(corrupt.session.is_null());
 
     config.ledger_location = dir.join("missing/ledger").to_string_lossy().into_owned();
     assert_eq!(open(&config).status, INTERNAL);

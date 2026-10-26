@@ -9,7 +9,7 @@
  */
 
 import assert from "node:assert/strict";
-import { copyFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -208,10 +208,29 @@ test("the ledger outlives the session and a second session reads it", () =>
     );
   }));
 
-test("a ledger that another session holds cannot be opened", () =>
+test("a second session opens beside the first and sees what it writes", () =>
+  inTemporaryDirectory(async (directory) => {
+    const wanted = pair();
+    const location = join(directory, "ledger");
+    await using first = await openSession("fake", { ledgerKind: "file", ledgerLocation: location });
+    await using second = await openSession("fake", { ledgerKind: "file", ledgerLocation: location });
+    const before = objectsOf(await second.status(wanted));
+    assert.ok(before.length > 0);
+    for (const [, , , , standing] of before) assert.equal(standing, api.Standing.NOT_APPLIED);
+    const plan = await first.plan(wanted);
+    assert.equal((await first.apply(wanted, plan.planned?.hash as string)).whichResult(), "done");
+    const seen = objectsOf(await second.status(wanted));
+    assert.ok(seen.length > 0);
+    for (const [, , record, , standing] of seen) {
+      assert.equal(record, api.RecordState.CONFIRMED);
+      assert.equal(standing, api.Standing.MISSING);
+    }
+  }));
+
+test("a file that is not a ledger cannot be opened", () =>
   inTemporaryDirectory(async (directory) => {
     const location = join(directory, "ledger");
-    await using _first = await openSession("fake", { ledgerKind: "file", ledgerLocation: location });
+    writeFileSync(location, "not a ledger\n");
     await assert.rejects(
       openSession("fake", { ledgerKind: "file", ledgerLocation: location }),
       (error: unknown) => {
