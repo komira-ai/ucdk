@@ -1,44 +1,56 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Selection: what a run is asked to do. Selectors name what to run, never what to skip, so a
-//! step added later is not run by an old selective command. `step:x` runs the step without its
-//! validations; `validation:y` runs one validation alone against what is already there. Any
-//! selector makes a run selective.
+//! Selection: what a run is asked to do. Selectors name what to run, never what to skip, so an
+//! action added later is not run by an old selective command. `action:x` runs the action
+//! without the validations attached to it, except that a Publish action always runs its own
+//! (they run in its preflight, and no selector stages or commits without that gate);
+//! `validation:y` runs one validation alone against what is already there. Any selector makes a
+//! run selective.
 
 use std::collections::BTreeSet;
 use std::fmt;
 
+use ucdk_release_proto::v1::action::Kind as ActionKind;
 use ucdk_release_proto::v1::{Reason, Stage};
 
 /// One thing to run. The order is the bytewise order of the text of the selector.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Selector {
-    Step(String),
+    Action(String),
     Validation(String),
 }
 
 impl fmt::Display for Selector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Selector::Step(name) => write!(f, "step:{name}"),
+            Selector::Action(name) => write!(f, "action:{name}"),
             Selector::Validation(name) => write!(f, "validation:{name}"),
         }
     }
 }
 
+/// What a validation is attached to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Holder {
+    /// An action of the stage, by name.
+    Action(String),
+    /// The stage itself: it runs after the last action.
+    Stage,
+}
+
 /// What a run does with one part of a stage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
-    /// Run the step; with its validations in a full run, without them when only the step was
-    /// selected.
-    Step { step: String, validations: bool },
-    /// Run one validation of a step alone.
-    Validation { step: String, name: String },
+    /// Run the action; `validations` says whether the validations attached to it run with it.
+    /// That is so in a full run, and in a selective one only for a Publish action.
+    Action { action: String, validations: bool },
+    /// Run one validation alone.
+    Validation { holder: Holder, name: String },
 }
 
 /// Why a selection was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelectionError {
-    /// The text is neither `step:<name>` nor `validation:<name>`.
+    /// The text is neither `action:<name>` nor `validation:<name>`.
     Malformed(String),
     /// The selector matches nothing in the stage; the choices are what the stage holds.
     NoMatch {
@@ -62,7 +74,7 @@ impl fmt::Display for SelectionError {
             SelectionError::Malformed(text) => {
                 write!(
                     f,
-                    "{text:?} is not a selector: use step:<name> or validation:<name>"
+                    "{text:?} is not a selector: use action:<name> or validation:<name>"
                 )
             }
             SelectionError::NoMatch { selector, choices } => {
@@ -87,7 +99,7 @@ impl Selection {
         texts
             .iter()
             .map(|text| match text.split_once(':') {
-                Some(("step", name)) if !name.is_empty() => Ok(Selector::Step(name.to_owned())),
+                Some(("action", name)) if !name.is_empty() => Ok(Selector::Action(name.to_owned())),
                 Some(("validation", name)) if !name.is_empty() => {
                     Ok(Selector::Validation(name.to_owned()))
                 }
@@ -107,18 +119,20 @@ impl Selection {
         self.0.iter().map(ToString::to_string).collect()
     }
 
-    /// What `stage` runs under this selection, in the order of the stage. Every selector must
-    /// match something in the stage.
+    /// What `stage` runs under this selection, in the order of the stage: each action, then the
+    /// validations attached to it that were selected, and after the last action the stage's own
+    /// validations. Every selector must match something in the stage.
     pub fn resolve(&self, stage: &Stage) -> Result<Vec<Item>, SelectionError> {
         let choices: Vec<Selector> = stage
-            .steps
+            .actions
             .iter()
-            .map(|s| Selector::Step(s.name.clone()))
+            .map(|a| Selector::Action(a.name.clone()))
             .chain(
                 stage
-                    .steps
+                    .actions
                     .iter()
-                    .flat_map(|s| &s.validations)
+                    .flat_map(|a| &a.validations)
+                    .chain(&stage.validations)
                     .map(|v| Selector::Validation(v.name.clone())),
             )
             .collect();
@@ -128,30 +142,42 @@ impl Selection {
                 choices,
             });
         }
+        let selected = |s: Selector| self.0.contains(&s);
         let mut items = Vec::new();
-        for step in &stage.steps {
-            if !self.is_selective() {
-                items.push(Item::Step {
-                    step: step.name.clone(),
-                    validations: true,
-                });
-                continue;
-            }
-            if self.0.contains(&Selector::Step(step.name.clone())) {
-                items.push(Item::Step {
-                    step: step.name.clone(),
-                    validations: false,
+        for action in &stage.actions {
+            // A Publish action's validations run in its preflight, whatever was selected.
+            let gated = matches!(action.kind, Some(ActionKind::Publish(_)));
+            let runs = !self.is_selective() || selected(Selector::Action(action.name.clone()));
+            let with = !self.is_selective() || gated;
+            if runs {
+                items.push(Item::Action {
+                    action: action.name.clone(),
+                    validations: with,
                 });
             }
-            for v in &step.validations {
-                if self.0.contains(&Selector::Validation(v.name.clone())) {
-                    items.push(Item::Validation {
-                        step: step.name.clone(),
-                        name: v.name.clone(),
-                    });
-                }
+            if self.is_selective() && !(runs && gated) {
+                items.extend(
+                    action
+                        .validations
+                        .iter()
+                        .filter(|v| selected(Selector::Validation(v.name.clone())))
+                        .map(|v| Item::Validation {
+                            holder: Holder::Action(action.name.clone()),
+                            name: v.name.clone(),
+                        }),
+                );
             }
         }
+        items.extend(
+            stage
+                .validations
+                .iter()
+                .filter(|v| !self.is_selective() || selected(Selector::Validation(v.name.clone())))
+                .map(|v| Item::Validation {
+                    holder: Holder::Stage,
+                    name: v.name.clone(),
+                }),
+        );
         Ok(items)
     }
 }

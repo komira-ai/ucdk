@@ -1,66 +1,148 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Reading a machine: one test per rule id, each refusing a machine that breaks that rule and
-//! nothing else, and the positive cases that keep a rule from refusing too much.
+//! Reading a machine, the rules of names, enums, the stage graph, actions and duplicates: one
+//! test per rule id, each refusing a machine that breaks that rule, and the positive cases that
+//! keep a rule from refusing too much. The rules of the build system and of publishing are in
+//! `machine_building.rs` and `machine_publishing.rs`.
 
 mod common;
 
+use std::collections::BTreeSet;
+
 use common::*;
 use ucdk_release::machine::{
-    Checked, DEFAULT_PUT_ATTEMPTS, DEFAULT_READBACK_POLLS, Identity, ReadError, Rule, identity,
-    needed_builds, put_attempts, readback_polls, stage_environment, stage_platform, step_platform,
+    Checked, Identity, ReadError, Rule, builds, identity, needed_builds, publishes,
+    stage_environment, stage_platform, validations,
 };
-use ucdk_release_proto::v1::push_identity::Kind;
-use ucdk_release_proto::v1::step::Action;
-use ucdk_release_proto::v1::{ArtifactType, Build, Machine, Reason, Step, Subject, Trigger};
+use ucdk_release_proto::v1::{
+    ArtifactType, ChannelKind, Machine, Reason, Trigger, ValidationKind, Visibility,
+};
 
-fn stable_repo(m: &mut Machine) -> &mut ucdk_release_proto::v1::Repository {
-    &mut m.channels[0].repositories[0]
+/// The rule ids of the design page (`machine.*`, section 2), held here as data so that the code
+/// and the page cannot drift: the page is not part of this change's base, so the list is copied
+/// from it and is compared with `Rule::ALL`.
+const PAGE_RULE_IDS: [&str; 39] = [
+    "machine.schema_version",
+    "machine.bad_name",
+    "machine.unknown_enum",
+    "machine.unknown_stage",
+    "machine.stage_cycle",
+    "machine.action_without_kind",
+    "machine.stage_without_actions",
+    "machine.empty_artifact_list",
+    "machine.duplicate_name",
+    "machine.unknown_channel",
+    "machine.build_system_required",
+    "machine.build_system_shape",
+    "machine.reserved_flag",
+    "machine.env_key",
+    "machine.placeholder",
+    "machine.target_shape",
+    "machine.artifact_target_missing",
+    "machine.build_undeclared",
+    "machine.build_not_closed",
+    "machine.labels_on_non_file",
+    "machine.test_shape",
+    "machine.change_check_publishes",
+    "machine.stage_platform",
+    "machine.artifact_cycle",
+    "machine.channel_shape",
+    "machine.exceptional_subject",
+    "machine.federated_shape",
+    "machine.publish_undeclared",
+    "machine.validation_placement",
+    "machine.smoke_shape",
+    "machine.environment_mismatch",
+    "machine.publish_stage_runs_code",
+    "machine.publish_stage_needs_validated_build",
+    "machine.publish_chain_shares_the_build",
+    "machine.publish_stage_scope",
+    "machine.bound_out_of_range",
+    "machine.gating_stage_lacks_readback",
+    "machine.exceptional_needs_exceptional",
+    "machine.every_artifact_type_names_its_identity",
+];
+
+#[test]
+fn the_rule_ids_of_the_code_and_of_this_page_are_the_same_set() {
+    let code: BTreeSet<&str> = Rule::ALL.iter().map(|r| r.id()).collect();
+    let page: BTreeSet<&str> = PAGE_RULE_IDS.iter().copied().collect();
+    assert_eq!(code.len(), Rule::ALL.len(), "a rule id is used twice");
+    assert_eq!(
+        page.len(),
+        PAGE_RULE_IDS.len(),
+        "the page lists an id twice"
+    );
+    let only_code: Vec<_> = code.difference(&page).collect();
+    let only_page: Vec<_> = page.difference(&code).collect();
+    assert!(only_code.is_empty(), "ids the page lacks: {only_code:?}");
+    assert!(only_page.is_empty(), "ids the code lacks: {only_page:?}");
+    assert!(code.iter().all(|id| id.starts_with("machine.")));
 }
 
-fn federated_of(m: &mut Machine) -> &mut ucdk_release_proto::v1::Federated {
-    match &mut stable_repo(m).push.as_mut().expect("push").kind {
-        Some(Kind::Federated(f)) => f,
-        _ => panic!("the fixture pushes as a federated identity"),
-    }
-}
-
-/// A second build stage and a second publish stage of the same machine, to the channel `beta`.
-fn with_second_publish(m: &mut Machine, needs: &[&str]) {
-    let mut build2 = stage_mut(m, "build").clone();
-    build2.name = "build2".to_owned();
-    m.stages.push(build2);
-    m.channels.push(channel(
-        "beta",
-        vec![repo(
-            ArtifactType::File,
-            "registry.example/beta",
-            federated("ci-beta", "publish2"),
-        )],
-    ));
-    m.stages.push(stage(
-        "publish2",
-        Trigger::Release,
-        needs,
-        vec![publish_step(
-            "push",
-            "linux-x86_64",
-            &["tool"],
-            "beta",
-            vec![],
-        )],
-    ));
+#[test]
+fn the_worked_example_of_1_2_passes_every_rule() {
+    let checked = Checked::read(worked_example()).expect("the first machine satisfies every rule");
+    let machine = checked.machine();
+    assert_eq!(machine.name, "ucdk");
+    let stages: Vec<(&str, Trigger)> = machine
+        .stages
+        .iter()
+        .map(|s| {
+            (
+                s.name.as_str(),
+                Trigger::try_from(s.trigger).expect("trigger"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        stages,
+        [
+            ("check", Trigger::ChangeCheck),
+            ("build", Trigger::Release),
+            ("publish", Trigger::Release)
+        ]
+    );
+    // The facts the page states about it: a bare binary with a PATH to be found on, a target on
+    // every artifact, a closure on the build action, one platform shared by the build and the
+    // publishing stage, and the environment of the push identity on the publishing stage.
+    let system = machine.build_system.as_ref().expect("a build system");
+    assert!(system.env.contains_key("PATH"));
+    assert!(machine.artifacts.iter().all(|a| a.target.is_some()));
+    let build = checked.stage("build").expect("build");
+    let publish = checked.stage("publish").expect("publish");
+    assert_eq!(stage_platform(build), stage_platform(publish));
+    assert_eq!(stage_environment(publish), "publish");
+    assert!(
+        builds(build).any(|(a, _)| a.validations.iter().any(|v| v.name == "closure")),
+        "the build action carries the closure"
+    );
+    assert_eq!(
+        validations(publish)
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>(),
+        ["visible"]
+    );
+    assert_eq!(needed_builds(machine, publish).len(), 1);
 }
 
 #[test]
 fn the_good_machine_is_read_and_its_views_answer() {
     let checked = Checked::read(good()).expect("the machine satisfies every rule");
-    assert_eq!(checked.machine().name, "demo");
     assert_eq!(checked.stage("build").expect("stage").name, "build");
     assert!(checked.stage("ghost").is_none());
-    assert_eq!(checked.artifact("tool").expect("artifact").name, "tool");
+    assert_eq!(
+        checked.artifact("ucdk-cli").expect("artifact").name,
+        "ucdk-cli"
+    );
     assert!(checked.artifact("ghost").is_none());
-    assert_eq!(checked.channel("stable").expect("channel").name, "stable");
+    assert_eq!(
+        checked.channel("registry").expect("channel").name,
+        "registry"
+    );
     assert!(checked.channel("ghost").is_none());
+    let check = checked.stage("check").expect("check");
+    assert_eq!(stage_environment(check), "check");
+    assert!(publishes(check).next().is_none());
 }
 
 #[test]
@@ -75,869 +157,372 @@ fn newer_major_is_a_version_error() {
 }
 
 #[test]
-fn a_missing_schema_version_is_refused() {
-    let mut m = good();
-    m.schema_version = 0;
-    let err = Checked::read(m).expect_err("refused");
-    assert_eq!(err.rules(), [Rule::SchemaVersion]);
+fn a_schema_version_below_1_is_refused() {
+    for version in [0, -1] {
+        refuses_only(Rule::SchemaVersion, |m| m.schema_version = version);
+    }
+    let err = Checked::read(Machine::default()).expect_err("an empty machine");
     assert_eq!(err.reason(), Reason::MachineFormat);
+    assert!(err.rules().contains(&Rule::SchemaVersion));
 }
 
 #[test]
-fn a_refusal_names_its_rule_in_its_text() {
-    let mut m = good();
-    m.schema_version = 0;
-    m.name = "Demo".to_owned();
-    let err = Checked::read(m).expect_err("refused");
-    let text = err.to_string();
-    assert!(text.contains("machine.schema_version: "), "{text}");
-    assert!(text.contains("machine.bad_name: "), "{text}");
-    assert_eq!(err.rules(), [Rule::SchemaVersion, Rule::BadName]);
-}
-
-#[test]
-fn every_rule_has_a_distinct_stable_id() {
-    let mut ids: Vec<&str> = Rule::ALL.iter().map(|r| r.id()).collect();
-    assert!(ids.iter().all(|id| id.starts_with("machine.")));
-    ids.sort_unstable();
-    ids.dedup();
-    assert_eq!(ids.len(), Rule::ALL.len());
-    let mut sorted = Rule::ALL;
-    sorted.sort();
-    assert_eq!(sorted, Rule::ALL, "the list is in the order of the enum");
-}
-
-#[test]
-fn a_name_follows_the_grammar() {
-    let long = "a".repeat(64);
-    for bad in ["", "9tool", "Tool", "a_b", "a b", "tool-", &long] {
-        assert_eq!(
-            refused_after(|m| m.name = bad.to_owned()),
-            [Rule::BadName],
-            "{bad:?}"
-        );
+fn a_name_outside_the_grammar_is_refused() {
+    refuses(Rule::BadName, |m| m.name = "Ucdk".to_owned());
+    refuses(Rule::BadName, |m| m.name = String::new());
+    for bad in [
+        "Check",
+        "9check",
+        "check-",
+        "check_2",
+        "ché",
+        &"a".repeat(64),
+    ] {
+        refuses_only(Rule::BadName, |m| {
+            stage_mut(m, "check").name = bad.to_owned()
+        });
     }
-    let longest = "a".repeat(63);
-    for ok in ["a", "a-b", "a1", longest.as_str()] {
-        let mut m = good();
-        m.name = ok.to_owned();
-        Checked::read(m).unwrap_or_else(|e| panic!("{ok:?}: {e}"));
-    }
-}
-
-#[test]
-fn every_kind_of_name_is_checked() {
-    assert_eq!(
-        refused_after(|m| stage_mut(m, "check").name = "Check".to_owned()),
-        [Rule::BadName]
-    );
-    assert_eq!(
-        refused_after(|m| stage_mut(m, "check").steps[0].name = "Compile".to_owned()),
-        [Rule::BadName]
-    );
-    assert_eq!(
-        refused_after(|m| stage_mut(m, "build").steps[0].validations[0].name = "Closure".to_owned()),
-        [Rule::BadName]
-    );
-    assert_eq!(
-        refused_after(|m| m.channels.push(channel(
-            "Extra",
+    refuses_only(Rule::BadName, |m| {
+        action_mut(m, "check", "build").name = "Build".to_owned();
+    });
+    refuses_only(Rule::BadName, |m| {
+        action_mut(m, "build", "build").validations[0].name = "Closure".to_owned();
+    });
+    refuses_only(Rule::BadName, |m| {
+        action_mut(m, "publish", "smoke").validations[0].name = "visible_2".to_owned();
+    });
+    refuses_only(Rule::BadName, |m| {
+        m.artifacts.push(file_artifact("Bad Name", "//release:x"));
+    });
+    refuses_only(Rule::BadName, |m| {
+        m.channels.push(channel(
+            "Mirror",
             vec![repo(
                 ArtifactType::File,
-                "registry.example/extra",
-                anonymous()
-            )]
-        ))),
-        [Rule::BadName]
-    );
-    assert_eq!(
-        refused_after(|m| m.artifacts.push(decl("Lib", ArtifactType::File, &[]))),
-        [Rule::BadName]
-    );
-}
-
-#[test]
-fn an_artifact_name_may_hold_an_underscore_and_a_stage_name_may_not() {
-    let mut m = good();
-    m.artifacts.push(decl("lib_two", ArtifactType::File, &[]));
-    Checked::read(m).expect("an artifact name allows `_`");
-    assert_eq!(
-        refused_after(|m| stage_mut(m, "check").name = "check_it".to_owned()),
-        [Rule::BadName]
-    );
-}
-
-#[test]
-fn a_platform_is_any_or_os_dash_cpu() {
-    for bad in [
+                "https://mirror.example.com/files",
+                Visibility::Public,
+                anonymous_push(),
+            )],
+        ));
+    });
+    for platform in [
         "linux",
-        "",
         "Linux-x86_64",
         "linux-",
-        "-x86",
+        "-x86_64",
         "linux-x86-64",
+        "",
     ] {
-        assert_eq!(
-            refused_after(|m| {
-                let Some(Action::Build(b)) = &mut stage_mut(m, "check").steps[0].action else {
-                    panic!("a build step");
-                };
-                b.platform = bad.to_owned();
-            }),
-            [Rule::BadName],
-            "{bad:?}"
-        );
+        refuses_only(Rule::BadName, |m| {
+            build_mut(m, "check", "build").platform = platform.to_owned();
+        });
     }
-    for ok in ["any", "osx-arm64", "linux-x86_64"] {
-        let mut m = good();
-        let Some(Action::Build(b)) = &mut stage_mut(&mut m, "check").steps[0].action else {
-            panic!("a build step");
-        };
-        b.platform = ok.to_owned();
-        Checked::read(m).unwrap_or_else(|e| panic!("{ok:?}: {e}"));
-    }
+}
+
+#[test]
+fn names_inside_the_grammar_are_accepted() {
+    // An artifact may hold an underscore, a stage may be 63 bytes, a platform may be `any`.
+    accepts(|m| m.artifacts.push(file_artifact("tool_2", "//release:x")));
+    accepts(|m| {
+        m.stages.push(stage(
+            &"a".repeat(63),
+            Trigger::Release,
+            &[],
+            vec![test_action("test", &["//release:set_test"])],
+        ));
+    });
+    accepts(|m| build_mut(m, "check", "build").platform = "any".to_owned());
+    accepts(|m| build_mut(m, "check", "build").platform = "darwin-aarch64".to_owned());
 }
 
 #[test]
 fn an_unknown_enum_value_is_refused() {
-    for trigger in [0, 7, -1] {
-        assert_eq!(
-            refused_after(|m| stage_mut(m, "check").trigger = trigger),
-            [Rule::UnknownEnum],
-            "trigger {trigger}"
-        );
+    refuses(Rule::UnknownEnum, |m| system_mut(m).kind = 9);
+    for trigger in [0, 9] {
+        refuses(Rule::UnknownEnum, |m| {
+            stage_mut(m, "check").trigger = trigger
+        });
     }
-    for subject in [0, 9] {
-        assert_eq!(
-            refused_after(|m| {
-                let mut v = validation("odd", "fake", Subject::LocalSet);
-                v.subject = subject;
-                stage_mut(m, "check").steps[0].validations.push(v);
-            }),
-            [Rule::UnknownEnum],
-            "subject {subject}"
-        );
+    for kind in [0, 9] {
+        refuses(Rule::UnknownEnum, |m| {
+            action_mut(m, "build", "build").validations[0].kind = kind;
+        });
+        refuses(Rule::UnknownEnum, |m| {
+            action_mut(m, "publish", "smoke").validations[0].kind = kind;
+        });
+        refuses(Rule::UnknownEnum, |m| {
+            artifact_mut(m, "ucdk-lib").r#type = kind
+        });
+        refuses(Rule::UnknownEnum, |m| repo_mut(m).r#type = kind);
+        refuses(Rule::UnknownEnum, |m| repo_mut(m).visibility = kind);
     }
-    for kind in [0, 99] {
-        assert_eq!(
-            refused_after(|m| {
-                let mut d = decl("odd", ArtifactType::File, &[]);
-                d.r#type = kind;
-                m.artifacts.push(d);
-            }),
-            [Rule::UnknownEnum],
-            "artifact type {kind}"
+    refuses(Rule::UnknownEnum, |m| m.channels[0].kind = 9);
+}
+
+#[test]
+fn a_need_naming_no_stage_is_refused() {
+    refuses(Rule::UnknownStage, |m| {
+        stage_mut(m, "publish").needs.push("ghost".to_owned());
+    });
+}
+
+#[test]
+fn a_stage_needing_itself_or_a_later_stage_is_refused() {
+    refuses(Rule::StageCycle, |m| {
+        stage_mut(m, "build").needs.push("build".to_owned());
+    });
+    refuses(Rule::StageCycle, |m| {
+        stage_mut(m, "build").needs.push("publish".to_owned());
+    });
+    // A stage may need any stage declared before it.
+    accepts(|m| {
+        m.stages.push(stage(
+            "verify",
+            Trigger::Release,
+            &["early", "build"],
+            vec![test_action("test", &["//release:set_test"])],
+        ));
+        m.stages.insert(
+            0,
+            stage(
+                "early",
+                Trigger::Release,
+                &[],
+                vec![test_action("test", &["//release:set_test"])],
+            ),
         );
-        assert_eq!(
-            refused_after(|m| stable_repo(m).r#type = kind),
-            [Rule::UnknownEnum, Rule::PublishUndeclared],
-            "repository type {kind}"
-        );
-    }
-    for visibility in [0, 5] {
-        assert_eq!(
-            refused_after(|m| stable_repo(m).visibility = visibility),
-            [Rule::UnknownEnum],
-            "visibility {visibility}"
-        );
-    }
+    });
 }
 
 #[test]
-fn a_step_with_no_action_is_refused() {
-    assert_eq!(
-        refused_after(|m| stage_mut(m, "check").steps.push(Step {
-            name: "idle".to_owned(),
-            action: None,
-            validations: vec![],
-        })),
-        [Rule::StepWithoutAction]
-    );
+fn an_action_with_no_kind_is_refused() {
+    refuses_only(Rule::ActionWithoutKind, |m| {
+        action_mut(m, "check", "build").kind = None;
+    });
 }
 
 #[test]
-fn duplicate_stage_name_is_refused() {
-    assert_eq!(
-        refused_after(|m| {
-            let again = stage_mut(m, "check").clone();
-            m.stages.push(again);
-        }),
-        [Rule::DuplicateName]
-    );
+fn a_stage_with_no_actions_is_refused() {
+    refuses_only(Rule::StageWithoutActions, |m| {
+        stage_mut(m, "check").actions.clear();
+    });
 }
 
 #[test]
-fn duplicate_step_name_is_refused() {
-    assert_eq!(
-        refused_after(|m| {
-            let again = stage_mut(m, "check").steps[0].clone();
-            stage_mut(m, "check").steps.push(again);
-        }),
-        [Rule::DuplicateName, Rule::StagePlatform]
-    );
+fn an_action_with_an_empty_artifact_list_is_refused() {
+    refuses_only(Rule::EmptyArtifactList, |m| {
+        build_mut(m, "check", "build").artifacts.clear();
+    });
+    refuses(Rule::EmptyArtifactList, |m| {
+        publish_mut(m, "publish", "publish").artifacts.clear();
+    });
+    refuses(Rule::EmptyArtifactList, |m| {
+        smoke_mut(m, "publish", "smoke").artifacts.clear();
+    });
 }
 
 #[test]
-fn duplicate_validation_name_is_refused() {
-    assert_eq!(
-        refused_after(|m| {
-            let again = validation("closure", "other", Subject::LocalSet);
-            stage_mut(m, "build").steps[0].validations.push(again);
-        }),
-        [Rule::DuplicateName]
-    );
-}
-
-#[test]
-fn duplicate_artifact_name_is_refused() {
-    assert_eq!(
-        refused_after(|m| m.artifacts.push(decl("tool", ArtifactType::File, &[]))),
-        [Rule::DuplicateName]
-    );
+fn duplicate_action_name_is_refused() {
+    refuses_only(Rule::DuplicateName, |m| {
+        action_mut(m, "build", "test").name = "build".to_owned();
+    });
 }
 
 #[test]
 fn duplicate_channel_name_is_refused() {
-    assert_eq!(
-        refused_after(|m| {
-            let mut again = m.channels[0].clone();
-            again.repositories[0].location = "registry.example/other".to_owned();
-            m.channels.push(again);
-        }),
-        [Rule::DuplicateName]
-    );
+    refuses_only(Rule::DuplicateName, |m| {
+        let mut again = m.channels[0].clone();
+        again.repositories[0].location = "https://mirror.example.com/files".to_owned();
+        m.channels.push(again);
+    });
 }
 
 #[test]
-fn a_stage_needing_itself_or_a_later_stage_is_a_cycle() {
-    assert_eq!(
-        refused_after(|m| stage_mut(m, "build").needs = vec!["build".to_owned()]),
-        [Rule::StageCycle]
-    );
-    assert_eq!(
-        refused_after(|m| stage_mut(m, "build").needs = vec!["publish".to_owned()]),
-        [Rule::StageCycle]
-    );
+fn a_stage_artifact_or_validation_name_used_twice_is_refused() {
+    refuses_only(Rule::DuplicateName, |m| {
+        let again = stage_mut(m, "check").clone();
+        m.stages.push(again);
+    });
+    refuses_only(Rule::DuplicateName, |m| {
+        let again = m.artifacts[0].clone();
+        m.artifacts.push(again);
+    });
+    // Action-level and stage-level validations share one namespace.
+    refuses_only(Rule::DuplicateName, |m| {
+        stage_mut(m, "publish").validations.push(validation(
+            "visible",
+            ValidationKind::ChannelReadback,
+            0,
+        ));
+    });
+    // An action and a validation of one name do not clash.
+    accepts(|m| {
+        action_mut(m, "build", "build").validations[0].name = "test".to_owned();
+    });
 }
 
 #[test]
-fn a_stage_needing_an_undeclared_stage_is_refused() {
-    assert_eq!(
-        refused_after(|m| stage_mut(m, "publish").needs.push("ghost".to_owned())),
-        [Rule::UnknownStage]
-    );
-}
-
-#[test]
-fn a_publish_to_an_undeclared_channel_is_refused_and_lists_the_declared_ones() {
+fn a_publish_or_smoke_naming_an_undeclared_channel_is_refused() {
+    refuses(Rule::UnknownChannel, |m| {
+        publish_mut(m, "publish", "publish").channel = "ghost".to_owned();
+    });
+    refuses(Rule::UnknownChannel, |m| {
+        smoke_mut(m, "publish", "smoke").channel = "ghost".to_owned();
+    });
     let mut m = good();
-    let Some(Action::Publish(p)) = &mut stage_mut(&mut m, "publish").steps[0].action else {
-        panic!("a publish step");
-    };
-    p.channel = "ghost".to_owned();
-    let err = Checked::read(m).expect_err("refused");
-    assert_eq!(err.rules(), [Rule::UnknownChannel]);
-    assert!(err.to_string().contains("[stable]"), "{err}");
-}
-
-#[test]
-fn change_check_that_publishes_is_refused() {
-    assert_eq!(
-        refused_after(|m| stage_mut(m, "check").steps = vec![publish_step(
-            "push",
-            "linux-x86_64",
-            &["tool"],
-            "stable",
-            vec![]
-        )]),
-        [
-            Rule::ChangeCheckPublishes,
-            Rule::EnvironmentMismatch,
-            Rule::PublishStageNeedsValidatedBuild
-        ]
+    publish_mut(&mut m, "publish", "publish").channel = "ghost".to_owned();
+    let message = Checked::read(m).expect_err("refused").to_string();
+    assert!(
+        message.contains("registry"),
+        "the declared channels are listed: {message}"
     );
 }
 
 #[test]
-fn change_check_with_needs_is_refused() {
-    assert_eq!(
-        refused_after(|m| {
-            m.stages
-                .insert(0, stage("pre", Trigger::Release, &[], vec![]));
-            stage_mut(m, "check").needs = vec!["pre".to_owned()];
-        }),
-        [Rule::ChangeCheckPublishes]
-    );
-}
-
-#[test]
-fn change_check_that_another_stage_needs_is_refused() {
-    assert_eq!(
-        refused_after(|m| m
-            .stages
-            .push(stage("gate", Trigger::Release, &["check"], vec![]))),
-        [Rule::ChangeCheckPublishes]
-    );
+fn a_change_check_stage_that_publishes_or_has_needs_is_refused() {
+    let release = || test_action("test", &["//release:set_test"]);
+    refuses(Rule::ChangeCheckPublishes, |m| {
+        stage_mut(m, "check").actions.push(publish_action(
+            "publish",
+            PLATFORM,
+            &["ucdk-cli"],
+            "registry",
+        ));
+    });
+    refuses(Rule::ChangeCheckPublishes, |m| {
+        stage_mut(m, "check").actions.push(smoke_action(
+            "smoke",
+            PLATFORM,
+            &["ucdk-cli"],
+            "registry",
+            vec![validation("seen", ValidationKind::ChannelReadback, 0)],
+        ));
+    });
+    refuses_only(Rule::ChangeCheckPublishes, |m| {
+        m.stages.push(stage(
+            "gate",
+            Trigger::ChangeCheck,
+            &["build"],
+            vec![release()],
+        ));
+    });
+    refuses_only(Rule::ChangeCheckPublishes, |m| {
+        m.stages.push(stage(
+            "after",
+            Trigger::Release,
+            &["check"],
+            vec![release()],
+        ));
+    });
 }
 
 #[test]
 fn change_check_with_environment_is_refused() {
-    assert_eq!(
-        refused_after(|m| stage_mut(m, "check").environment = "review".to_owned()),
-        [Rule::ChangeCheckPublishes]
-    );
+    refuses_only(Rule::ChangeCheckPublishes, |m| {
+        stage_mut(m, "check").environment = "ci".to_owned();
+    });
 }
 
 #[test]
 fn change_check_that_is_exceptional_is_refused() {
-    assert_eq!(
-        refused_after(|m| stage_mut(m, "check").exceptional = true),
-        [Rule::ChangeCheckPublishes]
-    );
+    refuses_only(Rule::ChangeCheckPublishes, |m| {
+        stage_mut(m, "check").exceptional = true;
+    });
 }
 
 #[test]
 fn a_stage_with_two_platforms_is_refused() {
-    assert_eq!(
-        refused_after(|m| {
-            let mut second = stage_mut(m, "publish").steps[0].clone();
-            second.name = "push-arm".to_owned();
-            second.validations.clear();
-            let Some(Action::Publish(p)) = &mut second.action else {
-                panic!("a publish step");
-            };
-            p.platform = "linux-aarch64".to_owned();
-            stage_mut(m, "publish").steps.push(second);
-        }),
-        [Rule::StagePlatform, Rule::PublishStageScope]
-    );
+    refuses(Rule::StagePlatform, |m| {
+        smoke_mut(m, "publish", "smoke").platform = "darwin-aarch64".to_owned();
+    });
 }
 
 #[test]
 fn a_stage_with_two_builds_is_refused() {
-    assert_eq!(
-        refused_after(|m| {
-            let mut second = stage_mut(m, "check").steps[0].clone();
-            second.name = "compile-again".to_owned();
-            stage_mut(m, "check").steps.push(second);
-        }),
-        [Rule::StagePlatform]
-    );
+    refuses_only(Rule::StagePlatform, |m| {
+        stage_mut(m, "check").actions.push(build_action(
+            "again",
+            PLATFORM,
+            &["ucdk-cli", "ucdk-lib"],
+            Vec::new(),
+        ));
+    });
 }
 
 #[test]
-fn an_artifact_needs_cycle_is_refused() {
-    assert_eq!(
-        refused_after(|m| {
-            m.artifacts[0].needs = vec!["lib".to_owned()];
-            m.artifacts.push(decl("lib", ArtifactType::File, &["tool"]));
-        }),
-        [Rule::ArtifactCycle]
-    );
-}
-
-#[test]
-fn an_artifact_need_that_is_not_declared_is_refused() {
-    assert_eq!(
-        refused_after(|m| m.artifacts[0].needs = vec!["ghost".to_owned()]),
-        [Rule::ArtifactCycle]
-    );
-}
-
-#[test]
-fn a_channel_with_no_repository_is_refused() {
-    assert_eq!(
-        refused_after(|m| m.channels.push(channel("empty", vec![]))),
-        [Rule::ChannelShape]
-    );
-}
-
-#[test]
-fn two_repositories_of_one_type_in_a_channel_are_refused() {
-    assert_eq!(
-        refused_after(|m| m.channels[0].repositories.push(repo(
-            ArtifactType::File,
-            "registry.example/second",
-            federated("ci-publish", "publish")
-        ))),
-        [Rule::ChannelShape]
-    );
-}
-
-#[test]
-fn a_location_shared_by_two_repositories_is_refused() {
-    assert_eq!(
-        refused_after(|m| m.channels[0].repositories.push(repo(
-            ArtifactType::Oci,
-            "registry.example/tool",
-            anonymous()
-        ))),
-        [Rule::ChannelShape]
-    );
-    assert_eq!(
-        refused_after(|m| m.channels.push(channel(
-            "other",
-            vec![repo(
-                ArtifactType::File,
-                "registry.example/tool",
-                anonymous()
-            )]
-        ))),
-        [Rule::ChannelShape]
-    );
-}
-
-#[test]
-fn a_repository_with_no_push_identity_is_refused() {
-    assert_eq!(
-        refused_after(|m| stable_repo(m).push = None),
-        [Rule::ChannelShape]
-    );
-    assert_eq!(
-        refused_after(|m| stable_repo(m).push = Some(Default::default())),
-        [Rule::ChannelShape]
-    );
-}
-
-#[test]
-fn an_exceptional_subject_equal_to_the_subject_is_refused() {
-    assert_eq!(
-        refused_after(|m| {
-            let f = federated_of(m);
-            f.exceptional_subject = f.subject.clone();
-            f.exceptional_environment = "exceptional".to_owned();
-        }),
-        [Rule::ExceptionalSubject]
-    );
-}
-
-#[test]
-fn an_exceptional_environment_equal_to_the_environment_is_refused() {
-    assert_eq!(
-        refused_after(|m| {
-            let f = federated_of(m);
-            f.exceptional_subject = "ci-exceptional".to_owned();
-            f.exceptional_environment = f.environment.clone();
-        }),
-        [Rule::ExceptionalSubject]
-    );
-}
-
-#[test]
-fn exceptional_environment_without_its_subject_is_refused() {
-    assert_eq!(
-        refused_after(|m| federated_of(m).exceptional_environment = "exceptional".to_owned()),
-        [Rule::ExceptionalSubject]
-    );
-}
-
-#[test]
-fn exceptional_subject_without_its_environment_is_refused() {
-    assert_eq!(
-        refused_after(|m| federated_of(m).exceptional_subject = "ci-exceptional".to_owned()),
-        [Rule::ExceptionalSubject]
-    );
-}
-
-#[test]
-fn a_build_of_an_undeclared_artifact_is_refused() {
-    assert_eq!(
-        refused_after(|m| {
-            let Some(Action::Build(b)) = &mut stage_mut(m, "check").steps[0].action else {
-                panic!("a build step");
-            };
-            b.artifacts.push("ghost".to_owned());
-        }),
-        [Rule::BuildUndeclared]
-    );
-}
-
-#[test]
-fn a_publish_of_an_undeclared_artifact_is_refused() {
-    assert_eq!(
-        refused_after(|m| {
-            let Some(Action::Publish(p)) = &mut stage_mut(m, "publish").steps[0].action else {
-                panic!("a publish step");
-            };
-            p.artifacts.push("ghost".to_owned());
-        }),
-        [Rule::PublishUndeclared, Rule::PublishStageScope]
-    );
-}
-
-#[test]
-fn a_publish_to_a_channel_with_no_repository_for_the_type_is_refused() {
-    assert_eq!(
-        refused_after(|m| {
-            m.artifacts.push(decl("image", ArtifactType::Oci, &[]));
-            for name in ["build", "publish"] {
-                match &mut stage_mut(m, name).steps[0].action {
-                    Some(Action::Build(Build { artifacts, .. })) => {
-                        artifacts.push("image".to_owned());
-                    }
-                    Some(Action::Publish(p)) => p.artifacts.push("image".to_owned()),
-                    None => panic!("an action"),
-                }
-            }
-        }),
-        [Rule::PublishUndeclared]
-    );
-}
-
-#[test]
-fn a_channel_readback_on_a_build_step_is_refused() {
-    assert_eq!(
-        refused_after(
-            |m| stage_mut(m, "check").steps[0].validations.push(validation(
-                "look",
-                "fake",
-                Subject::ChannelReadback
-            ))
-        ),
-        [Rule::ReadbackOnBuild]
-    );
-}
-
-#[test]
-fn a_local_set_validation_with_no_build_before_it_is_refused() {
-    assert_eq!(
-        refused_after(|m| stage_mut(m, "publish").steps[0]
-            .validations
-            .push(validation("closure", "set-closure", Subject::LocalSet))),
-        [Rule::LocalSetWithoutBuild]
-    );
-}
-
-#[test]
-fn a_local_set_validation_counts_a_build_earlier_in_the_stage() {
-    // The stage holds a build and a publish, which is refused for that; the local-set
-    // validation on the later step is not refused, because a build comes before it.
-    assert_eq!(
-        refused_after(|m| {
-            let publish = stage_mut(m, "publish");
-            publish.steps[0].validations.push(validation(
-                "closure",
-                "set-closure",
-                Subject::LocalSet,
-            ));
-            publish
-                .steps
-                .insert(0, build_step("extra", "linux-x86_64", &["tool"], vec![]));
-        }),
-        [Rule::PublishStageHasBuild]
-    );
-}
-
-#[test]
-fn environment_mismatch_is_refused() {
-    assert_eq!(
-        refused_after(|m| stage_mut(m, "publish").environment = "other".to_owned()),
-        [Rule::EnvironmentMismatch]
-    );
-    assert_eq!(
-        refused_after(|m| federated_of(m).environment = String::new()),
-        [Rule::EnvironmentMismatch]
-    );
-}
-
-#[test]
-fn an_exceptional_stage_may_run_in_the_exceptional_environment_and_in_no_other() {
-    let exceptional = |m: &mut Machine, env: &str| {
-        let f = federated_of(m);
-        f.exceptional_subject = "ci-exceptional".to_owned();
-        f.exceptional_environment = "publish-exceptional".to_owned();
-        for name in ["build", "publish"] {
-            stage_mut(m, name).exceptional = true;
-        }
-        stage_mut(m, "publish").environment = env.to_owned();
-    };
-    for ok in ["publish-exceptional", "publish"] {
-        let mut m = good();
-        exceptional(&mut m, ok);
-        Checked::read(m).unwrap_or_else(|e| panic!("{ok}: {e}"));
-    }
-    let mut m = good();
-    exceptional(&mut m, "elsewhere");
-    assert_eq!(broken(m), [Rule::EnvironmentMismatch]);
-    // A stage that is not exceptional may not use the exceptional environment.
-    let mut m = good();
-    federated_of(&mut m).exceptional_subject = "ci-exceptional".to_owned();
-    federated_of(&mut m).exceptional_environment = "publish-exceptional".to_owned();
-    stage_mut(&mut m, "publish").environment = "publish-exceptional".to_owned();
-    assert_eq!(broken(m), [Rule::EnvironmentMismatch]);
-}
-
-#[test]
-fn an_anonymous_repository_names_no_environment() {
-    let mut m = good();
-    stable_repo(&mut m).push = Some(anonymous());
-    stage_mut(&mut m, "publish").environment = "anything".to_owned();
-    Checked::read(m).expect("an anonymous push has no environment to match");
-}
-
-#[test]
-fn publish_stage_has_build_is_refused() {
-    assert_eq!(
-        refused_after(|m| stage_mut(m, "publish").steps.push(build_step(
-            "extra",
-            "linux-x86_64",
-            &["tool"],
-            vec![]
-        ))),
-        [Rule::PublishStageHasBuild]
-    );
-}
-
-#[test]
-fn a_publish_stage_that_needs_no_build_is_refused() {
-    assert_eq!(
-        refused_after(|m| stage_mut(m, "publish").needs = vec![]),
-        [Rule::PublishStageNeedsValidatedBuild]
-    );
-}
-
-#[test]
-fn a_publish_stage_that_needs_two_builds_is_refused() {
-    assert_eq!(
-        refused_after(|m| {
-            let mut second = stage_mut(m, "build").clone();
-            second.name = "build2".to_owned();
-            m.stages.insert(2, second);
-            stage_mut(m, "publish").needs.push("build2".to_owned());
-        }),
-        [Rule::PublishStageNeedsValidatedBuild]
-    );
-}
-
-#[test]
-fn a_publish_stage_whose_build_has_only_another_validator_is_refused() {
-    assert_eq!(
-        refused_after(
-            |m| stage_mut(m, "build").steps[0].validations[0].validator = "fake".to_owned()
-        ),
-        [Rule::PublishStageNeedsValidatedBuild]
-    );
-    assert_eq!(
-        refused_after(|m| stage_mut(m, "build").steps[0].validations.clear()),
-        [Rule::PublishStageNeedsValidatedBuild]
-    );
-}
-
-#[test]
-fn a_publish_stage_may_need_stages_that_hold_no_build() {
-    let mut m = good();
-    m.stages
-        .insert(0, stage("approval", Trigger::Release, &[], vec![]));
-    stage_mut(&mut m, "publish")
-        .needs
-        .push("approval".to_owned());
-    Checked::read(m).expect("one build stage is needed; others hold none");
-}
-
-#[test]
-fn a_publish_chain_over_two_builds_is_refused() {
-    let mut m = good();
-    with_second_publish(&mut m, &["publish", "build2"]);
-    assert_eq!(broken(m), [Rule::PublishChainSharesTheBuild]);
-}
-
-#[test]
-fn a_publish_chain_over_one_build_is_read() {
-    let mut m = good();
-    with_second_publish(&mut m, &["publish", "build"]);
-    Checked::read(m).expect("both stages publish the set of one build");
-}
-
-#[test]
-fn a_publish_stage_of_another_platform_is_refused() {
-    assert_eq!(
-        refused_after(|m| {
-            let Some(Action::Publish(p)) = &mut stage_mut(m, "publish").steps[0].action else {
-                panic!("a publish step");
-            };
-            p.platform = "linux-aarch64".to_owned();
-        }),
-        [Rule::PublishStageScope]
-    );
-}
-
-#[test]
-fn a_publish_of_an_artifact_the_build_lacks_is_refused() {
-    assert_eq!(
-        refused_after(|m| {
-            m.artifacts.push(decl("extra", ArtifactType::File, &[]));
-            let Some(Action::Publish(p)) = &mut stage_mut(m, "publish").steps[0].action else {
-                panic!("a publish step");
-            };
-            p.artifacts.push("extra".to_owned());
-        }),
-        [Rule::PublishStageScope]
-    );
-}
-
-#[test]
-fn a_bound_above_the_maximum_is_refused() {
-    assert_eq!(
-        refused_after(|m| {
-            let Some(Action::Publish(p)) = &mut stage_mut(m, "publish").steps[0].action else {
-                panic!("a publish step");
-            };
-            p.attempts = 11;
-        }),
-        [Rule::BoundOutOfRange]
-    );
-    assert_eq!(
-        refused_after(|m| {
-            let Some(Action::Publish(p)) = &mut stage_mut(m, "publish").steps[0].action else {
-                panic!("a publish step");
-            };
-            p.polls = 11;
-        }),
-        [Rule::BoundOutOfRange]
-    );
-    assert_eq!(
-        refused_after(|m| stage_mut(m, "publish").steps[0].validations[0].wait_polls = 11),
-        [Rule::BoundOutOfRange]
-    );
-    let mut m = good();
-    let Some(Action::Publish(p)) = &mut stage_mut(&mut m, "publish").steps[0].action else {
-        panic!("a publish step");
-    };
-    (p.attempts, p.polls) = (10, 10);
-    stage_mut(&mut m, "publish").steps[0].validations[0].wait_polls = 10;
-    Checked::read(m).expect("the maximum itself is allowed");
-}
-
-#[test]
-fn zero_bounds_read_as_the_defaults() {
-    let mut m = good();
-    let Some(Action::Publish(p)) = &mut stage_mut(&mut m, "publish").steps[0].action else {
-        panic!("a publish step");
-    };
-    assert_eq!((p.attempts, p.polls), (0, 0));
-    assert_eq!(put_attempts(p), DEFAULT_PUT_ATTEMPTS);
-    assert_eq!(readback_polls(p), DEFAULT_READBACK_POLLS);
-    assert_eq!((DEFAULT_PUT_ATTEMPTS, DEFAULT_READBACK_POLLS), (3, 3));
-    (p.attempts, p.polls) = (7, 9);
-    assert_eq!((put_attempts(p), readback_polls(p)), (7, 9));
-}
-
-#[test]
-fn gating_stage_without_readback_is_refused() {
-    let gated = |m: &mut Machine| {
-        m.stages
-            .push(stage("after", Trigger::Release, &["publish"], vec![]));
-    };
-    let mut m = good();
-    gated(&mut m);
-    Checked::read(m).expect("the publish stage reads back what it published");
-    assert_eq!(
-        refused_after(|m| {
-            gated(m);
-            stage_mut(m, "publish").steps[0].validations.clear();
-        }),
-        [Rule::GatingStageLacksReadback]
-    );
+fn an_artifact_cycle_or_a_dangling_need_is_refused() {
+    refuses_only(Rule::ArtifactCycle, |m| {
+        artifact_mut(m, "ucdk-cli")
+            .needs
+            .push("ucdk-lib".to_owned());
+        artifact_mut(m, "ucdk-lib")
+            .needs
+            .push("ucdk-cli".to_owned());
+    });
+    refuses_only(Rule::ArtifactCycle, |m| {
+        artifact_mut(m, "ucdk-cli").needs.push("ghost".to_owned());
+    });
+    refuses_only(Rule::ArtifactCycle, |m| {
+        artifact_mut(m, "ucdk-cli")
+            .needs
+            .push("ucdk-cli".to_owned());
+    });
+    // A chain is not a cycle.
+    accepts(|m| {
+        artifact_mut(m, "ucdk-cli")
+            .needs
+            .push("ucdk-lib".to_owned())
+    });
 }
 
 #[test]
 fn exceptional_needs_exceptional() {
-    assert_eq!(
-        refused_after(|m| stage_mut(m, "build").exceptional = true),
-        [Rule::ExceptionalNeedsExceptional]
-    );
-    assert_eq!(
-        refused_after(|m| stage_mut(m, "publish").exceptional = true),
-        [Rule::ExceptionalNeedsExceptional]
-    );
-}
-
-#[test]
-fn a_chain_over_a_stage_that_needs_no_build_is_refused_for_that_stage_only() {
-    // The earlier publish stage needs no build; the chain rule has no build of its to compare.
-    let mut m = good();
-    with_second_publish(&mut m, &["publish", "build"]);
-    stage_mut(&mut m, "publish").needs.clear();
-    assert_eq!(broken(m), [Rule::PublishStageNeedsValidatedBuild]);
-}
-
-#[test]
-fn a_local_set_validation_on_a_build_that_is_not_a_closure_check_is_refused() {
-    // A validation of another subject, even one named for the closure check, is not the check.
-    assert_eq!(
-        refused_after(|m| {
-            let v = &mut stage_mut(m, "build").steps[0].validations[0];
-            v.subject = Subject::ChannelReadback as i32;
-        }),
-        [Rule::ReadbackOnBuild, Rule::PublishStageNeedsValidatedBuild]
-    );
+    refuses_only(Rule::ExceptionalNeedsExceptional, |m| {
+        stage_mut(m, "build").exceptional = true;
+    });
+    refuses_only(Rule::ExceptionalNeedsExceptional, |m| {
+        stage_mut(m, "publish").exceptional = true;
+    });
+    accepts(|m| {
+        stage_mut(m, "build").exceptional = true;
+        stage_mut(m, "publish").exceptional = true;
+    });
 }
 
 #[test]
 fn every_artifact_type_names_its_identity() {
-    // Every value of the enum, so a type added without a decision here fails this test.
-    let all: Vec<ArtifactType> = (0..=64)
-        .filter_map(|n| ArtifactType::try_from(n).ok())
-        .collect();
-    assert_eq!(
-        all,
-        [
-            ArtifactType::Unspecified,
-            ArtifactType::File,
-            ArtifactType::Oci,
-            ArtifactType::Conda,
-            ArtifactType::Python,
-            ArtifactType::Npm
-        ]
-    );
     assert_eq!(identity(ArtifactType::File), Some(Identity::FileBytes));
-    assert_eq!(identity(ArtifactType::Npm), Some(Identity::FileBytes));
     assert_eq!(
         identity(ArtifactType::Oci),
         Some(Identity::OciManifestDigest)
     );
-    // A type with no identity is not accepted by the reader.
     for kind in [ArtifactType::Conda, ArtifactType::Python] {
-        assert_eq!(identity(kind), None);
-        assert_eq!(
-            refused_after(|m| m.artifacts.push(decl("pkg", kind, &[]))),
-            [Rule::EveryArtifactTypeNamesItsIdentity],
-            "{kind:?}"
-        );
+        assert_eq!(identity(kind), None, "{kind:?}");
+        refuses_only(Rule::EveryArtifactTypeNamesItsIdentity, |m| {
+            artifact_mut(m, "ucdk-lib").r#type = kind as i32;
+            m.channels[0].repositories.push(repo(
+                kind,
+                "https://packages.example.com/other",
+                Visibility::Public,
+                anonymous_push(),
+            ));
+        });
     }
-    for kind in [ArtifactType::File, ArtifactType::Oci, ArtifactType::Npm] {
-        let mut m = good();
-        m.artifacts.push(decl("pkg", kind, &[]));
-        Checked::read(m).unwrap_or_else(|e| panic!("{kind:?}: {e}"));
-    }
+    // An image is accepted, with its repository.
+    accepts(|m| {
+        artifact_mut(m, "ucdk-lib").r#type = ArtifactType::Oci as i32;
+        m.channels[0].repositories.push(repo(
+            ArtifactType::Oci,
+            "https://packages.example.com/images",
+            Visibility::Public,
+            anonymous_push(),
+        ));
+    });
 }
 
 #[test]
-fn the_views_of_a_stage_answer_from_its_steps() {
-    let m = good();
-    let build = m.stages[1].clone();
-    let publish = m.stages[2].clone();
-    assert_eq!(stage_platform(&build), Some("linux-x86_64"));
-    assert_eq!(
-        stage_platform(&stage("empty", Trigger::Release, &[], vec![])),
-        None
-    );
-    assert_eq!(step_platform(&build.steps[0]), Some("linux-x86_64"));
-    assert_eq!(
-        step_platform(&Step {
-            name: "idle".to_owned(),
-            action: None,
-            validations: vec![]
-        }),
-        None
-    );
-    assert_eq!(stage_environment(&publish), "publish");
-    let mut named = publish.clone();
-    named.environment = "chosen".to_owned();
-    assert_eq!(stage_environment(&named), "chosen");
-    let names: Vec<&str> = needed_builds(&m, &publish)
-        .iter()
-        .map(|s| s.name.as_str())
-        .collect();
-    assert_eq!(names, ["build"]);
+fn a_channel_without_a_kind_is_refused() {
+    refuses_only(Rule::ChannelShape, |m| {
+        m.channels[0].kind = ChannelKind::Unspecified as i32;
+    });
 }

@@ -605,9 +605,6 @@ dependencies = [
 name = "ucdk-release"
 version = "0.0.0"
 dependencies = [
- "prost",
- "serde_json",
- "sha2",
  "ucdk-core",
  "ucdk-release-proto",
 ]

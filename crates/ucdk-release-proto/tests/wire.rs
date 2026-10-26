@@ -15,8 +15,8 @@ use protox::Compiler;
 use protox::prost_reflect::{
     DescriptorPool, DynamicMessage, Kind, MapKey, MessageDescriptor, Value,
 };
+use ucdk_release_proto::v1::action::Kind as ActionKind;
 use ucdk_release_proto::v1::manifest::Metadata;
-use ucdk_release_proto::v1::step::Action;
 use ucdk_release_proto::v1::*;
 
 const PROTO_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/proto");
@@ -108,10 +108,10 @@ macro_rules! through_generated {
 
 fn generated(name: &str, bytes: &[u8]) -> Vec<u8> {
     through_generated!(name, bytes;
-        Machine, Stage, Step, Build, Publish, Validation, ExpectedRow, ArtifactDecl, Command,
-        Channel, Repository, PushIdentity, Anonymous, Federated, Manifest, Stamped, FileMeta,
-        OciMeta, Member, ReleaseSet, Producer, ProducedBy, BuildStamp, Coordinate, Held,
-        RunIdentity, SourceFacts, Row, ValidationReport, StepReport, Effect,
+        Machine, BuildSystem, Target, Stage, Action, Build, Test, Publish, Smoke, Validation,
+        ArtifactDecl, Channel, Repository, PushIdentity, Anonymous, Federated, Manifest, Stamped,
+        FileMeta, OciMeta, Member, ReleaseSet, Producer, ProducedBy, BuildStamp, Coordinate,
+        Held, RunIdentity, SourceFacts, Row, ValidationReport, ActionReport, Effect,
     )
 }
 
@@ -124,7 +124,7 @@ fn every_field_round_trips() {
         .collect();
     assert_eq!(
         messages.len(),
-        31,
+        33,
         "a message was added or removed; list it here and in `generated`"
     );
     for desc in messages {
@@ -192,24 +192,24 @@ fn held_decodes_from_literal_bytes() {
 }
 
 #[test]
-fn a_publish_step_decodes_from_literal_bytes() {
+fn a_publish_action_decodes_from_literal_bytes() {
     let bytes: Vec<u8> = [
         // 1 name "s"
         &[0x0A, 0x01, b's'][..],
-        // 3 publish { 1 platform "p", 2 artifacts "a", 3 channel "c", 4 attempts 5, 5 polls 6 }
+        // 4 publish { 1 platform "p", 2 artifacts "a", 3 channel "c", 4 attempts 5, 5 polls 6 }
         &[
-            0x1A, 0x0D, 0x0A, 0x01, b'p', 0x12, 0x01, b'a', 0x1A, 0x01, b'c', 0x20, 0x05, 0x28,
+            0x22, 0x0D, 0x0A, 0x01, b'p', 0x12, 0x01, b'a', 0x1A, 0x01, b'c', 0x20, 0x05, 0x28,
             0x06,
         ],
-        // 4 validations { 1 name "v", 3 subject 2 (CHANNEL_READBACK), 5 wait_polls 4 }
-        &[0x22, 0x07, 0x0A, 0x01, b'v', 0x18, 0x02, 0x28, 0x04],
+        // 6 validations { 1 name "v", 5 wait_polls 4, 7 kind 2 (CHANNEL_READBACK) }
+        &[0x32, 0x07, 0x0A, 0x01, b'v', 0x28, 0x04, 0x38, 0x02],
     ]
     .concat();
-    let step = Step::decode(bytes.as_slice()).expect("decodes");
-    assert_eq!(step.name, "s");
+    let action = Action::decode(bytes.as_slice()).expect("decodes");
+    assert_eq!(action.name, "s");
     assert_eq!(
-        step.action,
-        Some(Action::Publish(Publish {
+        action.kind,
+        Some(ActionKind::Publish(Publish {
             platform: "p".to_owned(),
             artifacts: vec!["a".to_owned()],
             channel: "c".to_owned(),
@@ -217,10 +217,57 @@ fn a_publish_step_decodes_from_literal_bytes() {
             polls: 6
         }))
     );
-    assert_eq!(step.validations.len(), 1);
-    assert_eq!(step.validations[0].subject, Subject::ChannelReadback as i32);
-    assert_eq!(step.validations[0].wait_polls, 4);
-    assert_eq!(step.encode_to_vec(), bytes);
+    assert_eq!(action.validations.len(), 1);
+    assert_eq!(
+        action.validations[0].kind,
+        ValidationKind::ChannelReadback as i32
+    );
+    assert_eq!(action.validations[0].wait_polls, 4);
+    assert_eq!(action.encode_to_vec(), bytes);
+}
+
+#[test]
+fn a_test_action_decodes_from_literal_bytes() {
+    let bytes: Vec<u8> = [
+        // 1 name "t"
+        &[0x0A, 0x01, b't'][..],
+        // 3 test { 1 targets { 1 label "//a:b", 2 flags "-c", 3 env { "K": "V" } } }
+        &[
+            0x1A, 0x15, 0x0A, 0x13, 0x0A, 0x05, b'/', b'/', b'a', b':', b'b', 0x12, 0x02, b'-',
+            b'c', 0x1A, 0x06, 0x0A, 0x01, b'K', 0x12, 0x01, b'V',
+        ],
+    ]
+    .concat();
+    let action = Action::decode(bytes.as_slice()).expect("decodes");
+    let Some(ActionKind::Test(test)) = &action.kind else {
+        panic!("a test action: {action:?}");
+    };
+    assert_eq!(test.targets.len(), 1);
+    assert_eq!(test.targets[0].label, "//a:b");
+    assert_eq!(test.targets[0].flags, ["-c"]);
+    assert_eq!(test.targets[0].env.get("K").map(String::as_str), Some("V"));
+    assert_eq!(action.encode_to_vec(), bytes);
+}
+
+#[test]
+fn a_federated_identity_decodes_from_literal_bytes() {
+    let bytes: Vec<u8> = [
+        // 1 subject "s"
+        &[0x0A, 0x01, b's'][..],
+        // 6 pinned_claims { "k": "v" }
+        &[0x32, 0x06, 0x0A, 0x01, b'k', 0x12, 0x01, b'v'],
+        // 7 stage_scope "a", 8 commit_scope "b", 9 read_scope "c"
+        &[0x3A, 0x01, b'a', 0x42, 0x01, b'b', 0x4A, 0x01, b'c'],
+    ]
+    .concat();
+    let fed = Federated::decode(bytes.as_slice()).expect("decodes");
+    assert_eq!(fed.subject, "s");
+    assert_eq!(fed.pinned_claims.get("k").map(String::as_str), Some("v"));
+    assert_eq!(
+        (&*fed.stage_scope, &*fed.commit_scope, &*fed.read_scope),
+        ("a", "b", "c")
+    );
+    assert_eq!(fed.encode_to_vec(), bytes);
 }
 
 #[test]
@@ -247,15 +294,28 @@ fn a_manifest_with_an_image_arm_decodes_from_literal_bytes() {
 
 #[test]
 fn a_retired_number_is_skipped_not_read_as_another_field() {
-    // 5 (retired in ArtifactDecl) carries a varint; 1 name "n" follows. The retired field is
-    // unknown to the type and is dropped, and nothing else moves.
-    let bytes = [0x28, 0x09, 0x0A, 0x01, b'n'];
+    // 5 and 6 (retired in ArtifactDecl) carry varints, 3 (the retired builder) a message; 1
+    // name "n" follows. The retired fields are unknown to the type and are dropped, and nothing
+    // else moves.
+    let bytes = [
+        0x28, 0x09, 0x30, 0x01, 0x1A, 0x02, 0x0A, 0x00, 0x0A, 0x01, b'n',
+    ];
     let decl = ArtifactDecl::decode(bytes.as_slice()).expect("decodes");
     assert_eq!(
         decl,
         ArtifactDecl {
             name: "n".to_owned(),
             ..ArtifactDecl::default()
+        }
+    );
+    // 2 (the retired validator, a string) and 3 (the retired subject) of a validation.
+    let bytes = [0x12, 0x01, b'x', 0x18, 0x02, 0x0A, 0x01, b'v'];
+    let validation = Validation::decode(bytes.as_slice()).expect("decodes");
+    assert_eq!(
+        validation,
+        Validation {
+            name: "v".to_owned(),
+            ..Validation::default()
         }
     );
 }

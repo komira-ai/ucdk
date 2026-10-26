@@ -94,9 +94,43 @@ fn retired_numbers_are_reserved() {
             .map(|r| (r.start, r.end))
             .collect()
     };
+    let names = |name: &str| -> Vec<String> {
+        message(&pool, name)
+            .reserved_names()
+            .map(str::to_owned)
+            .collect()
+    };
     // Each range is half-open: `reserved 5` is the range 5 to 6.
-    assert_eq!(reserved("ArtifactDecl"), [(5, 6)]);
+    assert_eq!(reserved("ArtifactDecl"), [(3, 4), (5, 6), (6, 7)]);
+    assert_eq!(names("ArtifactDecl"), ["builder", "independent_version"]);
+    assert_eq!(reserved("Validation"), [(2, 3), (3, 4), (4, 5), (6, 7)]);
+    assert_eq!(
+        names("Validation"),
+        ["validator", "subject", "rows", "options"]
+    );
+    assert_eq!(reserved("ValidationReport"), [(4, 5), (5, 6)]);
+    assert_eq!(
+        names("ValidationReport"),
+        ["leftovers", "validation_run_id"]
+    );
     assert_eq!(reserved("OciMeta"), [(3, 4)]);
+    assert_eq!(names("Stage"), ["steps"]);
+    // Nothing else of the package reserves anything.
+    for m in pool
+        .all_messages()
+        .filter(|m| m.full_name().starts_with(PACKAGE) && !m.is_map_entry())
+    {
+        let retires = m.reserved_ranges().next().is_some() || m.reserved_names().next().is_some();
+        let listed = [
+            "ArtifactDecl",
+            "Validation",
+            "ValidationReport",
+            "OciMeta",
+            "Stage",
+        ];
+        let short = m.full_name().trim_start_matches(PACKAGE);
+        assert_eq!(retires, listed.contains(&short), "{short}");
+    }
     let verdict = pool
         .get_enum_by_name(&format!("{PACKAGE}Verdict"))
         .expect("Verdict");
@@ -105,12 +139,33 @@ fn retired_numbers_are_reserved() {
         .map(|r| (*r.start(), *r.end()))
         .collect();
     assert_eq!(ranges, [(10, 10)]);
-    // And nothing declared uses a retired number.
-    assert!(message(&pool, "ArtifactDecl").get_field(5).is_none());
-    assert!(message(&pool, "OciMeta").get_field(3).is_none());
+    // And nothing declared uses a retired number or a retired name.
+    for (name, numbers) in [
+        ("ArtifactDecl", &[3, 5, 6][..]),
+        ("Validation", &[2, 3, 4, 6]),
+        ("ValidationReport", &[4, 5]),
+        ("OciMeta", &[3]),
+    ] {
+        let desc = message(&pool, name);
+        for number in numbers {
+            assert!(desc.get_field(*number).is_none(), "{name} {number}");
+        }
+    }
+    for (name, retired) in [
+        ("ArtifactDecl", &["builder", "independent_version"][..]),
+        ("Validation", &["validator", "subject", "rows", "options"]),
+        ("ValidationReport", &["leftovers", "validation_run_id"]),
+        ("Stage", &["steps"]),
+    ] {
+        let desc = message(&pool, name);
+        for field in retired {
+            assert!(desc.get_field_by_name(field).is_none(), "{name}.{field}");
+        }
+    }
     assert!(verdict.values().all(|v| v.number() != 10));
-    // The two retired fields were not the last of their messages: later numbers stay in use.
-    assert!(message(&pool, "ArtifactDecl").get_field(6).is_some());
+    // The retired fields were not the last of their messages: later numbers stay in use.
+    assert!(message(&pool, "ArtifactDecl").get_field(8).is_some());
+    assert!(message(&pool, "Validation").get_field(7).is_some());
 }
 
 #[test]
@@ -155,7 +210,7 @@ fn every_enum_has_a_zero_value_named_unspecified() {
         seen += 1;
     }
     assert_eq!(
-        seen, 9,
+        seen, 11,
         "an enum was added or removed; this count and fields.txt say so"
     );
 }
