@@ -104,12 +104,16 @@ impl Kind {
 /// The state a record of `kind` is in after `event`, or the refusal.
 ///
 /// A confirmed record is never dropped: it is audit data. A confirmed run, stage, publication or
-/// seal is not re-opened by a new intent either; the other kinds may be written as an intent
-/// again. A record being reaped is dropped only when its removal finished, and is never
+/// seal is not re-opened by a new intent and does not begin to be reaped either, so no path of
+/// events takes it to absent; the other kinds may be written as an intent again or reaped. A record being reaped is dropped only when its removal finished, and is never
 /// confirmed again.
 pub fn transition(kind: Kind, from: Stand, event: Event) -> Result<Stand, Refused> {
     let next = match (from, event) {
         (Stand::Confirmed, Event::WriteIntent) if kind.is_settled_once_confirmed() => {
+            return Err(Refused { from, event });
+        }
+        // Announcing removal of a settled confirmed record would reach `Absent` in two events.
+        (Stand::Confirmed, Event::BeginReap) if kind.is_settled_once_confirmed() => {
             return Err(Refused { from, event });
         }
         (Stand::Absent | Stand::Intent | Stand::Confirmed, Event::WriteIntent) => Stand::Intent,

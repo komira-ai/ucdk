@@ -13,9 +13,10 @@ fn total_over_every_state_and_event() {
     // follows, or `None` for a refusal. Every pair has an entry, so a state or an event added
     // without a decision here fails this test, and the table is the document.
     // The confirmed row is the one that depends on the kind: a kind that is not settled once
-    // confirmed may be written as an intent again.
+    // confirmed may be written as an intent again or begin to be reaped.
     let table = |kind: Kind| -> [(Stand, [Option<Stand>; 5]); 4] {
         let reopen = (!kind.is_settled_once_confirmed()).then_some(Intent);
+        let reap = (!kind.is_settled_once_confirmed()).then_some(Reaping);
         [
             //            intent         confirm          adopt            begin reap     drop
             (Absent, [Some(Intent), None, Some(Confirmed), None, None]),
@@ -29,7 +30,7 @@ fn total_over_every_state_and_event() {
                     Some(Absent),
                 ],
             ),
-            (Confirmed, [reopen, None, None, Some(Reaping), None]),
+            (Confirmed, [reopen, None, None, reap, None]),
             (Reaping, [None, None, None, Some(Reaping), Some(Absent)]),
         ]
     };
@@ -99,6 +100,30 @@ fn a_confirmed_record_is_never_dropped_and_a_record_in_removal_is_never_confirme
             }
         }
     }
+}
+
+#[test]
+fn no_sequence_of_events_takes_a_settled_confirmed_record_to_absent() {
+    // Search every sequence of up to four events from `Confirmed`, so a two-step path through
+    // `Reaping` is seen as well as a single event.
+    for kind in [Run, Stage, Publication, Seal] {
+        let mut frontier = vec![Confirmed];
+        for _ in 0..4 {
+            let mut next_frontier = Vec::new();
+            for from in frontier {
+                for event in Event::ALL {
+                    if let Ok(next) = transition(kind, from, event) {
+                        assert_ne!(next, Absent, "{kind:?}: {from:?} + {event:?}");
+                        next_frontier.push(next);
+                    }
+                }
+            }
+            frontier = next_frontier;
+        }
+    }
+    // A created object's record is the one that is reaped after it was confirmed.
+    assert_eq!(transition(Created, Confirmed, BeginReap), Ok(Reaping));
+    assert_eq!(transition(Created, Reaping, Drop), Ok(Absent));
 }
 
 #[test]
