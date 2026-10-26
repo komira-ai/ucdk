@@ -313,6 +313,7 @@ fn cases() -> Vec<Case> {
                 credentials: CredentialSource::Profile as i32,
                 profile: text("work"),
                 holder: text("ci-7"),
+                test_clock_ms: 2_000_000,
             },
         ),
         case(

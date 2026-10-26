@@ -2,7 +2,7 @@
 //! A session in safe Rust: one provider, one ledger and a cell, and the five verbs over protobuf
 //! bytes. The functions that cross the C boundary are in `ffi`; nothing here is `unsafe`.
 
-use std::sync::{Mutex, TryLockError};
+use std::sync::{Arc, Mutex, TryLockError};
 
 use prost::Message as _;
 use ucdk_api::v1::{
@@ -11,7 +11,9 @@ use ucdk_api::v1::{
 };
 use ucdk_api::{Approved, RequestError, catalog_response};
 use ucdk_engine::{Engine, Outcome, Request};
-use ucdk_ledger::{FileLedger, Ledger, MemoryLedger};
+#[cfg(feature = "test-clock")]
+use ucdk_ledger::ManualClock;
+use ucdk_ledger::{Clock, FileLedger, Ledger, MemoryLedger, SystemClock};
 use ucdk_plan::{Plan, lower};
 use ucdk_proto::v1::ResourceList;
 use ucdk_provider::{CellIdentity, CellName, CellUid, Kind, Node, NodePath, Provider, Stamp};
@@ -96,14 +98,42 @@ fn provider_named(name: &str, cell: &CellIdentity) -> Result<Box<dyn Provider>, 
     }
 }
 
-fn ledger_for(kind: &str, location: &str) -> Result<Box<dyn Ledger>, CallError> {
+/// The clock the ledger times its leases by: the wall clock, or one fixed at `test_clock_ms`.
+#[cfg(feature = "test-clock")]
+fn clock_for(test_clock_ms: u64) -> Result<Arc<dyn Clock>, CallError> {
+    Ok(if test_clock_ms == 0 {
+        Arc::new(SystemClock)
+    } else {
+        Arc::new(ManualClock::at(test_clock_ms))
+    })
+}
+
+/// The clock the ledger times its leases by: the wall clock. A caller that could fix it would
+/// defeat the lease and the fence, so this build refuses `test_clock_ms`.
+#[cfg(not(feature = "test-clock"))]
+fn clock_for(test_clock_ms: u64) -> Result<Arc<dyn Clock>, CallError> {
+    if test_clock_ms == 0 {
+        Ok(Arc::new(SystemClock))
+    } else {
+        Err(CallError::new(
+            status::INVALID_ARGUMENT,
+            "test_clock_ms needs a library built with the `test-clock` feature",
+        ))
+    }
+}
+
+fn ledger_for(
+    kind: &str,
+    location: &str,
+    clock: Arc<dyn Clock>,
+) -> Result<Box<dyn Ledger>, CallError> {
     match kind {
-        "" | "memory" => Ok(Box::new(MemoryLedger::new())),
+        "" | "memory" => Ok(Box::new(MemoryLedger::with_clock(clock))),
         "file" if location.is_empty() => Err(CallError::new(
             status::INVALID_ARGUMENT,
             "a file ledger needs ledger_location",
         )),
-        "file" => FileLedger::open(location)
+        "file" => FileLedger::open_with_clock(location, clock)
             .map(|ledger| Box::new(ledger) as Box<dyn Ledger>)
             .map_err(|e| CallError::new(status::INTERNAL, format!("cannot open the ledger: {e}"))),
         other => Err(unsupported("ledger kind", other)),
@@ -248,7 +278,11 @@ impl Session {
         };
         let session = Self::with_parts(
             provider_named(&config.provider, &cell)?,
-            ledger_for(&config.ledger_kind, &config.ledger_location)?,
+            ledger_for(
+                &config.ledger_kind,
+                &config.ledger_location,
+                clock_for(config.test_clock_ms)?,
+            )?,
             cell,
         );
         Ok(if config.holder.is_empty() {

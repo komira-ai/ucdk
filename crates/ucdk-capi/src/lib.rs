@@ -16,6 +16,11 @@
 //! lifts the denial, and every `unsafe` block there says why it is sound. [`Session`] and
 //! everything it does is safe Rust.
 
+// Every call runs inside `catch_unwind` (architecture 5.3), which does nothing when a panic aborts
+// the process: the host would die on a bug the library means to contain. Refuse to build so.
+#[cfg(panic = "abort")]
+compile_error!("ucdk-capi needs panic = \"unwind\": its panic containment relies on unwinding");
+
 mod session;
 mod status;
 

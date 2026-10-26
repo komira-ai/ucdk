@@ -126,7 +126,7 @@ What each verb is, in terms of what exists:
   non-serializable `Plan` out of the ABI; the engine already refuses a plan that differs from the
   approved hash (`Refusal::PlanHashMismatch`, `Refusal::PlanChanged`), so the guarantee is the one
   the CLI has today (`--expect-plan-hash`).
-- `ucdk_status`: request is a `ResourceList`; response is, per resource, the observed status
+- `ucdk_status`: request is a `StatusRequest` (the `ResourceList`); response is, per resource, the observed status
   (`Ready`, `Converging`, `Failed` as `ucdk_provider::Status`, or absent), the ledger record's state,
   its recorded outputs and whether the ledger and the cloud agree (`Standing`). Read-only: it is
   `Request::Status`, which calls `Ledger::read` and `Provider::observe` and nothing else. It lists
@@ -159,9 +159,9 @@ A session owns one provider, one ledger handle and the cell identity. `ucdk_sess
   thread (6.5).
 - There is no cancellation in version 1. A caller that gives up closes nothing mid-call; the
   engine's write-ahead design is what makes an interrupted run safe to resume, not the ABI.
-- Closing a session with a call in progress is a caller error (`UCDK_BUSY` is returned by the
-  call that observes it; close itself is not fallible). SDKs close from a finalizer only when
-  idle.
+- Closing a session with a call in progress is safe (3.6): the call keeps its session alive and
+  finishes, and the last holder drops it. Close itself is not fallible. SDKs still close from a
+  finalizer only when idle, because the call's answer is the only thing that says what it did.
 
 ### 3.4 How protos cross
 
@@ -206,8 +206,13 @@ Where the code is more specific than the text above:
 - **Sessions.** `SessionConfig.provider` is `fake`, `fake-limited` or `fake-leaky` (the fake with one stamped object no record names, for hosts that test the leak sweep); `ledger_kind` is empty or
   `memory`, or `file` with `ledger_location`; `cell` is empty (a local cell) or `machine/cell/uid`;
   `provider_options` must be empty and `credentials` a known value. Anything else the library
-  lacks is `UCDK_ABI`. A ledger that cannot be opened (held by another session, a missing
-  directory) is `UCDK_INTERNAL`.
+  lacks is `UCDK_ABI`. A ledger that cannot be opened (a missing directory, a file that is not a
+  ledger) is `UCDK_INTERNAL`; another session may have the same file open (9.1). `holder` names
+  the lease holder of the session's runs (9.2). `test_clock_ms`, when not zero, fixes the clock
+  the ledger times its leases by, so a test chooses when a lease lapses and reads no time. Only a
+  library built with the `test-clock` cargo feature honours it (`cargo xtask coverage` and
+  `cargo xtask sdk-test` build with it); the default build, which ships, refuses a non-zero value
+  with `UCDK_INVALID_ARGUMENT`, because a caller able to fix that clock would defeat the lease.
 - **Handles are numbers.** A `ucdk_session *` carries a number from a counter that only grows,
   and the library keeps the map from open numbers to sessions. A closed, twice-closed or
   never-opened handle is refused (`UCDK_INVALID_ARGUMENT`), and stays refused when the allocator
@@ -216,7 +221,8 @@ Where the code is more specific than the text above:
   its `catch_unwind`.
 - **Busy and poisoned.** A call takes the session's lock without waiting (`UCDK_BUSY`). A panic
   inside a call leaves the lock poisoned, and every later call on that session is `UCDK_PANIC`
-  until it is closed.
+  until it is closed. Containment is `catch_unwind`, so the crate needs `panic = "unwind"` and
+  refuses to compile under `panic = "abort"` (a `compile_error!`, held by `tests/panic_unwind.rs`).
 - **Freeing a buffer twice is undefined**, as 4.1 says; it is not detected. A zeroed buffer, or one
   with a zero length, is ignored.
 - **Not done.** The library does not check an SDK's version: the loader rule of section 5 is the
@@ -317,7 +323,7 @@ no `protoc` and no per-language protobuf toolchain is needed to generate anythin
 | Generated, never edited | Hand-written, small and fixed |
 |---|---|
 | message classes and enums for both packages, with docs taken from the proto comments | the C ABI binding: load the library, check the version, call the ten functions |
-| binary encode and decode for those messages | the `Session` type: `open`, `load_catalog`, `plan`, `apply`, `destroy`, `status`, `close`, and the error type built from the status codes |
+| binary encode and decode for those messages | the `Session` type: `open`, `load_catalog`, `plan`, `apply`, `destroy`, `status`, `leaks`, `close`, and the error type built from the status codes |
 | one typed template per resource kind (the fields of the `Resource.body` oneof): required fields as constructor arguments, optional ones as keywords, oneofs as separate named constructors (an image is `Image.digest(...)` or `Image.step_output(...)`, never a free-form dict) | locating the library (6.5) |
 | typed output references from the `exposes` option: `service.url` is a `Ref`, not a string | the worker thread and the promises (TypeScript) |
 | the portability marker per kind (`PORTABLE` or `CLOUD_BOUND`) as metadata | packaging metadata |
@@ -535,7 +541,7 @@ source of truth.
   rewrites the file like a write does, and does not move the document's version.
 - **Not yet wired to the CLI.** The CLI's only cloud is the in-memory fake, so a state file
   could not resume anything; `--state` arrives with the first provider whose objects outlive
-  the process. to the run that asks and never written.
+  the process.
 `SessionConfig` names the ledger by kind and location, plus a credential source by name.
 
 ### 9.2 The lease and the fence
@@ -603,7 +609,7 @@ repository does today is a **proposal**.
 | `ucdk-ledger` | CAS semantics, record encoding | unit tests; a conformance suite (`tests/conformance.rs`) run on both implementations; file-format and crash tests (`tests/file.rs`) | lost update, stale write accepted, a torn or altered file read as a ledger |
 | `ucdk-engine` | apply, destroy, resume, rollback, outputs, status | integration tests over the fake with call logs (`tests/apply.rs`, `crash.rs`, `delete.rs`, `outputs.rs`, `status.rs`, `read_status.rs`); the crash sweeps and rollback scenarios run on the memory and the file ledger | a mutation before its intent is recorded, a record dropped after a failed read, a delete of an object that is not ours |
 | `ucdk-cli` | arguments, exit codes, plan text, end to end | in-process runs over a `World` (`tests/cli.rs`, `e2e.rs`, `status.rs`, `status_verb.rs`) with plan-text goldens | wrong exit class, a drifting plan text |
-| `ucdk-api` (proposal) | message-to-value conversion in both directions; the outcome-to-exit table | round-trip tests; an exhaustive match so a new `Outcome` or `Refusal` variant fails to compile until it is mapped | a field dropped in conversion, an unmapped outcome |
+| `ucdk-api` | message-to-value conversion in both directions; the outcome-to-exit table | round-trip tests; an exhaustive match so a new `Outcome` or `Refusal` variant fails to compile until it is mapped | a field dropped in conversion, an unmapped outcome |
 | `ucdk-capi` | the ten functions, called as C would | see 10.3 | ownership, panic, version and malformed-input defects |
 | SDKs | binding and generated code | see 10.4 | an SDK that disagrees with the core or with another SDK |
 | generator | output for fixture protos; the committed SDK; a kind added to `resource.proto` | golden output (`tests/generate.rs`, `templates.rs`, `golden_coverage.rs`), the `sdk-fresh` gate, and the fixture's golden loaded and run by the Python and TypeScript tests | generated code that does not load or encode wrongly, a refused-in-silence field type, a stale committed SDK |
@@ -733,7 +739,7 @@ lists its tests by name. The first part ends with working Python and TypeScript 
    `tests/descriptor_lowering.rs` lowers a kind declared only in a test proto).
 5. **Read-only status in the engine** (done: `Request::Status` reads the ledger and observes each recorded and each wanted object, with no ledger write and no provider mutation; `ucdk.api.v1` `StatusRequest` and `StatusResponse`, exit class done or failed with no effect; `ucdk status --provider --input`).
 6. **`ucdk-capi`: the `cdylib` and the C header** (done: `crates/ucdk-capi`; the per-crate `unsafe`
-   exemption and its `unsafe-scope` gate in `cargo xtask check`; the nine functions; panic
+   exemption and its `unsafe-scope` gate in `cargo xtask check`; the ten functions; panic
    containment; the in-process ABI conformance tests of 10.3; a test that the checked-in header
    matches the exports; see 3.6 for what is not done).
 7. **`ucdk-codegen` and `cargo xtask gen-sdk`** (done: `crates/ucdk-codegen`, the Python target

@@ -540,7 +540,7 @@ fn a_rerun_with_the_same_holder_reclaims_the_lease_a_lost_release_left() {
     let dir = scratch("a_rerun_with_the_same_holder_reclaims_the_lease_a_lost_release_left");
     let input = write_list(&dir, "list.pb", pair());
     let saved = dir.join("saved.plan").to_string_lossy().into_owned();
-    let mut world = World::new();
+    let mut world = World::with_clock(std::sync::Arc::new(ucdk_ledger::ManualClock::at(1_000_000)));
     let (_, hash) = plan(&mut world, "fake", "apply", &input, &saved);
     // The earlier run, as `ci-7`, ended without giving the lease back.
     ucdk_ledger::Ledger::acquire(&world.ledger, "ci-7", std::time::Duration::from_secs(600))
@@ -581,7 +581,7 @@ fn a_ledger_leased_to_another_holder_refuses_apply_with_exit_3() {
     let dir = scratch("a_ledger_leased_to_another_holder_refuses_apply_with_exit_3");
     let input = write_list(&dir, "list.pb", pair());
     let saved = dir.join("saved.plan").to_string_lossy().into_owned();
-    let mut world = World::new();
+    let mut world = World::with_clock(std::sync::Arc::new(ucdk_ledger::ManualClock::at(1_000_000)));
     let (_, hash) = plan(&mut world, "fake", "apply", &input, &saved);
     let lease =
         ucdk_ledger::Ledger::acquire(&world.ledger, "ci-7", std::time::Duration::from_secs(600))

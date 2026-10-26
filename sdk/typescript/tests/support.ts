@@ -13,6 +13,10 @@ import { Library, Session, api, proto, resources } from "../src/index.ts";
 export const REPO = fileURLToPath(new URL("../../../", import.meta.url));
 export const DATA = join(REPO, "crates/ucdk-cli/tests/data");
 export const LEDGER_GOLDEN = join(REPO, "sdk/ledger-golden");
+// The clock a session reads, in milliseconds, against the lease in `leased.ucdk`: `ci-7` took it
+// at 1_000_000 for an hour. The tests never read the time.
+export const WHILE_HELD_MS = 2_000_000n;
+export const AFTER_LAPSE_MS = 10_000_000n;
 export const LIBRARY = join(
   REPO,
   "target/debug",

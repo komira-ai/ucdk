@@ -186,6 +186,14 @@ export interface SessionConfigInit {
    * reclaim a lease an earlier run left behind. Empty: a new name for every run.
    */
   holder?: string;
+  /**
+   * For tests: when not zero, the ledger times its leases by a clock fixed at this many
+   * milliseconds since the Unix epoch, instead of the wall clock, so a test says when a lease
+   * lapses without waiting or reading the time. Zero: the wall clock. Only a library built with
+   * the `test-clock` feature honours it; every other build refuses a non-zero value as an
+   * invalid argument, because a caller able to fix the clock would defeat the lease.
+   */
+  testClockMs?: bigint;
 }
 
 /** What a session is opened with. */
@@ -207,6 +215,14 @@ export class SessionConfig extends wire.Message {
    * reclaim a lease an earlier run left behind. Empty: a new name for every run.
    */
   holder: string;
+  /**
+   * For tests: when not zero, the ledger times its leases by a clock fixed at this many
+   * milliseconds since the Unix epoch, instead of the wall clock, so a test says when a lease
+   * lapses without waiting or reading the time. Zero: the wall clock. Only a library built with
+   * the `test-clock` feature honours it; every other build refuses a non-zero value as an
+   * invalid argument, because a caller able to fix the clock would defeat the lease.
+   */
+  testClockMs: bigint;
 
   constructor(init: SessionConfigInit = {}) {
     super();
@@ -218,6 +234,7 @@ export class SessionConfig extends wire.Message {
     this.credentials = init.credentials ?? CredentialSource.UNSPECIFIED;
     this.profile = init.profile ?? "";
     this.holder = init.holder ?? "";
+    this.testClockMs = init.testClockMs ?? 0n;
   }
 
   protected encodeInto(out: wire.Out): void {
@@ -251,6 +268,9 @@ export class SessionConfig extends wire.Message {
     }
     if (this.holder !== "") {
       wire.putString(out, 8, this.holder);
+    }
+    if (this.testClockMs !== 0n) {
+      wire.putVarintField(out, 9, this.testClockMs);
     }
   }
 
@@ -297,6 +317,10 @@ export class SessionConfig extends wire.Message {
         }
         case 8: {
           this.holder = wire.str(value);
+          break;
+        }
+        case 9: {
+          this.testClockMs = wire.uint64(value);
           break;
         }
         default:

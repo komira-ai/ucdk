@@ -28,6 +28,7 @@ fn a_session_config_round_trips_and_encodes_the_same_every_time() {
         credentials: CredentialSource::Profile as i32,
         profile: "work".to_owned(),
         holder: "ci-7".to_owned(),
+        test_clock_ms: 2_000_000,
     };
     let bytes = config.encode_to_vec();
     assert_eq!(

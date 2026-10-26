@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The world a command runs in: the cloud, the ledger and the two output buffers.
 
-use ucdk_ledger::MemoryLedger;
+use std::sync::Arc;
+
+use ucdk_ledger::{Clock, MemoryLedger, SystemClock};
 use ucdk_provider::{CellIdentity, CellName, CellUid};
 use ucdk_provider_fake::{Fake, FakeConfig};
 
@@ -65,10 +67,16 @@ pub struct World {
 impl World {
     /// Empty clouds with no faults, an empty ledger and nothing printed.
     pub fn new() -> Self {
+        Self::with_clock(Arc::new(SystemClock))
+    }
+
+    /// [`World::new`], with the ledger timing its leases by `clock`: how a test says when a
+    /// lease lapses without waiting.
+    pub fn with_clock(clock: Arc<dyn Clock>) -> Self {
         Self {
             fake: Fake::new(FakeConfig::standard()),
             fake_limited: Fake::new(FakeConfig::limited()),
-            ledger: MemoryLedger::new(),
+            ledger: MemoryLedger::with_clock(clock),
             cell: local_cell(),
             out: String::new(),
             err: String::new(),
