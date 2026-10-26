@@ -240,6 +240,54 @@ fn stage_record_carries_attempt_platform_and_generation() {
 }
 
 #[test]
+fn every_record_kind_has_a_golden() {
+    // One record of each kind as the codec writes it, byte for byte: the path, the name and
+    // every key and value in key order. The text is the format; a second implementation that
+    // writes it reads what this one wrote. A change to any line is a change of format.
+    let records = [
+        run(),
+        stage(true),
+        action(true),
+        publication(true, Some(Phase::Committing)),
+        validation(true),
+        grant(),
+        seal(),
+    ];
+    let kinds: BTreeSet<&str> = records.iter().map(|r| r.kind().tag()).collect();
+    assert_eq!(kinds.len(), Kind::ALL.len(), "a golden for every kind");
+    let mut text = String::new();
+    for record in &records {
+        let encoded = written(record);
+        text.push_str(&format!(
+            "{} {}\n  name {}\n",
+            encoded.kind,
+            encoded.path().expect("a path"),
+            encoded.name
+        ));
+        for (key, value) in &encoded.outputs {
+            text.push_str(&format!("  {key} = {value}\n"));
+        }
+    }
+    assert_eq!(text, include_str!("codec_golden.txt"));
+}
+
+#[test]
+fn a_stage_without_a_platform_round_trips() {
+    // A Test-only stage, and a `CHANGE_CHECK` one, name no platform (2): the key is absent, and
+    // the record reads back with none, whatever else it carries.
+    for full in [false, true] {
+        let platformless = Stage {
+            platform: None,
+            ..stage_of(stage(full))
+        };
+        let record = Record::Stage(platformless);
+        let encoded = written(&record);
+        assert!(!encoded.outputs.contains_key("platform"), "{encoded:?}");
+        assert_eq!(Record::decode(&encoded), Ok(record), "full: {full}");
+    }
+}
+
+#[test]
 fn action_record_carries_generation() {
     let encoded = written(&action(true));
     assert_eq!(encoded.kind.as_str(), "action");

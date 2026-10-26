@@ -4,6 +4,8 @@
 pub use ucdk_release_proto::v1::Held;
 use ucdk_release_proto::v1::Reason;
 
+use crate::transitions::Stand;
+
 /// What a registry reports for a coordinate, to an observer that carries a grant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Presence {
@@ -56,4 +58,20 @@ pub fn decide_publish(ours: &str, presence: &Presence) -> PublishDecision {
             }
         }
     }
+}
+
+/// Decides the coordinate as [`decide_publish`] does, given also the state of the `publication`
+/// record this ledger holds for it. A registry is the truth about bytes and the ledger is the
+/// truth about what was done, so the two are put side by side: a record that is `Confirmed`
+/// means the coordinate was committed and read back, so a coordinate that now reads `Absent`, or
+/// only `Staged`, went away out of band, and the answer is `PUBLISH_VANISHED`, never `Put` and
+/// never a commit. A confirmed publication is audit data (3.3): it is neither written again nor
+/// reopened, so the bytes are not put back behind it. Every other pairing is the decision of
+/// the registry's report alone, as an intent, a missing record or a publication being removed
+/// all leave the registry to say what is there.
+pub fn decide_publish_recorded(ours: &str, record: Stand, presence: &Presence) -> PublishDecision {
+    if record == Stand::Confirmed && matches!(presence, Presence::Absent | Presence::Staged(_)) {
+        return PublishDecision::Refused(Reason::PublishVanished);
+    }
+    decide_publish(ours, presence)
 }

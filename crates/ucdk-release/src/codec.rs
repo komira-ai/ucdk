@@ -112,7 +112,10 @@ pub struct Stage {
     pub stage: String,
     /// The latest attempt of this stage, from 1.
     pub attempt: u32,
-    pub platform: String,
+    /// The stage's platform; none for a stage that names none (a Test-only stage, or a
+    /// `CHANGE_CHECK` one), in which case the key is absent. Present, it is a part of a store
+    /// key, so it is never empty.
+    pub platform: Option<String>,
     /// The sealed set the stage built or consumes, and the store generation that holds it.
     pub set: Option<Hash256>,
     pub generation: Option<String>,
@@ -464,7 +467,9 @@ impl Record {
             }
             Record::Stage(s) => {
                 plain(kind, "stage", &s.stage)?;
-                plain(kind, "platform", &s.platform)?;
+                if let Some(platform) = &s.platform {
+                    plain(kind, "platform", platform)?;
+                }
                 if let Some(generation) = &s.generation {
                     plain(kind, "generation", generation)?;
                 }
@@ -473,7 +478,7 @@ impl Record {
                     s.stage.clone(),
                     Out::default()
                         .put("attempt", attempt_of(kind, s.attempt)?)
-                        .put("platform", &s.platform)
+                        .put_some("platform", s.platform.as_ref())
                         .put_some("set", s.set.as_ref())
                         .put_some("generation", s.generation.as_ref())
                         .flag("confirmed", s.confirmed),
@@ -616,7 +621,7 @@ impl Record {
                 Record::Stage(Stage {
                     stage: e.name.clone(),
                     attempt: r.attempt()?,
-                    platform: r.part("platform", "platform")?,
+                    platform: r.opt_part("platform")?,
                     set: r.opt_hash("set")?,
                     generation: r.opt_part("generation")?,
                     confirmed: r.flag("confirmed")?,

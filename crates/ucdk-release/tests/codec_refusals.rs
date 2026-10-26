@@ -221,7 +221,7 @@ fn a_required_key_that_is_missing_is_refused() {
     // The keys a record of the kind may leave out. A grant's answer keys depend on each other
     // and are held by `a_grant_that_disagrees_with_itself_is_refused`.
     let optional: [(Kind, &[&str]); 5] = [
-        (Kind::Stage, &["set", "generation", "confirmed"]),
+        (Kind::Stage, &["platform", "set", "generation", "confirmed"]),
         (Kind::Action, &["set", "generation"]),
         (Kind::Publication, &["exceptional", "phase"]),
         (Kind::Validation, &["set"]),
@@ -400,7 +400,7 @@ fn parts_records(part: &str) -> Vec<Record> {
             ..s.clone()
         }),
         Record::Stage(Stage {
-            platform: p(),
+            platform: Some(p()),
             ..s.clone()
         }),
         Record::Stage(Stage {
@@ -530,6 +530,40 @@ fn parts_are_held_to_the_store_key_part_rule() {
             "{part:?}"
         );
     }
+}
+
+#[test]
+fn an_empty_stage_platform_is_refused() {
+    // No platform is the key absent. A platform that is present is a part of a store key, so
+    // an empty one is refused by the writer and by the reader, and is never read as "none".
+    let none = Stage {
+        platform: Some(String::new()),
+        ..stage_of(stage(true))
+    };
+    let err = Record::Stage(none).encode().expect_err("an empty platform");
+    assert!(
+        matches!(
+            err,
+            CodecError::Part {
+                part: "platform",
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    let mut encoded = written(&stage(true));
+    encoded.outputs.insert("platform".to_owned(), String::new());
+    let got = Record::decode(&encoded);
+    assert!(
+        matches!(
+            &got,
+            Err(CodecError::Part {
+                part: "platform",
+                ..
+            })
+        ),
+        "{got:?}"
+    );
 }
 
 #[test]

@@ -1,0 +1,57 @@
+run run/ktmccbz657wkdfoxx4g4vad4xf4
+  name run-7
+  build = 41
+  commit = abc123
+  machine = 1111111111111111111111111111111111111111111111111111111111111111
+  revision = 0123456789abcdef
+  timestamp = 1700000000000
+  version = 1.2.3
+stage stage/kws6pgg6mytgstpcut4syp4noje
+  name build
+  attempt = 2
+  confirmed = 1
+  generation = run-7-a2
+  platform = linux-x86_64
+  set = 2222222222222222222222222222222222222222222222222222222222222222
+action action/kvtksouhqxhplljr6z27cwrgoom
+  name build/compile
+  generation = run-7-a2
+  input = 3333333333333333333333333333333333333333333333333333333333333333
+  set = 2222222222222222222222222222222222222222222222222222222222222222
+publication publication/knjenv6loa4ogtczsfzp7feswti
+  name stable/file/tool/1.2.3+build.4/linux-x86_64
+  attempt = 3
+  build = 41
+  commit = abc123
+  digest = 4444444444444444444444444444444444444444444444444444444444444444
+  exceptional = 1
+  phase = committing
+  run = run-7
+  stage = publish
+validation validation/k5fezojpd7l3uucvkcujmwsfcma
+  name build/closure
+  set = 2222222222222222222222222222222222222222222222222222222222222222
+grant grant/kzrrd2eli5yozyq2ekzuylnggzy
+  name publish/push/stage/a2-1
+  audience = registry
+  channel = stable
+  coordinates = 6666666666666666666666666666666666666666666666666666666666666666
+  expires_ms = 1700000600000
+  outcome = granted
+  phase = stage
+  repository = file
+  scope = stage
+  subject = repo:example/project:ref:refs/heads/main
+seal seal/kai4lchlavr5u2gukx7ry43ljni
+  name build/linux-x86_64/0123456789abcdef
+  attempt = 2
+  build = 41
+  commit = abc123
+  environment = build
+  generation = run-7-a2
+  inputs = 5555555555555555555555555555555555555555555555555555555555555555
+  machine = demo
+  run = run-7
+  set = 2222222222222222222222222222222222222222222222222222222222222222
+  timestamp = 1700000000000
+  version = 1.2.3

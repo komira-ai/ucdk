@@ -43,7 +43,7 @@ pub fn stage(full: bool) -> Record {
     Record::Stage(Stage {
         stage: "build".to_owned(),
         attempt: 2,
-        platform: "linux-x86_64".to_owned(),
+        platform: Some("linux-x86_64".to_owned()),
         set: full.then(|| hash('2')),
         generation: full.then(|| "run-7-a2".to_owned()),
         confirmed: full,

@@ -447,6 +447,10 @@ enum Reason {
   // The staged state a commit needs is missing, or differs from the set, when the commit phase
   // observes it.
   PUBLISH_STAGE = 34;
+  // A publication this ledger holds as confirmed reads as absent, or only staged, at the
+  // registry: the bytes went away out of band. Never put again, because a confirmed publication
+  // is audit data.
+  PUBLISH_VANISHED = 35;
 }
 
 enum RowState {
