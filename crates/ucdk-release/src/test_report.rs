@@ -5,8 +5,10 @@
 //!
 //! - Buck2 (`events.json-lines`): `ran` counts the lines that carry a `TestResult` record,
 //!   anywhere in the event, whose `status` is one of `PASS`, `FAIL`, `FATAL`, `TIMEOUT` and
-//!   `RERUN` (the names of Buck2's `TestStatus` that mean a test ran); any other status, or a
-//!   record with no status name, is not counted. A line counts once however many records it
+//!   `RERUN` (the values of Buck2's `TestStatus` that mean a test ran), given as the name or as
+//!   the enum number (1, 2, 5, 6 and 8): the event log writes a protobuf enum field as its
+//!   number, and Buck2 gives no by-name form to this one. Any other status, of any JSON type, or
+//!   a record with no status, is not counted. A line counts once however many records it
 //!   holds, so the number says whether tests ran and is not a count of tests.
 //! - Bazel (`events.json`, the build event protocol's JSON form): `ran` is the sum of
 //!   `totalRunCount` over the lines whose `testSummary` has an `overallStatus` other than
@@ -25,6 +27,11 @@ use ucdk_release_proto::v1::BuildSystemKind;
 /// `UNKNOWN`, `INFRA_FAILURE`, `NOT_SET_TEST_STATUS`, a name a later Buck2 adds, and a name in
 /// any other case.
 const BUCK2_RAN: [&str; 5] = ["PASS", "FAIL", "FATAL", "TIMEOUT", "RERUN"];
+
+/// The enum numbers of the same statuses in `TestStatus` (`PASS` = 1, `FAIL` = 2, `FATAL` = 5,
+/// `TIMEOUT` = 6, `RERUN` = 8), in the order of `BUCK2_RAN`. Every other number does not count,
+/// whether Buck2 names it (0, 3, 4, 7, 9, 10, 11) or not.
+const BUCK2_RAN_NUMBERS: [i64; 5] = [1, 2, 5, 6, 8];
 
 /// Bazel overall statuses of a summary that tested nothing.
 const BAZEL_NOT_TESTED: [&str; 3] = ["NO_STATUS", "FAILED_TO_BUILD", "TOOL_HALTED_BEFORE_TESTING"];
@@ -62,11 +69,16 @@ fn has_run_result(value: &Value) -> bool {
     }
 }
 
+/// Whether the record's `status` is a ran status, by name or by enum number. Only a JSON string
+/// or an integer is read; a fraction, a boolean, null, a list or an object is not a status.
 fn ran_status(result: &Value) -> bool {
-    result
-        .get("status")
-        .and_then(Value::as_str)
-        .is_some_and(|status| BUCK2_RAN.contains(&status))
+    match result.get("status") {
+        Some(Value::String(name)) => BUCK2_RAN.contains(&name.as_str()),
+        Some(Value::Number(number)) => number
+            .as_i64()
+            .is_some_and(|value| BUCK2_RAN_NUMBERS.contains(&value)),
+        _ => false,
+    }
 }
 
 /// The runs of the test summary of the event, when it has one that tested something.

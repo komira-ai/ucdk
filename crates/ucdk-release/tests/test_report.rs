@@ -109,6 +109,72 @@ fn only_the_statuses_that_mean_a_test_ran_count_in_a_buck2_event_log() {
     assert_eq!(ran(Buck2, Some(&none)), 0);
 }
 
+/// A Buck2 event log line that carries a test result whose `status` is the given JSON text.
+///
+/// The shape is derived from Buck2's source, not captured from a live run: `TestResult.status` is
+/// a protobuf enum field (`TestStatus`, `app/buck2_data/data.proto`), generated as an `i32`, and
+/// `app/buck2_data/build.rs` derives `serde::Serialize` for every type and gives a by-name
+/// serializer only to the `kind` of `ActionExecutionStart` and `ActionExecutionEnd`. The event
+/// log therefore carries the status as a number. The record is an `InstantEvent` holding a
+/// `TestResult` with the proto's field names (`name`, `status`, `details`).
+fn buck2_result_raw(status: &str) -> String {
+    format!(
+        r#"{{"Event":{{"event_time":"2026-10-20T10:00:00Z","data":{{"Instant":{{"data":{{"TestResult":{{"name":"t","status":{status},"details":""}}}}}}}}}}}}"#
+    )
+}
+
+#[test]
+fn a_buck2_status_given_as_its_enum_number_counts_when_it_means_a_test_ran() {
+    // PASS = 1, FAIL = 2, FATAL = 5, TIMEOUT = 6 and RERUN = 8 in `TestStatus`.
+    for status in [1, 2, 5, 6, 8] {
+        assert_eq!(
+            ran(
+                Buck2,
+                Some(buck2_result_raw(&status.to_string()).as_bytes())
+            ),
+            1,
+            "{status}"
+        );
+    }
+    // NOT_SET_TEST_STATUS = 0, SKIP = 3, OMITTED = 4, UNKNOWN = 7, LISTING_SUCCESS = 9,
+    // LISTING_FAILED = 10, INFRA_FAILURE = 11, a number past the enum, and a negative one.
+    for status in [0, 3, 4, 7, 9, 10, 11, 12, 99, -1] {
+        assert_eq!(
+            ran(
+                Buck2,
+                Some(buck2_result_raw(&status.to_string()).as_bytes())
+            ),
+            0,
+            "{status}"
+        );
+    }
+    // Any other JSON type is not a status: a fraction (even one equal to a ran number), a
+    // number in text, null, a boolean, a list and an object.
+    for status in [
+        "1.0",
+        "1.5",
+        r#""1""#,
+        "null",
+        "true",
+        "[1]",
+        r#"{"PASS":1}"#,
+    ] {
+        assert_eq!(
+            ran(Buck2, Some(buck2_result_raw(status).as_bytes())),
+            0,
+            "{status}"
+        );
+    }
+    // Names and numbers mix in one log, one count per line.
+    let log = lines(&[
+        buck2_result_raw("1"),
+        buck2_result("FAIL"),
+        buck2_result_raw("3"),
+        buck2_result_raw("7"),
+    ]);
+    assert_eq!(ran(Buck2, Some(&log)), 2);
+}
+
 #[test]
 fn a_bazel_event_file_counts_the_runs_of_each_test_summary() {
     let build_event =
