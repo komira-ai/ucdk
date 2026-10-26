@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """The C ABI of the ucdk library (`crates/ucdk-capi/include/ucdk.h`), bound with ctypes.
 
-This is the whole of the binding: load the library, check its version, call the ten functions.
+This is the whole of the binding: load the library, check its version, call the five functions.
 Nothing is read from the environment; the library is named by an argument or found in the
 package directory.
 """
@@ -14,10 +14,10 @@ from typing import Optional, Tuple, Union
 from .errors import AbiMismatch, LibraryError, UcdkError, error_for
 
 #: The ABI this SDK was written for, as (major, minor): the header's UCDK_ABI_MAJOR/MINOR.
-SDK_ABI = (0, 2)
+SDK_ABI = (0, 3)
 
 _NAME = "libucdk_capi.dylib" if sys.platform == "darwin" else "libucdk_capi.so"
-_VERBS = ("load_catalog", "plan", "apply", "destroy", "status", "leaks")
+_VERBS = ("ledger_show",)
 
 
 class _Buf(ctypes.Structure):
@@ -32,8 +32,24 @@ def split_version(version: int) -> Tuple[int, int]:
 
 
 def accepts(sdk: Tuple[int, int], library: Tuple[int, int]) -> bool:
-    """An SDK built for (M, m) accepts a library with the same M and a minor of at least m."""
-    return library[0] == sdk[0] and library[1] >= sdk[1]
+    """Whether an SDK built for `sdk` can use a library of ABI `library`, both (major, minor).
+
+    The major must be the same. While it is 0 nothing is promised, and a minor may remove a
+    function as well as add one, so the minor must be the same too. From major 1 a minor only
+    adds, and the library's minor must be at least the SDK's.
+    """
+    if library[0] != sdk[0]:
+        return False
+    if sdk[0] == 0:
+        return library[1] == sdk[1]
+    return library[1] >= sdk[1]
+
+
+def needs(sdk: Tuple[int, int]) -> str:
+    """What an SDK built for `sdk` needs, as the text of a refusal says it."""
+    if sdk[0] == 0:
+        return "exactly ucdk ABI %d.%d (while the major is 0, the minor must match)" % sdk
+    return "ucdk ABI %d.%d or a later %d.x" % (*sdk, sdk[0])
 
 
 class Library:
@@ -77,8 +93,7 @@ class Library:
         version = split_version(function())
         if not accepts(self.SDK_ABI, version):
             raise AbiMismatch(
-                "this SDK needs ucdk ABI %d.%d or a later %d.x; %s is ABI %d.%d"
-                % (*self.SDK_ABI, self.SDK_ABI[0], self.path, *version)
+                "this SDK needs %s; %s is ABI %d.%d" % (needs(self.SDK_ABI), self.path, *version)
             )
         return version
 

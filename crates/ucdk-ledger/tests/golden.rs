@@ -21,11 +21,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{Scratch, path};
+use ucdk_core::{Locator, RecordPath, Tag};
 use ucdk_ledger::{
     Change, FileLedger, LeaseError, Ledger as _, MAX_CLOCK_SKEW, ManualClock, Origin, OwnerPath,
     Record, State,
 };
-use ucdk_provider::{Kind, NodePath, PhysicalId, Produced};
 
 /// When `ci-7` took the lease, in milliseconds on the clock the file was written with.
 const GRANTED: u64 = 1_000_000;
@@ -96,7 +96,7 @@ fn sample_records() -> Vec<Record> {
     let record = |text: &str, kind: &str, name: &str, origin: Origin, state: State| Record {
         owner: OwnerPath::of(&path(text)),
         path: path(text),
-        kind: Kind::new(kind),
+        kind: Tag::new(kind),
         name: name.to_owned(),
         origin,
         state,
@@ -111,18 +111,17 @@ fn sample_records() -> Vec<Record> {
             .collect::<BTreeMap<_, _>>()
     };
     vec![
-        record(
-            "app/db",
-            "service",
-            "app-db",
-            Origin::Created,
-            State::Confirmed,
-        )
-        .confirmed(PhysicalId::new("db-1"))
-        .with_outputs(&[
-            Produced::new("HOST", "db-host"),
-            Produced::new("PORT", "5432"),
-        ]),
+        Record {
+            outputs: outputs(&[("HOST", "db-host"), ("PORT", "5432")]),
+            ..record(
+                "app/db",
+                "service",
+                "app-db",
+                Origin::Created,
+                State::Confirmed,
+            )
+            .confirmed(Locator::new("db-1"))
+        },
         Record {
             deps: BTreeSet::from([path("app/db")]),
             outputs: outputs(&[("URL", "run-url")]),
@@ -133,7 +132,7 @@ fn sample_records() -> Vec<Record> {
                 Origin::Created,
                 State::Confirmed,
             )
-            .confirmed(PhysicalId::new("run-1"))
+            .confirmed(Locator::new("run-1"))
         },
         record(
             "app/pending",
@@ -143,7 +142,7 @@ fn sample_records() -> Vec<Record> {
             State::Intent,
         ),
         record("app/old", "job", "app-old", Origin::Created, State::Reaping)
-            .confirmed(PhysicalId::new("old-1"))
+            .confirmed(Locator::new("old-1"))
             .in_state(State::Reaping),
         Record {
             outputs: outputs(&[("EMPTY", ""), ("NOTE", "two words")]),
@@ -154,7 +153,7 @@ fn sample_records() -> Vec<Record> {
                 Origin::Adopted,
                 State::Confirmed,
             )
-            .confirmed(PhysicalId::new("found-1"))
+            .confirmed(Locator::new("found-1"))
         },
     ]
 }
@@ -189,7 +188,7 @@ fn the_records_golden_reads_back_to_the_same_records() {
     std::fs::copy(dir().join("records.ucdk"), scratch.file()).expect("copy");
     let ledger = FileLedger::open(scratch.file()).expect("open");
     let read = ledger.read().expect("read");
-    let wanted: BTreeMap<NodePath, Record> = sample_records()
+    let wanted: BTreeMap<RecordPath, Record> = sample_records()
         .into_iter()
         .map(|r| (r.path.clone(), r))
         .collect();

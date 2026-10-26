@@ -67,14 +67,14 @@ fn the_goldens_set_every_field_of_every_message() {
             all_fields(&message, &mut wanted);
         }
     }
-    // The Duration the resource messages hold is a message of the SDK too.
-    all_fields(
-        &pool
-            .get_message_by_name("google.protobuf.Duration")
-            .expect("Duration"),
-        &mut wanted,
-    );
     let missing: Vec<&String> = wanted.difference(&seen).collect();
     assert!(missing.is_empty(), "no golden sets: {missing:#?}");
-    assert!(wanted.len() > 100, "{} fields read", wanted.len());
+    // The number of fields of the messages of `api.proto`, read off a run of this test. A field
+    // added without a golden fails by name above and by count here, and a floor that only said
+    // "more than so many" would let a few fields go unread when others are added.
+    assert_eq!(wanted.len(), FIELDS, "{wanted:#?}");
 }
+
+/// The fields of the messages of `ucdk.api.v1`: SessionConfig 4, Error 2, LedgerShowRequest 0,
+/// Pair 2, LeaseView 4, LedgerRecord 8, LedgerShowResponse 4 and Outcome 4.
+const FIELDS: usize = 28;

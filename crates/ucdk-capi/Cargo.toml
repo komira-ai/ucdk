@@ -1,6 +1,6 @@
 [package]
 name = "ucdk-capi"
-description = "The C ABI of ucdk: a shared library whose ten functions carry protobuf bytes, and the header that declares them."
+description = "The C ABI of ucdk: a shared library whose five functions carry protobuf bytes, and the header that declares them."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -23,12 +23,10 @@ test-clock = []
 [dependencies]
 prost.workspace = true
 ucdk-api = { path = "../ucdk-api" }
-ucdk-engine = { path = "../ucdk-engine" }
 ucdk-ledger = { path = "../ucdk-ledger" }
-ucdk-plan = { path = "../ucdk-plan" }
-ucdk-proto = { path = "../ucdk-proto" }
-ucdk-provider = { path = "../ucdk-provider" }
-ucdk-provider-fake = { path = "../ucdk-provider-fake" }
+
+[dev-dependencies]
+ucdk-core = { path = "../ucdk-core" }
 
 # The one crate allowed `unsafe`: the workspace forbids it, so this crate cannot inherit the
 # workspace lint table and repeats it, with `unsafe_code` lowered to `deny` and every unsafe

@@ -49,7 +49,7 @@ pub fn module_of(package: &str) -> String {
 }
 
 /// The Python name of a type: its name inside its package, nested types joined by `_`
-/// (`ucdk.resource.v1.Service.Public` is `Service_Public`).
+/// (`example.shapes.v1.Scalars.Nested` is `Scalars_Nested`).
 pub fn local_name(full_name: &str, package: &str) -> String {
     let inside = full_name
         .strip_prefix(package)

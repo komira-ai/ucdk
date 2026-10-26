@@ -1,6 +1,6 @@
 [package]
 name = "ucdk-api"
-description = "The ucdk.api.v1 messages, their conversion to and from the engine's values, and the one table from outcome to exit class."
+description = "The ucdk.api.v1 messages, the one ledger-show function over them, and the table of exit classes."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,20 +10,12 @@ publish.workspace = true
 
 [dependencies]
 prost.workspace = true
-ucdk-engine = { path = "../ucdk-engine" }
-ucdk-plan = { path = "../ucdk-plan" }
-ucdk-proto = { path = "../ucdk-proto" }
-ucdk-provider = { path = "../ucdk-provider" }
+ucdk-core = { path = "../ucdk-core" }
+ucdk-ledger = { path = "../ucdk-ledger" }
 
 [build-dependencies]
 prost-build.workspace = true
 protox.workspace = true
-
-[dev-dependencies]
-# The Duration of the request-timeout fields the wire goldens build.
-prost-types.workspace = true
-ucdk-ledger = { path = "../ucdk-ledger" }
-ucdk-provider-fake = { path = "../ucdk-provider-fake" }
 
 [lints]
 workspace = true

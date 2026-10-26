@@ -2,11 +2,11 @@
 /**
  * The C ABI of the ucdk library (`crates/ucdk-capi/include/ucdk.h`), bound with `node:ffi`.
  *
- * This is the whole of the binding: load the library, check its version, call the ten
+ * This is the whole of the binding: load the library, check its version, call the five
  * functions. Nothing is read from the environment; the library is named by an argument.
  *
  * A `Library` calls the library on the thread it is used on, and a call blocks that thread until
- * the engine returns. `Session` runs a `Library` on a worker thread and exposes promises.
+ * the library returns. `Session` runs a `Library` on a worker thread and exposes promises.
  */
 
 import type * as Ffi from "node:ffi";
@@ -14,21 +14,36 @@ import type * as Ffi from "node:ffi";
 import { AbiMismatch, LibraryError, errorFor } from "./errors.ts";
 
 /** The ABI this SDK was written for, as [major, minor]: the header's UCDK_ABI_MAJOR/MINOR. */
-export const SDK_ABI: readonly [number, number] = [0, 2];
+export const SDK_ABI: readonly [number, number] = [0, 3];
 
 /** The verbs that take a request message and answer with a response message. */
-export type Verb = "load_catalog" | "plan" | "apply" | "destroy" | "status" | "leaks";
+export type Verb = "ledger_show";
 
-const VERBS: readonly Verb[] = ["load_catalog", "plan", "apply", "destroy", "status", "leaks"];
+const VERBS: readonly Verb[] = ["ledger_show"];
 
 /** [major, minor] of `ucdk_abi_version()`, which is (major << 16) | minor. */
 export function splitVersion(version: number): [number, number] {
   return [version >>> 16, version & 0xffff];
 }
 
-/** An SDK built for [M, m] accepts a library with the same M and a minor of at least m. */
+/**
+ * Whether an SDK built for `sdk` can use a library of ABI `library`, both [major, minor]. The
+ * major must be the same. While it is 0 nothing is promised, and a minor may remove a function as
+ * well as add one, so the minor must be the same too. From major 1 a minor only adds, and the
+ * library's minor must be at least the SDK's.
+ */
 export function accepts(sdk: readonly [number, number], library: readonly [number, number]): boolean {
-  return library[0] === sdk[0] && library[1] >= sdk[1];
+  if (library[0] !== sdk[0]) {
+    return false;
+  }
+  return sdk[0] === 0 ? library[1] === sdk[1] : library[1] >= sdk[1];
+}
+
+/** What an SDK built for `sdk` needs, as the text of a refusal says it. */
+export function needs(sdk: readonly [number, number]): string {
+  return sdk[0] === 0
+    ? `exactly ucdk ABI ${sdk[0]}.${sdk[1]} (while the major is 0, the minor must match)`
+    : `ucdk ABI ${sdk[0]}.${sdk[1]} or a later ${sdk[0]}.x`;
 }
 
 export interface LibraryOptions {
@@ -100,7 +115,7 @@ export class Library {
     const abi = splitVersion(version() as number);
     if (!accepts(sdk, abi)) {
       throw new AbiMismatch(
-        `this SDK needs ucdk ABI ${sdk[0]}.${sdk[1]} or a later ${sdk[0]}.x; ${this.path} is ABI ${abi[0]}.${abi[1]}`,
+        `this SDK needs ${needs(sdk)}; ${this.path} is ABI ${abi[0]}.${abi[1]}`,
       );
     }
     return abi;

@@ -1,6 +1,6 @@
 [package]
 name = "ucdk-cli"
-description = "The ucdk command line: plan, apply and destroy against the fake provider, as a library with a thin binary."
+description = "The ucdk command line: it shows a ledger, as a library with a thin binary."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,14 +13,11 @@ name = "ucdk"
 path = "src/main.rs"
 
 [dependencies]
-prost.workspace = true
 ucdk-api = { path = "../ucdk-api" }
-ucdk-engine = { path = "../ucdk-engine" }
 ucdk-ledger = { path = "../ucdk-ledger" }
-ucdk-plan = { path = "../ucdk-plan" }
-ucdk-proto = { path = "../ucdk-proto" }
-ucdk-provider = { path = "../ucdk-provider" }
-ucdk-provider-fake = { path = "../ucdk-provider-fake" }
+
+[dev-dependencies]
+ucdk-core = { path = "../ucdk-core" }
 
 [lints]
 workspace = true

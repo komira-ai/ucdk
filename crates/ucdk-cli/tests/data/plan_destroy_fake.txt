@@ -1,8 +1,0 @@
-ucdk plan
-provider: fake
-mode: destroy
-plan-hash: 1eaf591e1cf79bbf473299bb332af588d767bb41b2af856ef25038dc01472715
-  delete  example-svc/public [public]
-  delete  example-svc/run [service]
-  delete  example-db/run [service]
-3 to change

@@ -74,8 +74,8 @@ struct Inner {
     path: PathBuf,
     clock: Arc<dyn Clock>,
     /// `<path>.lock`: held (exclusively) only for the length of one read-modify-write, never
-    /// between calls.
-    lock: File,
+    /// between calls. `None` for a ledger opened read-only, which has no lock file.
+    lock: Option<File>,
     /// Orders the calls of the handles that share this one. An advisory lock held through one
     /// open file does not exclude another user of the same file, so threads queue here first.
     turn: Mutex<()>,
@@ -175,26 +175,65 @@ impl FileLedger {
             .truncate(false)
             .open(&lock_path)
             .map_err(|e| io_error(&lock_path, &e))?;
-        let ledger = Self {
+        // Nobody else holds this handle yet, so it needs no turn: only the file lock.
+        let held = Held::take(&lock).map_err(|e| io_error(&lock_path, &e))?;
+        // Writes happen under the lock, so a `.tmp` seen under it is a write that never finished.
+        let stale = sibling(&path, ".tmp");
+        match fs::remove_file(&stale) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(io_error(&stale, &e)),
+        }
+        load(&path)?;
+        drop(held);
+        Ok(Self::with_lock(path, clock, Some(lock)))
+    }
+
+    /// Opens the ledger at `path` to read it and nothing else: [`FileLedger::open_read_only_with_clock`]
+    /// with the wall clock.
+    ///
+    /// # Errors
+    ///
+    /// As [`FileLedger::open_read_only_with_clock`].
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, OpenError> {
+        Self::open_read_only_with_clock(path, Arc::new(SystemClock))
+    }
+
+    /// Opens the ledger at `path` to read it and nothing else. It reads the document once, to
+    /// refuse a file that is not a whole ledger, and the file must exist. It creates no
+    /// `<path>.lock`, takes no lock, and removes no `<path>.tmp`, so it works in a directory
+    /// it may not write and contends with no writer: a write replaces the file whole, so a
+    /// read sees the old document or the new one. Every write, renew and release answers
+    /// [`LedgerError::ReadOnly`] and every acquire [`LeaseError::ReadOnly`]. A read reports
+    /// [`Snapshot::at`] by `clock`, so a caller that fixes its clock sees leases by that clock.
+    ///
+    /// # Errors
+    ///
+    /// [`OpenError`] when the file is missing, corrupt, newer than this build reads, or cannot
+    /// be read.
+    pub fn open_read_only_with_clock(
+        path: impl AsRef<Path>,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self, OpenError> {
+        let path = path.as_ref().to_owned();
+        if load(&path)?.is_none() {
+            return Err(OpenError::Io {
+                path,
+                why: "the file does not exist".to_owned(),
+            });
+        }
+        Ok(Self::with_lock(path, clock, None))
+    }
+
+    fn with_lock(path: PathBuf, clock: Arc<dyn Clock>, lock: Option<File>) -> Self {
+        Self {
             inner: Arc::new(Inner {
                 path,
                 clock,
                 lock,
                 turn: Mutex::new(()),
             }),
-        };
-        let turn = ledger.turn();
-        let held = Held::take(&ledger.inner.lock).map_err(|e| io_error(&lock_path, &e))?;
-        // Writes happen under the lock, so a `.tmp` seen under it is a write that never finished.
-        let stale = sibling(&ledger.inner.path, ".tmp");
-        match fs::remove_file(&stale) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(io_error(&stale, &e)),
         }
-        load(&ledger.inner.path)?;
-        drop((held, turn));
-        Ok(ledger)
     }
 
     fn turn(&self) -> MutexGuard<'_, ()> {
@@ -226,15 +265,19 @@ impl FileLedger {
 
     /// Begins a read-modify-write: waits for its turn and for the file lock, then reads the
     /// file. Both are given back when the `Txn` is dropped.
-    fn begin(&self) -> Result<Txn<'_>, String> {
+    /// A ledger opened read-only has no lock and refuses here, before anything is read.
+    fn begin(&self) -> Result<Txn<'_>, Refused> {
+        let Some(lock) = &self.inner.lock else {
+            return Err(Refused::ReadOnly);
+        };
         let turn = self.turn();
-        let held = Held::take(&self.inner.lock).map_err(|e| {
-            format!(
+        let held = Held::take(lock).map_err(|e| {
+            Refused::Unavailable(format!(
                 "{}: the lock could not be taken ({e})",
                 self.inner.path.display()
-            )
+            ))
         })?;
-        let document = self.current()?;
+        let document = self.current().map_err(Refused::Unavailable)?;
         Ok(Txn {
             ledger: self,
             document,
@@ -249,7 +292,7 @@ impl FileLedger {
         expected: &Token,
         change: Change,
     ) -> Result<Token, LedgerError> {
-        let txn = self.begin().map_err(LedgerError::Unavailable)?;
+        let txn = self.begin()?;
         let doc = &txn.document.doc;
         doc.admit(self.inner.clock.now_millis(), fence)?;
         if expected.0 != doc.version {
@@ -259,6 +302,32 @@ impl FileLedger {
         let version = next.apply(change);
         txn.persist(&next).map_err(LedgerError::Unavailable)?;
         Ok(Token(version))
+    }
+}
+
+/// Why a read-modify-write did not begin.
+enum Refused {
+    /// The ledger was opened read-only.
+    ReadOnly,
+    /// The lock or the file could not be had.
+    Unavailable(String),
+}
+
+impl From<Refused> for LedgerError {
+    fn from(refused: Refused) -> Self {
+        match refused {
+            Refused::ReadOnly => Self::ReadOnly,
+            Refused::Unavailable(why) => Self::Unavailable(why),
+        }
+    }
+}
+
+impl From<Refused> for LeaseError {
+    fn from(refused: Refused) -> Self {
+        match refused {
+            Refused::ReadOnly => Self::ReadOnly,
+            Refused::Unavailable(why) => Self::Unavailable(why),
+        }
     }
 }
 
@@ -314,10 +383,7 @@ impl Ledger for FileLedger {
     fn read(&self) -> Result<Snapshot, LedgerError> {
         // A rename replaces the file whole, so a read needs no lock.
         let document = self.current().map_err(LedgerError::Unavailable)?;
-        Ok(Snapshot {
-            token: Token(document.doc.version),
-            records: document.doc.records,
-        })
+        Ok(document.doc.snapshot(self.inner.clock.now_millis()))
     }
 
     fn write(&self, expected: &Token, change: Change) -> Result<Token, LedgerError> {
@@ -334,7 +400,7 @@ impl Ledger for FileLedger {
     }
 
     fn acquire(&self, holder: &str, ttl: Duration) -> Result<Lease, LeaseError> {
-        let txn = self.begin().map_err(LeaseError::Unavailable)?;
+        let txn = self.begin()?;
         let mut next = txn.document.doc.clone();
         let lease = next.acquire(self.inner.clock.now_millis(), holder, ttl)?;
         txn.persist(&next).map_err(LeaseError::Unavailable)?;
@@ -342,7 +408,7 @@ impl Ledger for FileLedger {
     }
 
     fn renew(&self, fence: Fence, ttl: Duration) -> Result<Lease, LedgerError> {
-        let txn = self.begin().map_err(LedgerError::Unavailable)?;
+        let txn = self.begin()?;
         let mut next = txn.document.doc.clone();
         let lease = next.renew(self.inner.clock.now_millis(), fence, ttl)?;
         txn.persist(&next).map_err(LedgerError::Unavailable)?;
@@ -350,7 +416,7 @@ impl Ledger for FileLedger {
     }
 
     fn release(&self, fence: Fence) -> Result<(), LedgerError> {
-        let txn = self.begin().map_err(LedgerError::Unavailable)?;
+        let txn = self.begin()?;
         let mut next = txn.document.doc.clone();
         next.release(fence)?;
         txn.persist(&next).map_err(LedgerError::Unavailable)

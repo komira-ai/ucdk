@@ -8,8 +8,8 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use common::{
-    SHAPES, generate_shapes, generate_shapes_ts, pool_of, pool_with, refusal, refusal_ts, root,
-    shapes_pool, text_of,
+    SHAPES, USES, generate_shapes, generate_shapes_ts, pool_of, pool_with, refusal, refusal_ts,
+    root, shapes_pool, text_of,
 };
 use ucdk_codegen::{Error, python, typescript};
 
@@ -67,44 +67,52 @@ fn the_fixture_generates_the_golden_files() {
     // `type` of the nearest `package.json` as Node does.
     generated.insert("package.json".to_owned());
     assert_eq!(names(&golden_dir()), generated, "a golden is left over");
-    // No `Resource` in the fixture, so no templates.
-    assert!(!generated.iter().any(|p| p.contains("resources.")));
 }
 
 #[test]
-fn the_repository_protos_generate_a_module_per_package_and_the_templates() {
-    let files = ucdk_codegen::python_for(&root()).expect("the protos generate");
+fn the_repository_proto_generates_one_python_module() {
+    let files = ucdk_codegen::python_for(&root()).expect("the proto generates");
     let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
     assert_eq!(
         paths,
         [
             "ucdk/generated/__init__.py",
             "ucdk/generated/_wire.py",
-            "ucdk/generated/google_protobuf.py",
             "ucdk/generated/ucdk_api_v1.py",
-            "ucdk/generated/ucdk_resource_v1.py",
-            "ucdk/generated/resources.py",
         ]
     );
     assert!(files.iter().all(|f| f.text.contains("Do not edit.")));
-    let resources = text_of(&files, "resources.py");
-    assert!(resources.contains("class Service(_Template):"));
-    assert!(resources.contains("class Job(_Template):"));
-    assert!(resources.contains("PORTABILITY = ucdk_resource_v1.Portability.PORTABLE"));
-    assert!(
-        resources.contains("EXPOSES = (ucdk_resource_v1.Output.URL, ucdk_resource_v1.Output.HOST)")
-    );
-    assert!(resources.contains("EXPOSES = ()"));
-    assert!(resources.contains("def url(self) -> ucdk_resource_v1.Ref:"));
-    assert!(resources.contains("from . import google_protobuf"));
     let api = text_of(&files, "ucdk_api_v1.py");
-    assert!(api.contains("from . import ucdk_resource_v1"));
+    // The one package imports no other.
+    assert!(!api.contains("from . import ucdk_") && !api.contains("from . import google_"));
     assert!(api.contains("class Outcome(_wire.Message):"));
+    assert!(api.contains("class LedgerShowResponse(_wire.Message):"));
     // The enum values lose the name of their enum.
     assert!(api.contains("    FAILED_NO_EFFECT = 4"));
-    // The nested messages of the resource protos have flat names.
+}
+
+#[test]
+fn a_message_of_another_package_is_imported_in_python() {
+    let pool = pool_with(&[], USES, true);
+    let files = python::generate(&pool, &[USES]).expect("generates");
+    let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        [
+            "ucdk/generated/__init__.py",
+            "ucdk/generated/_wire.py",
+            "ucdk/generated/example_other_v1.py",
+            "ucdk/generated/example_uses_v1.py",
+        ]
+    );
+    let uses = text_of(&files, "example_uses_v1.py");
+    assert!(uses.contains("from . import example_other_v1\n"));
+    // A message, an enum and the value of a map are named by the module they come from.
+    assert!(uses.contains("example_other_v1.Label"));
+    assert!(uses.contains("example_other_v1.Color"));
     assert!(
-        text_of(&files, "ucdk_resource_v1.py").contains("class Service_Public(_wire.Message):")
+        !text_of(&files, "example_other_v1.py").contains("from . import example_"),
+        "the package that is used imports nothing"
     );
 }
 
@@ -257,41 +265,45 @@ fn a_pool_of_an_inline_proto_generates() {
 // ---- the TypeScript target ------------------------------------------------------------------
 
 #[test]
-fn the_repository_protos_generate_a_typescript_module_per_package_and_the_templates() {
-    let files = ucdk_codegen::typescript_for(&root()).expect("the protos generate");
+fn the_repository_proto_generates_one_typescript_module() {
+    let files = ucdk_codegen::typescript_for(&root()).expect("the proto generates");
+    let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        ["src/generated/wire.ts", "src/generated/ucdk_api_v1.ts"]
+    );
+    assert!(files.iter().all(|f| f.text.contains("Do not edit.")));
+    let api = text_of(&files, "ucdk_api_v1.ts");
+    // The one package imports the wire primitives and no other package.
+    assert!(api.contains("import * as wire from \"./wire.ts\";"));
+    assert_eq!(api.matches("import * as").count(), 1);
+    assert!(api.contains("export class Outcome extends wire.Message {"));
+    assert!(api.contains("export class LedgerShowResponse extends wire.Message {"));
+    // The enum values lose the name of their enum.
+    assert!(api.contains("  FAILED_NO_EFFECT: 4,"));
+}
+
+#[test]
+fn a_message_of_another_package_is_imported_in_typescript() {
+    let pool = pool_with(&[], USES, true);
+    let files = typescript::generate(&pool, &[USES]).expect("generates");
     let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
     assert_eq!(
         paths,
         [
             "src/generated/wire.ts",
-            "src/generated/google_protobuf.ts",
-            "src/generated/ucdk_api_v1.ts",
-            "src/generated/ucdk_resource_v1.ts",
-            "src/generated/resources.ts",
+            "src/generated/example_other_v1.ts",
+            "src/generated/example_uses_v1.ts",
         ]
     );
-    assert!(files.iter().all(|f| f.text.contains("Do not edit.")));
-    let resources = text_of(&files, "resources.ts");
-    assert!(resources.contains("export class Service extends Template {"));
-    assert!(resources.contains("export class Job extends Template {"));
+    let uses = text_of(&files, "example_uses_v1.ts");
+    assert!(uses.contains("import * as example_other_v1 from \"./example_other_v1.ts\";"));
+    assert!(uses.contains("example_other_v1.Label"));
+    assert!(uses.contains("example_other_v1.Color"));
     assert!(
-        resources.contains("static readonly PORTABILITY = ucdk_resource_v1.Portability.PORTABLE;")
+        !text_of(&files, "example_other_v1.ts").contains("import * as example_"),
+        "the package that is used imports nothing"
     );
-    assert!(resources.contains(
-        "static readonly EXPOSES = [ucdk_resource_v1.Output.URL, ucdk_resource_v1.Output.HOST] as const;"
-    ));
-    assert!(resources.contains("static readonly EXPOSES = [] as const;"));
-    assert!(resources.contains("get url(): ucdk_resource_v1.Ref {"));
-    // Only the modules the templates use are imported.
-    assert!(resources.contains("import * as google_protobuf from \"./google_protobuf.ts\";"));
-    assert!(!resources.contains("ucdk_api_v1"));
-    let api = text_of(&files, "ucdk_api_v1.ts");
-    assert!(api.contains("import * as ucdk_resource_v1 from \"./ucdk_resource_v1.ts\";"));
-    assert!(api.contains("export class Outcome extends wire.Message {"));
-    // The enum values lose the name of their enum.
-    assert!(api.contains("  FAILED_NO_EFFECT: 4,"));
-    // The nested messages of the resource protos have flat names.
-    assert!(text_of(&files, "ucdk_resource_v1.ts").contains("export class Service_Public extends"));
 }
 
 #[test]

@@ -1,25 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
-"""What the SDK tests share: the library, the scenario data of the command line, and the pair of
-services every scenario starts from."""
+"""What the SDK tests share: the library, the ledger goldens and the clocks a session reads."""
 
-import re
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
-from ucdk import Library, Session, api, proto, resources
+from ucdk import Library, Session, api
 
 REPO = Path(__file__).resolve().parents[3]
-DATA = REPO / "crates/ucdk-cli/tests/data"
 LEDGER_GOLDEN = REPO / "sdk/ledger-golden"
-# The clock a session reads, in milliseconds, against the lease in `leased.ucdk`: `ci-7` took it
-# at 1_000_000 for an hour. The tests never read the time.
+# The clocks a session reads, in milliseconds, against the lease in `leased.ucdk`: `ci-7` took it
+# at 1_000_000 for an hour, so it lapses at 4_600_000, and another holder is refused until the
+# skew bound (5_000) after that. The tests never read the time.
 WHILE_HELD_MS = 2_000_000
+EXPIRES_MS = 4_600_000
+LAPSING_MS = 4_602_000
 AFTER_LAPSE_MS = 10_000_000
 LIBRARY = REPO / "target/debug" / (
     "libucdk_capi.dylib" if sys.platform == "darwin" else "libucdk_capi.so"
 )
-
-IMAGE = proto.Image.digest("sha256:aa")
 
 
 def library_path():
@@ -33,77 +33,33 @@ def library():
     return Library(library_path())
 
 
-def open_session(provider="fake", **config):
+def open_session(**config):
+    """A session on a memory ledger unless the config says otherwise."""
     config.setdefault("ledger_kind", "memory")
-    return Session(api.SessionConfig(provider=provider, **config), library_path=library_path())
+    return Session(api.SessionConfig(**config), library_path=library_path())
 
 
-def pair():
-    """`example-svc` (public) calls `example-db`: the pair of the command line's scenario."""
-    db = resources.Service("example-db", IMAGE, port=8080)
-    svc = resources.Service(
-        "example-svc", IMAGE, port=8080, exposure=resources.Service.Public(), uses=[db]
-    )
-    return resources.resource_list(svc, db)
+class GoldenCopy:
+    """A copy of a ledger golden in a directory of its own, removed when the block ends, so that
+    a session can never change the golden itself."""
+
+    def __init__(self, name):
+        self._name = name
+
+    def __enter__(self):
+        self._directory = tempfile.TemporaryDirectory()
+        self.dir = Path(self._directory.name)
+        self.path = self.dir / "ledger.ucdk"
+        shutil.copy(LEDGER_GOLDEN / self._name, self.path)
+        return self
+
+    def __exit__(self, *exc):
+        self._directory.cleanup()
+
+    def listing(self):
+        """The directory's files with their bytes, by name."""
+        return {p.name: p.read_bytes() for p in sorted(self.dir.iterdir())}
 
 
-# ---- the command line's recorded output ---------------------------------------------------------
-
-ACTIONS = {
-    "create": api.StepAction.CREATE,
-    "update": api.StepAction.UPDATE,
-    "ok": api.StepAction.NOOP,
-    "delete": api.StepAction.DELETE,
-    "wait": api.StepAction.CONVERGING,
-    "later": api.StepAction.KNOWN_AFTER_APPLY,
-    "reap": api.StepAction.REAP,
-}
-
-
-def read_plan(name):
-    """(hash, [(action, path, kind)]) of a plan the command line printed."""
-    lines = (DATA / name).read_text().splitlines()
-    plan_hash = next(l[len("plan-hash: ") :] for l in lines if l.startswith("plan-hash: "))
-    steps = []
-    for line in lines:
-        if line.startswith("  "):
-            word, path, kind = line.split()
-            steps.append((ACTIONS[word], path, kind.strip("[]")))
-    return plan_hash, steps
-
-
-def read_report(name):
-    """{verb: [paths]} of a run the command line printed."""
-    report = {}
-    for line in (DATA / name).read_text().splitlines():
-        if line.startswith("  "):
-            verb, path = line.split()
-            report.setdefault(verb, []).append(path)
-    return report
-
-
-RECORDS = {"none": None, "confirmed": api.RecordState.CONFIRMED}
-LIVES = {"absent": None, "ready": api.LiveStatus.READY}
-STANDINGS = {"agrees": api.Standing.AGREES, "not applied": api.Standing.NOT_APPLIED}
-
-
-def read_status(name):
-    """[(path, kind, record, live, standing)] of the status the command line printed."""
-    out = []
-    pattern = re.compile(r"  (\S+) \[(\S+)\] record: (\w+), live: (\w+), (.+)")
-    for line in (DATA / name).read_text().splitlines():
-        match = pattern.fullmatch(line)
-        if match:
-            path, kind, record, live, standing = match.groups()
-            out.append((path, kind, RECORDS[record], LIVES[live], STANDINGS[standing]))
-    return out
-
-
-def steps_of(plan):
-    return [(s.action, s.path, s.kind) for s in plan.steps]
-
-
-def objects_of(outcome):
-    return [
-        (o.path, o.kind, o.record, o.live, o.standing) for o in outcome.status.objects
-    ]
+def open_file_session(path, **config):
+    return open_session(ledger_kind="file", ledger_location=str(path), **config)

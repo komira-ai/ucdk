@@ -12,236 +12,64 @@ wrote it back the same way, and only the hand-built value tells them apart.
 import unittest
 from pathlib import Path
 
-from ucdk.generated import google_protobuf as gp
 from ucdk.generated import ucdk_api_v1 as api
-from ucdk.generated import ucdk_resource_v1 as pb
 
 GOLDEN = Path(__file__).resolve().parents[2] / "wire-golden"
 
 
-def step_image():
-    return pb.Image.output("build", "img", platform="linux/amd64")
+def error(code, message):
+    return api.Error(code=code, message=message)
 
 
-def digest_image():
-    return pb.Image.digest("sha256:aa", platform="linux/amd64")
-
-
-def secret(name):
-    return pb.SecretRef(name=name, store="vault", version="7")
-
-
-def full_service(**exposure_and_scale):
-    return pb.Service(
-        image=step_image(),
-        port=8080,
-        args=["--a", "--b"],
-        env={
-            "K": pb.Value.literal("v"),
-            "P": pb.Value.param("p"),
-            "R": pb.Value.ref(pb.Ref.standard(pb.Output.URL, resource="db")),
-            "N": pb.Value.ref(pb.Ref.named("cert", resource="db")),
-        },
-        size=pb.Size(cpu_millis=500, memory_mb=256),
-        health_path="/healthz",
-        request_timeout=gp.Duration(seconds=30, nanos=5),
-        max_concurrency=80,
-        secret_env={"S": secret("sec")},
-        **exposure_and_scale,
-    )
-
-
-def full_job(max_retries, **trigger):
-    return pb.Job(
-        image=digest_image(),
-        args=["go"],
-        size=pb.Size(cpu_millis=1000, memory_mb=512),
-        max_retries=max_retries,
-        timeout=gp.Duration(seconds=-600, nanos=-1),
-        env={"E": pb.Value.literal("e")},
-        secret_env={"T": secret("tok")},
-        **trigger,
-    )
-
-
-def resource_list():
-    return pb.ResourceList(
-        resource=[
-            pb.Resource(
-                id="web",
-                uses=[pb.Uses(target=pb.Ref(resource="db"), access=pb.Access.CALL)],
-                service=full_service(
-                    public=pb.Service_Public(), scale=pb.Scale(min=0, max=10)
-                ),
-            ),
-            pb.Resource(
-                id="nightly",
-                job=full_job(3, schedule=pb.Job_Schedule(cron="0 * * * *", timezone="UTC")),
-            ),
-        ]
-    )
-
-
-def retained():
-    return api.Retained(reason=api.RetainReason.UNDELETABLE, detail="held by the provider")
-
-
-def report():
-    return api.Report(
-        created=["a/run", "b/run"],
-        updated=["c/run"],
-        resumed=["d/run"],
-        deleted=["e/run"],
-        reaped=["f/run"],
-        retained=[api.RetainedObject(path="g/run", retained=retained())],
-        converging=["h/run"],
-        failed=["i/run"],
-        blocked_by_failed=[api.Blocked(path="j/run", producer="i/run")],
-        rolled_back=["k/run"],
-        rollback_failed=[api.RollbackFailure(path="l/run", message="gone")],
-        leaks=[leak()],
-        leak_sweep_failed=error(),
-    )
-
-
-def leak():
-    return api.Leak(
-        kind="service",
-        physical_id="svc-0001",
-        name="ghost-run",
-        owner="ghost",
-        node="abcdefghijklmnopqrstuvwxyz",
-    )
-
-
-def error():
-    return api.Error(code=api.ErrorCode.PROVIDER, message="the provider said no")
-
-
-def finding():
-    return api.Finding(
-        resource="web",
-        field="service.env.DB_URL",
-        kind=api.FindingKind.UNBOUND_REF,
-        message="db is not in the list",
-    )
-
-
-def refused(**reason):
-    return api.Outcome(
-        refused=api.Refusal(message="refused", **reason), exit=api.ExitClass.REFUSED
+def response(lease):
+    """A document that sets every field of the response, with the lease as given."""
+    return api.LedgerShowResponse(
+        token="v7",
+        fence=3,
+        lease=lease,
+        records=[
+            api.LedgerRecord(
+                path="app/run",
+                kind="service",
+                name="app-run",
+                origin=api.RecordOrigin.ADOPTED,
+                state=api.RecordState.REAPING,
+                physical="run-1",
+                deps=["app/db", "app/cache"],
+                outputs=[
+                    api.Pair(key="HOST", value="run-host"),
+                    api.Pair(key="PORT", value="8080"),
+                ],
+            )
+        ],
     )
 
 
 def cases():
-    plan = api.Plan(
-        steps=[
-            api.Step(path="web/run", kind="service", action=api.StepAction.CREATE),
-            api.Step(
-                path="old/run",
-                kind="service",
-                action=api.StepAction.RETAIN,
-                physical_id="fake-1",
-                retained=retained(),
-            ),
-        ],
-        hash="ab" * 32,
+    lease = api.LeaseView(
+        holder="ci-7", expires_ms=4_600_000, state=api.LeaseState.LAPSING, yours=True
     )
     return {
-        "resource_list": resource_list(),
-        "service_internal": full_service(
-            internal=pb.Service_Internal(), scale=pb.Scale(max=10)
-        ),
-        "job_on_demand": full_job(None, on_demand=pb.Job_OnDemand()),
-        "map_defaults": pb.Service(
-            env={"": pb.Value()}, secret_env={"": pb.SecretRef()}
-        ),
         "session_config": api.SessionConfig(
-            provider="fake",
-            provider_options={"region": "r1", "a": "b"},
             ledger_kind="file",
             ledger_location="/var/ucdk/ledger",
-            cell="machine/cell/uid",
-            credentials=api.CredentialSource.PROFILE,
-            profile="work",
             holder="ci-7",
             test_clock_ms=2_000_000,
         ),
-        "plan_request": api.PlanRequest(resources=resource_list(), mode=api.Mode.DESTROY),
-        "apply_request": api.ApplyRequest(
-            resources=resource_list(), plan_hash="cd" * 32, rollback=True
+        "error": error(api.ErrorCode.LEDGER, "the ledger is corrupt"),
+        "outcome_invalid": api.Outcome(
+            invalid=error(api.ErrorCode.INVALID_REQUEST, "the request is not valid"),
+            exit=api.ExitClass.USAGE,
         ),
-        "destroy_request": api.DestroyRequest(
-            resources=resource_list(), plan_hash="cd" * 32
+        "ledger_show_request": api.LedgerShowRequest(),
+        "ledger_show_response": response(lease),
+        "outcome_ledger_show": api.Outcome(
+            ledger_show=response(None), exit=api.ExitClass.DONE
         ),
-        "status_request": api.StatusRequest(resources=resource_list()),
-        "leaks_request": api.LeaksRequest(),
-        "outcome_planned": api.Outcome(planned=plan, exit=api.ExitClass.DONE),
-        "outcome_done": api.Outcome(done=report(), exit=api.ExitClass.DONE),
-        "outcome_refused_findings": refused(findings=api.Findings(findings=[finding()])),
-        "outcome_refused_conflicts": refused(
-            conflicts=api.Conflicts(
-                conflicts=[
-                    api.Conflict(
-                        path="web/run",
-                        kind=api.ConflictKind.OTHER_TOOL,
-                        marker="other-tool",
-                        message="owned by another tool",
-                    )
-                ]
-            )
+        "outcome_error": api.Outcome(
+            error=error(api.ErrorCode.LEDGER, "the ledger is corrupt"),
+            exit=api.ExitClass.FAILED_NO_EFFECT,
         ),
-        "outcome_refused_empty_scope": refused(empty_scope=api.EmptyScope()),
-        "outcome_refused_plan_hash_mismatch": refused(
-            plan_hash_mismatch=api.PlanHashMismatch(approved="aa" * 32, plan="bb" * 32)
-        ),
-        "outcome_refused_plan_changed": refused(
-            plan_changed=api.PlanChanged(approved="aa" * 32, now="bb" * 32)
-        ),
-        "outcome_refused_unsupported_stamp_mode": refused(
-            unsupported_stamp_mode=api.UnsupportedStampMode(paths=["web/run"])
-        ),
-        "outcome_refused_lease_held": refused(
-            lease_held=api.LeaseHeld(holder="ci-7", remaining_ms=95000)
-        ),
-        "outcome_refused_unhosted_kinds": refused(
-            unhosted_kinds=api.UnhostedKinds(
-                kinds=[api.UnhostedKind(path="batch/run", kind="job")]
-            )
-        ),
-        "outcome_failed": api.Outcome(
-            failed=api.Failure(report=report(), at="web/run", error=error()),
-            exit=api.ExitClass.FAILED_CHANGED,
-        ),
-        "outcome_invalid": api.Outcome(invalid=error(), exit=api.ExitClass.USAGE),
-        "outcome_status": api.Outcome(
-            status=api.StatusResponse(
-                objects=[
-                    api.ObjectStatus(
-                        path="web/run",
-                        kind="service",
-                        record=api.RecordState.CONFIRMED,
-                        live=api.LiveStatus.READY,
-                        standing=api.Standing.AGREES,
-                        outputs={"URL": "https://web.example.com"},
-                    )
-                ]
-            ),
-            exit=api.ExitClass.DONE,
-        ),
-        "outcome_leaks": api.Outcome(
-            leaks=api.LeaksResponse(leaks=[leak()]), exit=api.ExitClass.LEAKS
-        ),
-        "catalog_response": api.CatalogResponse(
-            nodes=[
-                api.CatalogNode(
-                    path="web/run", kind="service", wanted=True, deps=["db/run"]
-                )
-            ],
-            findings=[finding()],
-            exit=api.ExitClass.REFUSED,
-        ),
-        "error": error(),
     }
 
 
@@ -256,7 +84,7 @@ def manifest():
 
 def class_of(message_name):
     package, _, name = message_name.rpartition(".")
-    module = {"ucdk.api.v1": api, "ucdk.resource.v1": pb}[package]
+    module = {"ucdk.api.v1": api}[package]
     return getattr(module, name)
 
 
@@ -285,6 +113,16 @@ class WireGolden(unittest.TestCase):
             with self.subTest(name):
                 data = (GOLDEN / (name + ".bin")).read_bytes()
                 self.assertEqual(type(value).decode(data).encode(), data)
+
+    def test_a_message_with_no_fields_is_no_bytes(self):
+        self.assertEqual((GOLDEN / "ledger_show_request.bin").read_bytes(), b"")
+        self.assertEqual(api.LedgerShowRequest.decode(b""), api.LedgerShowRequest())
+
+    def test_a_lease_that_is_absent_and_one_that_is_present_are_different_bytes(self):
+        absent = (GOLDEN / "outcome_ledger_show.bin").read_bytes()
+        present = api.Outcome(ledger_show=response(cases()["ledger_show_response"].lease)).encode()
+        self.assertNotEqual(absent, present)
+        self.assertIsNone(api.Outcome.decode(absent).ledger_show.lease)
 
 
 if __name__ == "__main__":

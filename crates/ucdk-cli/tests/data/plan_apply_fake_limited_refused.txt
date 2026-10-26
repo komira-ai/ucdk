@@ -1,4 +1,0 @@
-ucdk plan
-provider: fake-limited
-mode: apply
-refused: kind job is not hosted by fake-limited (example-batch/run)

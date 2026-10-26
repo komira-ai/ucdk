@@ -28,21 +28,21 @@ fn with_deps(base: &str, section: &str, deps: &str) -> String {
 
 #[test]
 fn dependency_direction_violation_fails() {
-    let plan = with_deps(
+    let core = with_deps(
         IMPURE,
         "dependencies",
-        "ucdk-engine = { path = \"../ucdk-engine\" }",
+        "ucdk-ledger = { path = \"../ucdk-ledger\" }",
     );
     let (root, names) = project(
         "direction-layer",
-        &[("ucdk-plan", &plan), ("ucdk-engine", IMPURE)],
+        &[("ucdk-core", &core), ("ucdk-ledger", IMPURE)],
     );
     let findings = check_direction(&root, &names);
     assert_eq!(findings.len(), 1, "{findings:?}");
     assert_eq!(findings[0].rule, "dependency-direction");
-    assert_eq!(findings[0].subject, "ucdk-plan/Cargo.toml");
+    assert_eq!(findings[0].subject, "ucdk-core/Cargo.toml");
     assert!(
-        findings[0].detail.contains("ucdk-engine"),
+        findings[0].detail.contains("ucdk-ledger"),
         "{}",
         findings[0].detail
     );
@@ -51,19 +51,19 @@ fn dependency_direction_violation_fails() {
 #[test]
 fn a_lower_crate_may_not_reach_a_higher_one_through_any_section() {
     for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
-        let provider = with_deps(IMPURE, section, "ucdk-ledger.workspace = true");
+        let core = with_deps(IMPURE, section, "ucdk-ledger.workspace = true");
         let (root, names) = project(
             "direction-sections",
-            &[("ucdk-provider", &provider), ("ucdk-ledger", IMPURE)],
+            &[("ucdk-core", &core), ("ucdk-ledger", IMPURE)],
         );
         let findings = check_direction(&root, &names);
         assert_eq!(findings.len(), 1, "{section}: {findings:?}");
         assert_eq!(findings[0].rule, "dependency-direction", "{section}");
     }
-    let table = format!("{IMPURE}\n[dev-dependencies.ucdk-engine]\npath = \"../ucdk-engine\"\n");
+    let table = format!("{IMPURE}\n[dev-dependencies.ucdk-ledger]\npath = \"../ucdk-ledger\"\n");
     let (root, names) = project(
         "direction-table",
-        &[("ucdk-ledger", &table), ("ucdk-engine", IMPURE)],
+        &[("ucdk-core", &table), ("ucdk-ledger", IMPURE)],
     );
     assert_eq!(check_direction(&root, &names).len(), 1);
 }
@@ -93,7 +93,7 @@ fn a_pure_crate_may_depend_on_pure_crates_and_outside_ones() {
             ("some-pure", &with_deps(PURE, "dependencies", deps)),
             ("other-pure", PURE),
             (
-                "ucdk-engine",
+                "ucdk-ledger",
                 &with_deps(IMPURE, "dependencies", "other-pure.workspace = true"),
             ),
         ],
@@ -144,10 +144,10 @@ fn direction_sees_target_specific_dependencies() {
         "target.'cfg(windows)'.dev-dependencies",
         "target.aarch64-apple-darwin.build-dependencies",
     ] {
-        let plan = with_deps(IMPURE, section, "ucdk-engine.workspace = true");
+        let core = with_deps(IMPURE, section, "ucdk-ledger.workspace = true");
         let (root, names) = project(
             "direction-target",
-            &[("ucdk-plan", &plan), ("ucdk-engine", IMPURE)],
+            &[("ucdk-core", &core), ("ucdk-ledger", IMPURE)],
         );
         let findings = check_direction(&root, &names);
         assert_eq!(findings.len(), 1, "{section}: {findings:?}");
@@ -170,15 +170,15 @@ fn direction_sees_target_specific_dependencies() {
 fn direction_resolves_renamed_dependencies() {
     // The inline form, the dotted form, the table form, and a key that only looks like one.
     let manifest = "[package]\nname = \"p\"\n\n[dependencies]\n\
-        engine = { package = \"ucdk-engine\", path = \"../ucdk-engine\" }\n\
+        core = { package = \"ucdk-core\", path = \"../ucdk-core\" }\n\
         ledger = { path = \"../ucdk-ledger\", package = 'ucdk-ledger' }\n\
-        dotted.package = \"ucdk-plan\"\n\
+        dotted.package = \"ucdk-api\"\n\
         dotted.workspace = true\n\
         plain = { version = \"1\", features = [\"package-like\"] }\n\
         text = { description = \"not a package = \\\"x\\\"\" }\n\
         spaced = {package=\"spaced-real\"}\n\
         odd = { package = 5 }\n\n\
-        [dev-dependencies.alias]\npackage = \"ucdk-provider\"\npath = \"../x\"\n\n\
+        [dev-dependencies.alias]\npackage = \"ucdk-cli\"\npath = \"../x\"\n\n\
         [dev-dependencies.unrenamed]\npath = \"../y\"\n";
     let found: Vec<String> = dependencies(manifest).into_iter().collect();
     assert_eq!(
@@ -188,25 +188,25 @@ fn direction_resolves_renamed_dependencies() {
             "plain",
             "spaced-real",
             "text",
-            "ucdk-engine",
+            "ucdk-api",
+            "ucdk-cli",
+            "ucdk-core",
             "ucdk-ledger",
-            "ucdk-plan",
-            "ucdk-provider",
             "unrenamed"
         ]
     );
 
     // A lower crate cannot hide a dependency behind a rename.
-    let plan = with_deps(
+    let core = with_deps(
         IMPURE,
         "dependencies",
-        "up = { package = \"ucdk-engine\", path = \"../ucdk-engine\" }",
+        "up = { package = \"ucdk-ledger\", path = \"../ucdk-ledger\" }",
     );
     let (root, names) = project(
         "direction-renamed",
-        &[("ucdk-plan", &plan), ("ucdk-engine", IMPURE)],
+        &[("ucdk-core", &core), ("ucdk-ledger", IMPURE)],
     );
     let findings = check_direction(&root, &names);
     assert_eq!(findings.len(), 1, "{findings:?}");
-    assert!(findings[0].detail.contains("ucdk-engine"));
+    assert!(findings[0].detail.contains("ucdk-ledger"));
 }

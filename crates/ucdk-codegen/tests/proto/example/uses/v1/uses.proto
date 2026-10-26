@@ -1,0 +1,19 @@
+// SPDX-License-Identifier: Apache-2.0
+// A fixture for the generator: a package that uses the types of another, as a field, as an enum
+// and as the value of a map, so that the generators write their import lines.
+
+syntax = "proto3";
+
+package example.uses.v1;
+
+import "example/other/v1/other.proto";
+
+// What uses the other package.
+message Holder {
+  // A message of the other package.
+  example.other.v1.Label label = 1;
+  // An enum of the other package.
+  example.other.v1.Color color = 2;
+  // A map whose values are messages of the other package.
+  map<string, example.other.v1.Label> labels = 3;
+}

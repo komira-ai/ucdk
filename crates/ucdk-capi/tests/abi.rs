@@ -4,44 +4,62 @@
 
 mod common;
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
 use common::{
-    Hooked, Opened, Reply, VerbFn, call, error_of, fake_config, list_of, null_session, open,
-    open_bytes, open_fake, service_of, take,
+    HookedLedger, Scratch, VerbFn, call, error_of, file_config, golden, memory_config,
+    null_session, open, open_bytes, open_memory, take,
 };
 use prost::Message as _;
-use ucdk_api::catalog_response;
 use ucdk_api::v1::{
-    self, ApplyRequest, CatalogResponse, DestroyRequest, ErrorCode, ExitClass, LeaksRequest, Mode,
-    Outcome, PlanRequest, SessionConfig, StatusRequest, outcome,
+    ErrorCode, ExitClass, LedgerShowRequest, LedgerShowResponse, Outcome, RecordOrigin,
+    RecordState, SessionConfig, outcome,
 };
 use ucdk_capi::{
-    ABI, ABI_MAJOR, ABI_MINOR, BUSY, Buf, DECODE, INTERNAL, INVALID_ARGUMENT, MAX_REQUEST_LEN, OK,
-    PANIC, Session, TOO_LARGE, into_handle, ucdk_abi_version, ucdk_apply, ucdk_buf_free,
-    ucdk_destroy, ucdk_leaks, ucdk_load_catalog, ucdk_plan, ucdk_session_close, ucdk_session_open,
-    ucdk_status,
+    ABI, ABI_MAJOR, ABI_MINOR, BUSY, Buf, DECODE, INVALID_ARGUMENT, MAX_REQUEST_LEN, OK, PANIC,
+    Session, TOO_LARGE, into_handle, ucdk_abi_version, ucdk_buf_free, ucdk_ledger_show,
+    ucdk_session_close, ucdk_session_open,
 };
-use ucdk_engine::{Engine, Request};
+use ucdk_core::{Locator, RecordPath, Tag};
+use ucdk_ledger::{Change, Ledger as _, MemoryLedger, Origin, Record, State};
 
-use ucdk_ledger::{FileLedger, MemoryLedger};
-use ucdk_plan::lower;
-use ucdk_proto::v1::ResourceList;
-use ucdk_provider::kit;
-use ucdk_provider_fake::Fake;
-
-const VERBS: [(&str, VerbFn); 6] = [
-    ("load_catalog", ucdk_load_catalog),
-    ("plan", ucdk_plan),
-    ("apply", ucdk_apply),
-    ("destroy", ucdk_destroy),
-    ("status", ucdk_status),
-    ("leaks", ucdk_leaks),
-];
+const VERBS: [(&str, VerbFn); 1] = [("ledger_show", ucdk_ledger_show)];
 
 fn close(session: *mut ucdk_capi::SessionHandle) {
     ucdk_session_close(session);
+}
+
+/// The answer of `ucdk_ledger_show` on `session`, decoded.
+fn show(session: *mut ucdk_capi::SessionHandle) -> Outcome {
+    let reply = call(
+        ucdk_ledger_show,
+        session,
+        &LedgerShowRequest {}.encode_to_vec(),
+    );
+    assert_eq!(reply.status, OK);
+    Outcome::decode(reply.bytes.as_slice()).expect("an outcome")
+}
+
+fn shown(answer: Outcome) -> LedgerShowResponse {
+    assert_eq!(answer.exit, ExitClass::Done as i32, "{answer:?}");
+    match answer.result {
+        Some(outcome::Result::LedgerShow(response)) => response,
+        other => panic!("not a ledger show: {other:?}"),
+    }
+}
+
+/// The message of an answer that is the ledger error, with its code and class checked.
+fn ledger_error(answer: Outcome) -> String {
+    assert_eq!(answer.exit, ExitClass::FailedNoEffect as i32, "{answer:?}");
+    match answer.result {
+        Some(outcome::Result::Error(error)) => {
+            assert_eq!(error.code, ErrorCode::Ledger as i32);
+            error.message
+        }
+        other => panic!("not an error outcome: {other:?}"),
+    }
 }
 
 /// Proves: the version is `(major << 16) | minor` of the constants the header repeats. Catches
@@ -66,51 +84,26 @@ fn a_garbage_config_is_refused_with_decode() {
     assert!(error_of(&opened.error).message.contains("SessionConfig"));
 }
 
-/// Proves: every way a config can ask for something this library lacks is ABI, and every other
-/// bad config is INVALID_ARGUMENT or INTERNAL, each with a null session. Catches a config that is
-/// half-honoured, such as an ignored provider option.
+/// Proves: a ledger kind this library lacks is ABI, and a file kind with no location is
+/// INVALID_ARGUMENT, each with a null session and a message. Catches a config that is
+/// half-honoured, such as an ignored ledger kind.
 #[test]
-fn a_config_that_asks_for_what_is_not_here_is_refused() {
+fn a_session_with_an_unusable_config_is_refused_at_open() {
     let with = |edit: fn(&mut SessionConfig)| {
-        let mut config = fake_config();
+        let mut config = memory_config();
         edit(&mut config);
         open(&config)
     };
-    let cases: [(&str, i32, Opened); 8] = [
-        ("empty provider", ABI, open(&SessionConfig::default())),
+    let cases = [
         (
-            "unknown provider",
-            ABI,
-            with(|c| c.provider = "elsewhere".to_owned()),
-        ),
-        (
-            "provider option",
-            ABI,
-            with(|c| {
-                c.provider_options
-                    .insert("region".to_owned(), "r".to_owned());
-            }),
-        ),
-        ("credential source", ABI, with(|c| c.credentials = 99)),
-        (
-            "ledger kind",
+            "unknown kind",
             ABI,
             with(|c| c.ledger_kind = "tape".to_owned()),
         ),
         (
-            "file ledger without location",
+            "file kind with no location",
             INVALID_ARGUMENT,
             with(|c| c.ledger_kind = "file".to_owned()),
-        ),
-        (
-            "cell",
-            INVALID_ARGUMENT,
-            with(|c| c.cell = "one/two".to_owned()),
-        ),
-        (
-            "cell parts",
-            INVALID_ARGUMENT,
-            with(|c| c.cell = "A/b/c".to_owned()),
         ),
     ];
     for (what, want, opened) in cases {
@@ -120,53 +113,54 @@ fn a_config_that_asks_for_what_is_not_here_is_refused() {
     }
 }
 
-/// Proves: the supported providers and ledgers open; a config with no cell gets the local one;
-/// a file ledger that cannot be opened (a directory that does not exist, or a file that is not
-/// a ledger) is INTERNAL, while a second session on a ledger a first has open is fine: the lease
-/// arbitrates between their runs. Catches a ledger failure reported as success, and a session
-/// that keeps others out of the file.
+/// Proves: the supported configs open: the empty config and the memory kind (a memory ledger),
+/// and the file kind, whatever the file is: a file that is missing, a directory that does not
+/// exist and a file that is not a ledger all open a session, because a file ledger is opened by
+/// the call that shows it, not by the open. Catches a session that opens (and so locks or
+/// creates) the file at open time.
 #[test]
-fn the_supported_configs_open_and_a_ledger_that_cannot_open_is_internal() {
-    for provider in ["fake", "fake-limited", "fake-leaky"] {
-        let mut config = fake_config();
-        config.provider = provider.to_owned();
-        config.ledger_kind = "memory".to_owned();
+fn the_supported_configs_open() {
+    for config in [SessionConfig::default(), memory_config()] {
         let opened = open(&config);
-        assert_eq!(opened.status, OK, "{provider}");
+        assert_eq!(opened.status, OK, "{config:?}");
         close(opened.session);
     }
-    let local = open(&SessionConfig {
-        provider: "fake".to_owned(),
-        ..SessionConfig::default()
-    });
-    assert_eq!(local.status, OK);
-    close(local.session);
 
-    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("abi-file-ledger");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("scratch dir");
-    let mut config = fake_config();
-    config.ledger_kind = "file".to_owned();
-    config.ledger_location = dir.join("ledger").to_string_lossy().into_owned();
+    let scratch = Scratch::new("supported-configs");
+    let mut config = file_config(&scratch.file());
     let first = open(&config);
     assert_eq!(first.status, OK);
     let second = open(&config);
     assert_eq!(second.status, OK, "a ledger open in a first session opens");
     close(second.session);
     close(first.session);
+    assert!(
+        scratch.listing().is_empty(),
+        "opening a session made no file, not even a lock file"
+    );
 
-    std::fs::write(dir.join("ledger"), "not a ledger\n").expect("write");
+    std::fs::write(scratch.file(), "not a ledger\n").expect("write");
     let corrupt = open(&config);
-    assert_eq!(corrupt.status, INTERNAL, "the file is not a ledger");
-    assert!(corrupt.session.is_null());
+    assert_eq!(
+        corrupt.status, OK,
+        "a file that is not a ledger still opens"
+    );
+    assert!(!corrupt.session.is_null());
+    close(corrupt.session);
 
-    config.ledger_location = dir.join("missing/ledger").to_string_lossy().into_owned();
-    assert_eq!(open(&config).status, INTERNAL);
+    config.ledger_location = scratch
+        .dir()
+        .join("missing/ledger")
+        .to_string_lossy()
+        .into_owned();
+    let missing = open(&config);
+    assert_eq!(missing.status, OK);
+    close(missing.session);
 }
 
 /// Proves: opening with no `out_session` is INVALID_ARGUMENT and still reports in `out_error`;
 /// a null `out_error` is allowed; a null config with a length is INVALID_ARGUMENT and with no
-/// length is the empty config (refused, not a crash). Catches a null dereference.
+/// length is the empty config, which is a memory ledger and opens. Catches a null dereference.
 #[test]
 fn open_checks_its_pointers() {
     let mut error = common::junk();
@@ -185,20 +179,22 @@ fn open_checks_its_pointers() {
     // SAFETY: a zero length reads nothing; both outputs are writable.
     let status =
         unsafe { ucdk_session_open(std::ptr::null(), 0, &raw mut session, &raw mut error) };
-    assert_eq!((status, session.is_null()), (ABI, true));
-    take(error);
+    assert_eq!((status, session.is_null()), (OK, false));
+    assert!(take(error).is_empty(), "no error on success");
+    close(session);
 
     // SAFETY: both pointers are null, which is allowed for a zero-length config with no error out.
     let status =
         unsafe { ucdk_session_open(std::ptr::null(), 0, &raw mut session, std::ptr::null_mut()) };
-    assert_eq!(status, ABI);
+    assert_eq!(status, OK);
+    close(session);
 }
 
 /// Proves: a request longer than the limit is TOO_LARGE before any byte is read (the pointer is
-/// never dereferenced), for the open and for every verb. Catches a missing size check.
+/// never dereferenced), for the open and for the verb. Catches a missing size check.
 #[test]
 fn a_request_over_the_limit_is_too_large() {
-    let session = open_fake();
+    let session = open_memory();
     let far = std::ptr::NonNull::<u8>::dangling().as_ptr();
     for (name, verb) in VERBS {
         let mut out = common::junk();
@@ -221,13 +217,13 @@ fn a_request_over_the_limit_is_too_large() {
     close(session);
 }
 
-/// Proves: for every verb, a null or never-opened session is INVALID_ARGUMENT, a null `out` is
+/// Proves: for the verb, a null or never-opened session is INVALID_ARGUMENT, a null `out` is
 /// INVALID_ARGUMENT, a null request with a length is INVALID_ARGUMENT, and garbage bytes are
 /// DECODE; each failure leaves an Error message in `out`. Catches a verb that dereferences what
 /// it was not given or accepts bytes that are not its message.
 #[test]
 fn every_verb_checks_its_arguments() {
-    let session = open_fake();
+    let session = open_memory();
     // A struct on this stack that was never a session.
     let mut stranger = 0_u64;
     let stranger_handle = (&raw mut stranger).cast::<ucdk_capi::SessionHandle>();
@@ -264,25 +260,21 @@ fn every_verb_checks_its_arguments() {
     close(session);
 }
 
-/// Proves: a null request with a zero length is the empty message: an empty list loads with no
-/// nodes, and an empty plan request is answered as data (a mode that is neither apply nor
-/// destroy, exit class usage) with status OK. Catches an empty request refused as a call error,
-/// or an invalid request reported through the status code.
+/// Proves: a null request with a zero length is the empty message, and the empty message is a
+/// whole request: a ledger show of an empty memory ledger answers OK with a document of version
+/// 0, no lease and no records. Catches an empty request refused as a call error.
 #[test]
 fn a_null_request_with_no_length_is_the_empty_message() {
-    let session = open_fake();
+    let session = open_memory();
     let mut out = common::junk();
     // SAFETY: a zero length reads nothing; `out` is writable.
-    let status = unsafe { ucdk_load_catalog(session, std::ptr::null(), 0, &raw mut out) };
+    let status = unsafe { ucdk_ledger_show(session, std::ptr::null(), 0, &raw mut out) };
     assert_eq!(status, OK);
-    let catalog = CatalogResponse::decode(take(out).as_slice()).expect("a catalog response");
-    assert!(catalog.nodes.is_empty() && catalog.findings.is_empty());
-
-    let reply = call(ucdk_plan, session, &[]);
-    assert_eq!(reply.status, OK);
-    let answer = Outcome::decode(reply.bytes.as_slice()).expect("an outcome");
-    assert_eq!(answer.exit, ExitClass::Usage as i32);
-    assert!(matches!(answer.result, Some(outcome::Result::Invalid(_))));
+    let answer = Outcome::decode(take(out).as_slice()).expect("an outcome");
+    let response = shown(answer);
+    assert_eq!(response.token, "v0");
+    assert_eq!(response.fence, 0);
+    assert!(response.lease.is_none() && response.records.is_empty());
     close(session);
 }
 
@@ -291,8 +283,8 @@ fn a_null_request_with_no_length_is_the_empty_message() {
 /// dangling handle that is used, and a double close that frees twice.
 #[test]
 fn a_closed_session_is_refused_and_closing_again_is_harmless() {
-    let doomed = open_fake();
-    let other = open_fake();
+    let doomed = open_memory();
+    let other = open_memory();
     close(doomed);
     close(doomed);
     close(null_session());
@@ -302,7 +294,7 @@ fn a_closed_session_is_refused_and_closing_again_is_harmless() {
         let reply = call(verb, doomed, &[]);
         assert_eq!(reply.status, INVALID_ARGUMENT, "{name}");
     }
-    assert_eq!(call(ucdk_status, other, &[]).status, OK);
+    assert_eq!(call(ucdk_ledger_show, other, &[]).status, OK);
     close(other);
 }
 
@@ -320,308 +312,258 @@ fn freeing_an_empty_buffer_is_a_no_op() {
             len: 0,
         });
     }
-    let session = open_fake();
-    let reply = call(ucdk_status, session, &[]);
+    let session = open_memory();
+    let reply = call(ucdk_ledger_show, session, &[]);
     assert_eq!(reply.status, OK);
     assert!(!reply.bytes.is_empty());
     close(session);
 }
 
-/// A session through the ABI and, beside it, the engine driven directly over a world of its own
-/// with the same provider, ledger and cell. Every step asserts that the two answer with the same
-/// bytes.
-struct Both {
-    session: *mut ucdk_capi::SessionHandle,
-    fake: Fake,
-    ledger: MemoryLedger,
-}
-
-impl Both {
-    fn new() -> Self {
-        Self {
-            session: open_fake(),
-            fake: Fake::standard(),
-            ledger: MemoryLedger::new(),
-        }
-    }
-
-    fn engine(&mut self, request: Request) -> ucdk_engine::Outcome {
-        Engine::new(&mut self.fake, &self.ledger, kit::cell()).handle(request)
-    }
-
-    fn plan(&mut self, list: &ResourceList, mode: Mode) -> Outcome {
-        let request = PlanRequest {
-            resources: Some(list.clone()),
-            mode: mode as i32,
-        };
-        let wire = call(ucdk_plan, self.session, &request.encode_to_vec());
-        assert_eq!(wire.status, OK);
-        let direct = match request.to_request() {
-            Ok(request) => Outcome::from(&self.engine(request)),
-            Err(refused) => refused.into_outcome(),
-        };
-        assert_eq!(
-            wire.bytes,
-            direct.encode_to_vec(),
-            "plan: wire and engine agree"
-        );
-        direct
-    }
-
-    fn status(&mut self, list: &ResourceList) -> Outcome {
-        let request = StatusRequest {
-            resources: Some(list.clone()),
-        };
-        let wire = call(ucdk_status, self.session, &request.encode_to_vec());
-        assert_eq!(wire.status, OK);
-        let direct = Outcome::from(&self.engine(request.to_request().expect("a request")));
-        assert_eq!(
-            wire.bytes,
-            direct.encode_to_vec(),
-            "status: wire and engine agree"
-        );
-        direct
-    }
-
-    fn leaks(&mut self) -> Outcome {
-        let request = LeaksRequest {};
-        let wire = call(ucdk_leaks, self.session, &request.encode_to_vec());
-        assert_eq!(wire.status, OK);
-        let direct = Outcome::from(&self.engine(request.to_request()));
-        assert_eq!(
-            wire.bytes,
-            direct.encode_to_vec(),
-            "leaks: wire and engine agree"
-        );
-        direct
-    }
-
-    /// An apply or a destroy: the engine plans the world as it is, then runs with the pinned hash.
-    fn run(&mut self, destroy: bool, list: &ResourceList, hash: &str) -> Outcome {
-        let resources = Some(list.clone());
-        let plan_hash = hash.to_owned();
-        let (verb, mode, approval): (VerbFn, Mode, _) = if destroy {
-            let request = DestroyRequest {
-                resources: resources.clone(),
-                plan_hash,
-            };
-            let wire = call(ucdk_destroy, self.session, &request.encode_to_vec());
-            (ucdk_destroy, Mode::Destroy, (wire, request.approved()))
-        } else {
-            let request = ApplyRequest {
-                resources: resources.clone(),
-                plan_hash,
-                rollback: false,
-            };
-            let wire = call(ucdk_apply, self.session, &request.encode_to_vec());
-            (ucdk_apply, Mode::Apply, (wire, request.approved()))
-        };
-        let _ = verb;
-        let (wire, approval): (Reply, _) = approval;
-        assert_eq!(wire.status, OK);
-        let direct = match approval {
-            Err(refused) => refused.into_outcome(),
-            Ok(approved) => {
-                let planned = PlanRequest {
-                    resources,
-                    mode: mode as i32,
-                }
-                .to_request()
-                .expect("a request");
-                match self.engine(planned) {
-                    ucdk_engine::Outcome::Planned(plan) => {
-                        let request = if destroy {
-                            approved.destroy(plan)
-                        } else {
-                            approved.apply(plan)
-                        };
-                        Outcome::from(&self.engine(request))
-                    }
-                    other => Outcome::from(&other),
-                }
-            }
-        };
-        assert_eq!(
-            wire.bytes,
-            direct.encode_to_vec(),
-            "run: wire and engine agree"
-        );
-        direct
-    }
-}
-
-fn planned_hash(answer: &Outcome) -> String {
-    match &answer.result {
-        Some(outcome::Result::Planned(plan)) => plan.hash.clone(),
-        other => panic!("not a plan: {other:?}"),
-    }
-}
-
-fn standings(answer: &Outcome) -> Vec<i32> {
-    match &answer.result {
-        Some(outcome::Result::Status(status)) => {
-            status.objects.iter().map(|o| o.standing).collect()
-        }
-        other => panic!("not a status: {other:?}"),
-    }
-}
-
-/// Proves: plan, apply, status and destroy through the ABI give byte-for-byte the answers the
-/// engine gives when driven directly: a plan with its hash, an apply under that hash that creates
-/// every node, a status that finds them all in agreement, a second plan that changes nothing, a
-/// destroy under its own hash, and a status that finds nothing left. Catches any behaviour the C
-/// layer adds, drops or reorders.
+/// Proves: a ledger show through the ABI of the records golden answers its token, its fence, no
+/// lease, and every record with its kind, name, origin, state, physical id, dependencies and
+/// outputs in the orders the document has. Catches a response that drops or reorders a field.
 #[test]
-fn a_run_through_the_abi_is_the_run_of_the_engine() {
-    let list = list_of(vec![service_of("web", 80), service_of("db", 5432)]);
-    let mut both = Both::new();
-
-    let planned = both.plan(&list, Mode::Apply);
-    let hash = planned_hash(&planned);
-    assert_eq!(planned.exit, ExitClass::Done as i32);
-
-    let done = both.run(false, &list, &hash);
-    let Some(outcome::Result::Done(report)) = &done.result else {
-        panic!("not done: {done:?}");
-    };
-    assert_eq!(report.created.len(), 2, "{report:?}");
-
-    let status = both.status(&list);
-    assert_eq!(standings(&status), [v1::Standing::Agrees as i32; 2]);
-
-    let leaks = both.leaks();
-    assert_eq!(leaks.exit, ExitClass::Done as i32);
-    assert!(
-        matches!(&leaks.result, Some(outcome::Result::Leaks(l)) if l.leaks.is_empty()),
-        "an applied list leaks nothing: {leaks:?}"
+fn ledger_show_prints_token_fence_lease_and_records_of_the_golden() {
+    let session = open(&file_config(&golden("records.ucdk"))).session;
+    let response = shown(show(session));
+    assert_eq!((response.token.as_str(), response.fence), ("v5", 0));
+    assert!(response.lease.is_none());
+    let paths: Vec<&str> = response.records.iter().map(|r| r.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        [
+            "app/db",
+            "app/old",
+            "app/pending",
+            "app/run",
+            "shared/found"
+        ]
     );
-
-    let again = both.plan(&list, Mode::Apply);
-    let Some(outcome::Result::Planned(plan)) = &again.result else {
-        panic!("not planned");
-    };
-    assert!(
-        plan.steps
-            .iter()
-            .all(|s| s.action == v1::StepAction::Noop as i32),
-        "{plan:?}"
+    let run = &response.records[3];
+    assert_eq!(
+        (run.kind.as_str(), run.name.as_str()),
+        ("service", "app-run")
     );
-
-    let destroy = both.plan(&list, Mode::Destroy);
-    let gone = both.run(true, &list, &planned_hash(&destroy));
-    let Some(outcome::Result::Done(report)) = &gone.result else {
-        panic!("not done: {gone:?}");
-    };
-    assert_eq!(report.deleted.len(), 2, "{report:?}");
-    assert!(
-        standings(&both.status(&list))
-            .iter()
-            .all(|s| *s == v1::Standing::NotApplied as i32)
+    assert_eq!(run.physical, "run-1");
+    assert_eq!(run.deps, ["app/db"]);
+    assert_eq!(run.outputs.len(), 1);
+    assert_eq!(
+        (run.outputs[0].key.as_str(), run.outputs[0].value.as_str()),
+        ("URL", "run-url")
     );
-    close(both.session);
-}
-
-/// Proves: a plan that is not the one pinned is data, not a call error: an apply under a hash
-/// that is not the plan's answers OK with a refusal naming both hashes and changes nothing; a
-/// hash that is not 64 hex digits and a list that is refused for findings are answered the same
-/// way; each equals what the engine says directly. Catches an outcome reported as a status code,
-/// and an apply that runs under the wrong hash.
-#[test]
-fn refusals_are_answers_and_change_nothing() {
-    let list = list_of(vec![service_of("web", 80)]);
-    let mut both = Both::new();
-    let wrong = "a".repeat(64);
-    let refused = both.run(false, &list, &wrong);
-    assert_eq!(refused.exit, ExitClass::Refused as i32);
-    let Some(outcome::Result::Refused(why)) = &refused.result else {
-        panic!("not refused");
-    };
-    assert!(
-        matches!(why.reason, Some(v1::refusal::Reason::PlanHashMismatch(_))),
-        "{why:?}"
+    let found = &response.records[4];
+    assert_eq!(found.origin, RecordOrigin::Adopted as i32);
+    let states: Vec<i32> = response.records.iter().map(|r| r.state).collect();
+    assert_eq!(
+        states,
+        [
+            RecordState::Confirmed as i32,
+            RecordState::Reaping as i32,
+            RecordState::Intent as i32,
+            RecordState::Confirmed as i32,
+            RecordState::Confirmed as i32,
+        ]
     );
-    assert!(
-        standings(&both.status(&list))
-            .iter()
-            .all(|s| *s == v1::Standing::NotApplied as i32)
-    );
-
-    let malformed = both.run(false, &list, "not a hash");
-    assert_eq!(malformed.exit, ExitClass::Usage as i32);
-    let destroyed = both.run(true, &list, "not a hash");
-    assert_eq!(destroyed.exit, ExitClass::Usage as i32);
-
-    let bad = list_of(vec![service_of("web", 80), service_of("web", 81)]);
-    let findings = both.run(false, &bad, &wrong);
-    assert_eq!(findings.exit, ExitClass::Refused as i32);
-    let findings = both.run(true, &bad, &wrong);
-    assert_eq!(findings.exit, ExitClass::Refused as i32);
-    close(both.session);
-}
-
-/// Proves: loading a catalog answers with the lowered nodes, or with the findings that refuse
-/// the list, and equals what `ucdk-api` makes of `lower`. Catches a catalog that differs from the
-/// planner's.
-#[test]
-fn load_catalog_answers_with_the_nodes_or_the_findings() {
-    let session = open_fake();
-    for list in [
-        list_of(vec![service_of("web", 80)]),
-        list_of(vec![service_of("web", 80), service_of("web", 81)]),
-    ] {
-        let reply = call(ucdk_load_catalog, session, &list.encode_to_vec());
-        assert_eq!(reply.status, OK);
-        assert_eq!(reply.bytes, catalog_response(lower(&list)).encode_to_vec());
-    }
     close(session);
 }
 
-/// Proves: a session with a status in flight on another session is unaffected, and sessions
-/// keep separate worlds: what one applies the other does not see. Catches shared state between
-/// sessions.
+/// Proves: a ledger show takes no lease and changes no file: the directory's names and bytes
+/// are equal before and after, and the lease in the file is the one that was there. Opening the
+/// session did not make a lock file either. Catches a show that opens the file for writing, makes
+/// the lock file, removes a temporary, or takes the lease to read.
+#[test]
+fn ledger_show_takes_no_lease_and_changes_no_file() {
+    let scratch = Scratch::new("show-changes-nothing");
+    std::fs::copy(golden("leased.ucdk"), scratch.file()).expect("copy the golden");
+    // A write that never finished: a writer's open would remove it.
+    std::fs::write(scratch.dir().join("ledger.ucdk.tmp"), b"half a write").expect("write");
+    let before = scratch.listing();
+    let session = open(&file_config(&scratch.file())).session;
+    for _ in 0..2 {
+        let response = shown(show(session));
+        assert_eq!(response.fence, 1);
+        let lease = response.lease.expect("the lease of the file");
+        assert_eq!(lease.holder, "ci-7");
+        assert_eq!(lease.expires_ms, 4_600_000);
+    }
+    close(session);
+    assert_eq!(
+        scratch.listing(),
+        before,
+        "names and bytes are as they were"
+    );
+}
+
+/// Proves: a file that is not a ledger is the ledger error of the call, not a failed open: the
+/// session opens, the call is status OK with an `error` outcome (`LEDGER`, class 4), and the file
+/// is left as it was. Catches a corrupt ledger reported as a status code.
+#[test]
+fn ledger_show_of_a_corrupt_file_is_the_ledger_error() {
+    let scratch = Scratch::new("show-corrupt");
+    std::fs::write(scratch.file(), "this is not a ledger\n").expect("write");
+    let session = open(&file_config(&scratch.file())).session;
+    let message = ledger_error(show(session));
+    assert!(
+        message.contains("corrupt") || message.contains("not a ucdk ledger"),
+        "{message}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(scratch.file()).expect("read"),
+        "this is not a ledger\n"
+    );
+    // A file that does not exist is the same error, and no file is made for it.
+    close(session);
+    let missing = Scratch::new("show-missing");
+    let session = open(&file_config(&missing.file())).session;
+    let message = ledger_error(show(session));
+    assert!(message.contains("does not exist"), "{message}");
+    assert!(missing.listing().is_empty());
+    close(session);
+}
+
+/// Proves: a ledger file of a newer major is refused by name: the message says which version it
+/// is and that it is newer than this build reads. Catches a newer file read as if it were ours.
+#[test]
+fn ledger_show_of_a_newer_major_is_refused_by_name() {
+    let scratch = Scratch::new("show-newer");
+    let body = "ucdk-ledger 9.0\nversion 1\n";
+    let sum = body.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    });
+    std::fs::write(scratch.file(), format!("{body}end 0 {sum:016x}\n")).expect("write");
+    let session = open(&file_config(&scratch.file())).session;
+    let message = ledger_error(show(session));
+    assert!(
+        message.contains("version 9") && message.contains("newer"),
+        "{message}"
+    );
+    close(session);
+}
+
+/// Proves: a ledger that holds no lease shows none, with the fence it left: the document has
+/// records and no lease line, so the `lease` field is absent, not an empty message. Catches a
+/// lease reported when none is recorded.
+#[test]
+fn ledger_show_of_an_unleased_ledger_shows_no_lease() {
+    let ledger = MemoryLedger::new();
+    let lease = ledger
+        .acquire("ci-7", std::time::Duration::from_secs(60))
+        .expect("acquire");
+    ledger.release(lease.fence).expect("release");
+    let session = into_handle(Session::with_ledger(Box::new(ledger)));
+    let response = shown(show(session));
+    assert!(response.lease.is_none());
+    assert_eq!(response.fence, 1, "the highest fence ever granted stays");
+    close(session);
+}
+
+/// Proves: every state and origin a record can have is mapped through the ABI to the enum of the
+/// message, and an empty physical id and no dependencies or outputs show as empty. Catches a
+/// state or an origin that is mapped to its neighbour.
+#[test]
+fn ledger_show_maps_every_record_state_and_origin() {
+    let ledger = MemoryLedger::new();
+    let states = [State::Intent, State::Confirmed, State::Reaping];
+    let origins = [Origin::Created, Origin::Adopted];
+    let mut wanted = BTreeSet::new();
+    for (s, state) in states.into_iter().enumerate() {
+        for (o, origin) in origins.into_iter().enumerate() {
+            let path = RecordPath::new(&format!("a/s{s}o{o}")).expect("a path");
+            let record = Record {
+                origin,
+                state,
+                ..Record::intent(path, Tag::new("thing"), "n", BTreeSet::new())
+            };
+            let token = ledger.read().expect("read").token;
+            ledger.write(&token, Change::Put(record)).expect("write");
+            wanted.insert((format!("a/s{s}o{o}"), o as i32 + 1, s as i32 + 1));
+        }
+    }
+    let session = into_handle(Session::with_ledger(Box::new(ledger)));
+    let response = shown(show(session));
+    let found: BTreeSet<(String, i32, i32)> = response
+        .records
+        .iter()
+        .map(|r| (r.path.clone(), r.origin, r.state))
+        .collect();
+    assert_eq!(found, wanted);
+    assert!(
+        response
+            .records
+            .iter()
+            .all(|r| r.physical.is_empty() && r.deps.is_empty())
+    );
+    // The numbers are the enums' own: created 1, adopted 2; intent 1, confirmed 2, reaping 3.
+    assert_eq!(RecordOrigin::Adopted as i32, 2);
+    assert_eq!(RecordState::Reaping as i32, 3);
+    close(session);
+}
+
+/// Proves: a record with a physical id, dependencies and outputs set through a ledger the host
+/// holds is shown with all of them. Catches a field that is read and not shown.
+#[test]
+fn a_ledger_the_host_holds_is_shown_as_it_is() {
+    let ledger = MemoryLedger::new();
+    let record = Record {
+        physical: Some(Locator::new("id-1")),
+        deps: [RecordPath::new("a/db").expect("a path")].into(),
+        outputs: [("K".to_owned(), "v".to_owned())].into(),
+        ..Record::intent(
+            RecordPath::new("a/run").expect("a path"),
+            Tag::new("thing"),
+            "n",
+            BTreeSet::new(),
+        )
+    };
+    let token = ledger.read().expect("read").token;
+    ledger.write(&token, Change::Put(record)).expect("write");
+    let session = into_handle(Session::with_ledger(Box::new(ledger)).with_holder("ci-7"));
+    let response = shown(show(session));
+    let shown = &response.records[0];
+    assert_eq!(shown.physical, "id-1");
+    assert_eq!(shown.deps, ["a/db"]);
+    assert_eq!(
+        (
+            shown.outputs[0].key.as_str(),
+            shown.outputs[0].value.as_str()
+        ),
+        ("K", "v")
+    );
+    close(session);
+}
+
+/// Proves: sessions keep separate worlds: two sessions on different ledgers show their own.
+/// Catches state shared between sessions.
 #[test]
 fn sessions_are_independent() {
-    let list = list_of(vec![service_of("web", 80)]);
-    let mut first = Both::new();
-    let second = open_fake();
-    let hash = planned_hash(&first.plan(&list, Mode::Apply));
-    first.run(false, &list, &hash);
-
-    let request = StatusRequest {
-        resources: Some(list),
-    };
-    let reply = call(ucdk_status, second, &request.encode_to_vec());
-    let answer = Outcome::decode(reply.bytes.as_slice()).expect("an outcome");
-    assert!(
-        standings(&answer)
-            .iter()
-            .all(|s| *s == v1::Standing::NotApplied as i32)
+    let with_record = MemoryLedger::new();
+    let token = with_record.read().expect("read").token;
+    let record = Record::intent(
+        RecordPath::new("a/run").expect("a path"),
+        Tag::new("thing"),
+        "n",
+        BTreeSet::new(),
     );
-    close(first.session);
+    with_record
+        .write(&token, Change::Put(record))
+        .expect("write");
+    let first = into_handle(Session::with_ledger(Box::new(with_record)));
+    let second = open_memory();
+    assert_eq!(shown(show(first)).records.len(), 1);
+    assert!(shown(show(second)).records.is_empty());
+    close(first);
     close(second);
 }
 
 fn hooked_session(hook: impl FnMut() + Send + 'static) -> *mut ucdk_capi::SessionHandle {
-    into_handle(Session::with_parts(
-        Box::new(Hooked::new(hook)),
-        Box::new(MemoryLedger::new()),
-        kit::cell(),
-    ))
-}
-
-fn plan_request(port: u32) -> Vec<u8> {
-    PlanRequest {
-        resources: Some(list_of(vec![service_of("web", port)])),
-        mode: Mode::Apply as i32,
-    }
-    .encode_to_vec()
+    into_handle(Session::with_ledger(Box::new(HookedLedger::new(hook))))
 }
 
 /// Proves: a panic inside a call is contained (the test process lives), answered PANIC with the
-/// panic's text for each kind of payload, and poisons the session: the next call on it, of any
-/// verb, is PANIC again and says so, close still works, and another session is unaffected.
-/// Catches an unwind into the caller, a session that keeps serving after a panic, and a
-/// poisoned session that cannot be closed.
+/// panic's text for each kind of payload, and poisons the session: the next call on it is PANIC
+/// again and says so, close still works, and another session is unaffected. Catches an unwind
+/// into the caller, a session that keeps serving after a panic, and a poisoned session that
+/// cannot be closed.
 #[test]
 fn a_panic_is_contained_and_poisons_the_session() {
     let panics: [(&str, fn()); 3] = [
@@ -631,10 +573,10 @@ fn a_panic_is_contained_and_poisons_the_session() {
         }),
         ("no text", || std::panic::panic_any(7_u32)),
     ];
-    let healthy = open_fake();
+    let healthy = open_memory();
     for (what, hook) in panics {
         let session = hooked_session(hook);
-        let reply = call(ucdk_plan, session, &plan_request(80));
+        let reply = call(ucdk_ledger_show, session, &[]);
         assert_eq!(reply.status, PANIC, "{what}");
         let message = error_of(&reply.bytes).message;
         assert!(message.contains("panic contained"), "{what}: {message}");
@@ -653,13 +595,13 @@ fn a_panic_is_contained_and_poisons_the_session() {
             );
         }
         assert_eq!(
-            call(ucdk_status, healthy, &[]).status,
+            call(ucdk_ledger_show, healthy, &[]).status,
             OK,
             "{what}: another session"
         );
         close(session);
         assert_eq!(
-            call(ucdk_status, session, &[]).status,
+            call(ucdk_ledger_show, session, &[]).status,
             INVALID_ARGUMENT,
             "{what}: after close"
         );
@@ -678,124 +620,23 @@ fn a_second_call_on_a_busy_session_is_refused() {
     let (h, i) = (Arc::clone(&handle), Arc::clone(&inner));
     let session = hooked_session(move || {
         let session = h.load(Ordering::SeqCst) as *mut ucdk_capi::SessionHandle;
-        let reply = call(ucdk_status, session, &[]);
+        let reply = call(ucdk_ledger_show, session, &[]);
         i.store(reply.status, Ordering::SeqCst);
     });
     handle.store(session as usize, Ordering::SeqCst);
 
-    let outer = call(ucdk_plan, session, &plan_request(80));
+    let outer = call(ucdk_ledger_show, session, &[]);
     assert_eq!(outer.status, OK);
     assert_eq!(inner.load(Ordering::SeqCst), BUSY);
     let outcome = Outcome::decode(outer.bytes.as_slice()).expect("an outcome");
-    assert!(matches!(outcome.result, Some(outcome::Result::Planned(_))));
+    assert!(matches!(
+        outcome.result,
+        Some(outcome::Result::LedgerShow(_))
+    ));
 
     inner.store(-1, Ordering::SeqCst);
-    let after = call(ucdk_status, session, &[]);
+    let after = call(ucdk_ledger_show, session, &[]);
     assert_eq!(after.status, OK, "the session serves again");
-    close(session);
-}
-
-/// Proves: when the plan the engine makes of the world as it is cannot be run (a foreign object
-/// stands where a wanted one would go), an apply answers OK with that refusal as data, names the
-/// conflict, and creates nothing; it is not a call error and the pinned hash is not consulted.
-/// Catches an apply that runs over an object that is not ours.
-#[test]
-fn an_apply_over_a_foreign_object_is_refused_as_data() {
-    let list = list_of(vec![service_of("web", 80)]);
-    let node = lower(&list).expect("lowers").nodes()[0].node.clone();
-    let mut provider = Hooked::new(|| {});
-    provider.fake.add_foreign(node.kind(), node.name(), None);
-    let session = into_handle(Session::with_parts(
-        Box::new(provider),
-        Box::new(MemoryLedger::new()),
-        kit::cell(),
-    ));
-    let request = ApplyRequest {
-        resources: Some(list),
-        plan_hash: "a".repeat(64),
-        rollback: false,
-    };
-    let reply = call(ucdk_apply, session, &request.encode_to_vec());
-    assert_eq!(reply.status, OK);
-    let answer = Outcome::decode(reply.bytes.as_slice()).expect("an outcome");
-    assert_eq!(answer.exit, ExitClass::Refused as i32);
-    let Some(outcome::Result::Refused(why)) = answer.result else {
-        panic!("not refused");
-    };
-    assert!(
-        matches!(why.reason, Some(v1::refusal::Reason::Conflicts(_))),
-        "{why:?}"
-    );
-    close(session);
-}
-
-fn job_of(id: &str) -> ucdk_proto::v1::Resource {
-    let mut resource = service_of(id, 80);
-    let Some(ucdk_proto::v1::resource::Body::Service(service)) = resource.body.take() else {
-        panic!("a service");
-    };
-    resource.body = Some(ucdk_proto::v1::resource::Body::Job(ucdk_proto::v1::Job {
-        image: service.image,
-        ..ucdk_proto::v1::Job::default()
-    }));
-    resource
-}
-
-/// Proves: a list holding a kind the provider does not host is refused whole through the ABI,
-/// for plan and for apply under a hash a hosting provider gave it, and nothing is created, not
-/// even the hosted resource that sorts first. Catches an apply that creates the hosted objects
-/// and stops at the unhosted one.
-#[test]
-fn a_list_with_an_unhosted_kind_is_refused_before_any_write() {
-    // `a-svc` is hosted and sorts before `z-job`, which `fake-limited` does not host.
-    let list = list_of(vec![service_of("a-svc", 80), job_of("z-job")]);
-    let mut hosting = Both::new();
-    let hash = planned_hash(&hosting.plan(&list, Mode::Apply));
-    close(hosting.session);
-
-    let mut config = fake_config();
-    config.provider = "fake-limited".to_owned();
-    let opened = open(&config);
-    assert_eq!(opened.status, OK);
-    let session = opened.session;
-    let refused = |reply: Reply| {
-        assert_eq!(reply.status, OK);
-        let answer = Outcome::decode(reply.bytes.as_slice()).expect("an outcome");
-        assert_eq!(answer.exit, ExitClass::Refused as i32, "{answer:?}");
-        match answer.result {
-            Some(outcome::Result::Refused(why)) => match why.reason {
-                Some(v1::refusal::Reason::UnhostedKinds(kinds)) => kinds,
-                other => panic!("not an unhosted refusal: {other:?}"),
-            },
-            other => panic!("not refused: {other:?}"),
-        }
-    };
-    let plan = PlanRequest {
-        resources: Some(list.clone()),
-        mode: Mode::Apply as i32,
-    };
-    let kinds = refused(call(ucdk_plan, session, &plan.encode_to_vec()));
-    assert_eq!(kinds.kinds.len(), 1);
-    assert_eq!(kinds.kinds[0].path, "z-job/run");
-    assert_eq!(kinds.kinds[0].kind, "job");
-
-    let apply = ApplyRequest {
-        resources: Some(list),
-        plan_hash: hash,
-        rollback: false,
-    };
-    refused(call(ucdk_apply, session, &apply.encode_to_vec()));
-
-    let only_hosted = StatusRequest {
-        resources: Some(list_of(vec![service_of("a-svc", 80)])),
-    };
-    let reply = call(ucdk_status, session, &only_hosted.encode_to_vec());
-    let answer = Outcome::decode(reply.bytes.as_slice()).expect("an outcome");
-    assert_eq!(
-        standings(&answer),
-        [v1::Standing::NotApplied as i32],
-        "nothing was created"
-    );
     close(session);
 }
 
@@ -804,12 +645,12 @@ fn a_list_with_an_unhosted_kind_is_refused_before_any_write() {
 /// Catches a handle that is an address a new session can be given again.
 #[test]
 fn a_closed_handle_stays_refused_after_another_session_opens() {
-    let first = open_fake();
+    let first = open_memory();
     close(first);
-    let second = open_fake();
+    let second = open_memory();
     assert_ne!(first, second, "a handle is never handed out twice");
-    assert_eq!(call(ucdk_status, first, &[]).status, INVALID_ARGUMENT);
-    assert_eq!(call(ucdk_status, second, &[]).status, OK);
+    assert_eq!(call(ucdk_ledger_show, first, &[]).status, INVALID_ARGUMENT);
+    assert_eq!(call(ucdk_ledger_show, second, &[]).status, OK);
     close(second);
 }
 
@@ -821,132 +662,18 @@ fn a_closed_handle_stays_refused_after_another_session_opens() {
 fn a_panicking_destructor_after_a_concurrent_close_is_contained() {
     let handle = Arc::new(AtomicUsize::new(0));
     let h = Arc::clone(&handle);
-    let mut provider = Hooked::new(move || {
+    let mut ledger = HookedLedger::new(move || {
         close(h.load(Ordering::SeqCst) as *mut ucdk_capi::SessionHandle);
     });
-    provider.panic_on_drop = true;
-    let session = into_handle(Session::with_parts(
-        Box::new(provider),
-        Box::new(MemoryLedger::new()),
-        kit::cell(),
-    ));
+    ledger.panic_on_drop = true;
+    let session = into_handle(Session::with_ledger(Box::new(ledger)));
     handle.store(session as usize, Ordering::SeqCst);
 
-    let reply = call(ucdk_plan, session, &plan_request(80));
+    let reply = call(ucdk_ledger_show, session, &[]);
     assert_eq!(reply.status, PANIC);
     assert!(error_of(&reply.bytes).message.contains("destructor"));
-    assert_eq!(call(ucdk_status, session, &[]).status, INVALID_ARGUMENT);
-}
-
-/// A session over a fake that already holds a stamped object nobody records, on `ledger`;
-/// returns the session and the leaked object's physical id.
-fn session_with_a_leak(
-    ledger: Box<dyn ucdk_ledger::Ledger>,
-) -> (*mut ucdk_capi::SessionHandle, String) {
-    use ucdk_provider::{Node, Provider as _, Stamp};
-    let mut fake = Fake::standard();
-    let path = ucdk_provider::NodePath::new("ghost/run").expect("a path");
-    let node = Node::new(
-        path.clone(),
-        ucdk_provider::Kind::service(),
-        "ghost-run".to_owned(),
-        Vec::new(),
-    )
-    .expect("a node");
-    let id = fake
-        .create(&node, &Stamp::for_node(&kit::cell(), &path))
-        .expect("create")
-        .physical;
-    let session = into_handle(Session::with_parts(Box::new(fake), ledger, kit::cell()));
-    (session, id.as_str().to_owned())
-}
-
-/// Proves: `ucdk_leaks` through the library, on the in-memory and on the file ledger, answers the
-/// leaks arm with the leaked object and exit class leaks (8), twice with the same answer (it
-/// consumes nothing); and an apply through the same session ends done with the leak in its
-/// report. Catches a verb wired to the wrong request, a response that drops the object, and a
-/// sweep that differs by ledger.
-#[test]
-fn leaks_through_the_abi_find_the_object_on_both_ledgers() {
-    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("abi-leaks");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("scratch dir");
-    let file = FileLedger::open(dir.join("ledger")).expect("open");
-    let ledgers: [Box<dyn ucdk_ledger::Ledger>; 2] =
-        [Box::new(MemoryLedger::new()), Box::new(file)];
-    for ledger in ledgers {
-        let (session, ghost) = session_with_a_leak(ledger);
-        let first = call(ucdk_leaks, session, &LeaksRequest {}.encode_to_vec());
-        assert_eq!(first.status, OK);
-        let answer = Outcome::decode(first.bytes.as_slice()).expect("an outcome");
-        assert_eq!(answer.exit, ExitClass::Leaks as i32);
-        let Some(outcome::Result::Leaks(found)) = &answer.result else {
-            panic!("not leaks: {answer:?}");
-        };
-        assert_eq!(found.leaks.len(), 1);
-        assert_eq!(found.leaks[0].physical_id, ghost);
-        assert_eq!(found.leaks[0].owner, "ghost");
-        assert_eq!(
-            call(ucdk_leaks, session, &[]).bytes,
-            first.bytes,
-            "the empty request is the request"
-        );
-
-        let list = list_of(vec![service_of("web", 80)]);
-        let planned = call(
-            ucdk_plan,
-            session,
-            &PlanRequest {
-                resources: Some(list.clone()),
-                mode: Mode::Apply as i32,
-            }
-            .encode_to_vec(),
-        );
-        let hash = planned_hash(&Outcome::decode(planned.bytes.as_slice()).expect("an outcome"));
-        let applied = call(
-            ucdk_apply,
-            session,
-            &ApplyRequest {
-                resources: Some(list),
-                plan_hash: hash,
-                rollback: false,
-            }
-            .encode_to_vec(),
-        );
-        let applied = Outcome::decode(applied.bytes.as_slice()).expect("an outcome");
-        assert_eq!(applied.exit, ExitClass::Done as i32, "{applied:?}");
-        let Some(outcome::Result::Done(report)) = &applied.result else {
-            panic!("not done: {applied:?}");
-        };
-        assert_eq!(report.created.len(), 1);
-        assert_eq!(report.leaks.len(), 1);
-        assert_eq!(report.leaks[0].physical_id, ghost);
-        close(session);
-    }
-}
-
-/// Proves: the provider `fake-leaky` holds one object stamped for the session's own cell, the
-/// local one and one named in the config, so the sweep reports it either way (a stamp of any
-/// other cell would not be listed), and the ordinary `fake` holds none. Catches a fixture
-/// stamped for a fixed cell.
-#[test]
-fn the_leaky_provider_leaks_into_the_sessions_own_cell() {
-    for (provider, cell, leaked) in [
-        ("fake-leaky", "", 1),
-        ("fake-leaky", "host/cell/bbbbbbbbbbbbbbbbbbbbbbbbbb", 1),
-        ("fake", "", 0),
-    ] {
-        let mut config = fake_config();
-        config.provider = provider.to_owned();
-        config.cell = cell.to_owned();
-        let opened = open(&config);
-        assert_eq!(opened.status, OK);
-        let reply = call(ucdk_leaks, opened.session, &[]);
-        let answer = Outcome::decode(reply.bytes.as_slice()).expect("an outcome");
-        let Some(outcome::Result::Leaks(found)) = &answer.result else {
-            panic!("not leaks: {answer:?}");
-        };
-        assert_eq!(found.leaks.len(), leaked, "{provider} {cell}");
-        close(opened.session);
-    }
+    assert_eq!(
+        call(ucdk_ledger_show, session, &[]).status,
+        INVALID_ARGUMENT
+    );
 }

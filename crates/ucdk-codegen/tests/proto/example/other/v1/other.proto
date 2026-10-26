@@ -1,0 +1,17 @@
+// SPDX-License-Identifier: Apache-2.0
+// A fixture for the generator: a package whose types another package uses.
+
+syntax = "proto3";
+
+package example.other.v1;
+
+// A colour.
+enum Color {
+  COLOR_UNSPECIFIED = 0;
+  COLOR_RED = 1;
+}
+
+// A label.
+message Label {
+  string name = 1;
+}

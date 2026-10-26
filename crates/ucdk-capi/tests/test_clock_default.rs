@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::{error_of, fake_config, open};
+use common::{error_of, memory_config, open};
 use ucdk_capi::{INVALID_ARGUMENT, OK};
 
 /// Proves: a non-zero `test_clock_ms` is refused with INVALID_ARGUMENT, names the feature, and
@@ -14,7 +14,7 @@ use ucdk_capi::{INVALID_ARGUMENT, OK};
 /// honours a clock chosen by its caller.
 #[test]
 fn a_default_build_refuses_a_fixed_clock() {
-    let mut config = fake_config();
+    let mut config = memory_config();
     config.test_clock_ms = 1;
     let refused = open(&config);
     assert_eq!(refused.status, INVALID_ARGUMENT);

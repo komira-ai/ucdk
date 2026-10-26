@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The dependency-direction check. Two rules, read from the crates' manifests:
 //!
-//! - the planning and provider crates sit below the ledger and the engine, so none of them
-//!   may depend on a crate above it (`LAYERS`);
+//! - the shared crate sits below the ledger, so it may not depend on a crate above it
+//!   (`LAYERS`);
 //! - a crate marked pure (see [`crate::purity`]) never depends on a workspace crate that is
 //!   not marked pure, so purity cannot be lost through a dependency.
 //!
@@ -16,12 +16,7 @@ use std::path::Path;
 use crate::{Finding, purity};
 
 /// Each crate, with the crates it must never depend on.
-pub const LAYERS: [(&str, &[&str]); 4] = [
-    ("ucdk-provider", &["ucdk-ledger", "ucdk-engine"]),
-    ("ucdk-plan", &["ucdk-ledger", "ucdk-engine"]),
-    ("ucdk-provider-fake", &["ucdk-ledger", "ucdk-engine"]),
-    ("ucdk-ledger", &["ucdk-engine"]),
-];
+pub const LAYERS: [(&str, &[&str]); 1] = [("ucdk-core", &["ucdk-ledger"])];
 
 /// What a manifest line sits under.
 enum Section {

@@ -5,26 +5,27 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::time::Duration;
 
-use crate::lease::{Fence, Lease, LeaseError};
-use ucdk_provider::{Kind, NodePath, OwnerLabel, PhysicalId, Produced};
+use ucdk_core::{Locator, OwnerLabel, RecordPath, Tag};
 
-/// Who owns a node, as a path: every segment of the node's path above its role. For `app/run`
-/// that is `app`; for a node nested one level down, `app/db/run`, it is `app/db`. The first
-/// segment is the top-level owner the stamp carries. Recording the whole path, not one flat
-/// id, is what lets nested owners be added without changing what a record means.
+use crate::lease::{Fence, Holding, Lease, LeaseError};
+
+/// Who owns a record, as a path: every segment of the record's path above its last. For
+/// `app/run` that is `app`; for a record nested one level down, `app/db/run`, it is `app/db`.
+/// The first segment is the top-level owner. Recording the whole path, not one flat id, is
+/// what lets nested owners be added without changing what a record means.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct OwnerPath(Vec<OwnerLabel>);
 
 impl OwnerPath {
-    /// The owner path of the node at `path`. A path of one segment is its own owner.
-    pub fn of(path: &NodePath) -> Self {
+    /// The owner path of the record at `path`. A path of one segment is its own owner.
+    pub fn of(path: &RecordPath) -> Self {
         let segments: Vec<&str> = path.as_str().split('/').collect();
         let keep = segments.len().saturating_sub(1).max(1);
         Self(
             segments
                 .into_iter()
                 .take(keep)
-                .map(|s| OwnerLabel::new(s).expect("a node path is made of valid segments"))
+                .map(|s| OwnerLabel::new(s).expect("a record path is made of valid segments"))
                 .collect(),
         )
     }
@@ -47,55 +48,53 @@ impl fmt::Display for OwnerPath {
     }
 }
 
-/// How the object came to be a record's object.
+/// How the thing a record stands for came to be the record's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
-    /// This tool created it.
+    /// This tool made it.
     Created,
-    /// Reserved. A tool that took over an object it did not create would record that here, and
-    /// such an object is never deleted by a run. Nothing writes it yet.
+    /// This tool took it over when it found it, without making it.
     Adopted,
 }
 
 /// Where a record stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
-    /// Written before a create or update: the call may or may not have landed.
+    /// Written before an effect: the effect may or may not have landed.
     Intent,
-    /// The object is there and matches what was last applied.
+    /// The effect landed and matches what was last recorded.
     Confirmed,
-    /// Written before a delete: the object may or may not be gone.
+    /// Written before the thing is removed: it may or may not be gone.
     Reaping,
 }
 
-/// What the ledger knows about one node.
+/// What the ledger knows about one record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Record {
-    pub path: NodePath,
-    pub kind: Kind,
-    /// The physical name the object carries (without any stamp encoding), so an intent whose
-    /// create never returned can be found again by name.
+    pub path: RecordPath,
+    pub kind: Tag,
+    /// The readable name of what the record stands for, so an intent whose effect never
+    /// returned can be found again by name.
     pub name: String,
     pub owner: OwnerPath,
     pub origin: Origin,
     pub state: State,
-    /// The object's physical id; `None` until a create has returned or been found.
-    pub physical: Option<PhysicalId>,
-    /// The nodes this one needed: the edges deletion follows, in reverse.
-    pub deps: BTreeSet<NodePath>,
-    /// The non-secret outputs the object had when it was last confirmed, by output name
-    /// (`URL`, `HOST`). A node that reads one of them is planned against this value. A secret
-    /// output is never here.
+    /// Where the thing is; `None` until an effect has returned or the thing has been found.
+    pub physical: Option<Locator>,
+    /// The records this one needed: the edges removal follows, in reverse.
+    pub deps: BTreeSet<RecordPath>,
+    /// The values the record carries, by key. A writer puts nothing secret here: the ledger
+    /// is a plain text document.
     pub outputs: BTreeMap<String, String>,
 }
 
 impl Record {
-    /// An intent to create the object of the node at `path`.
+    /// An intent for the record at `path`.
     pub fn intent(
-        path: NodePath,
-        kind: Kind,
+        path: RecordPath,
+        kind: Tag,
         name: impl Into<String>,
-        deps: BTreeSet<NodePath>,
+        deps: BTreeSet<RecordPath>,
     ) -> Self {
         Self {
             owner: OwnerPath::of(&path),
@@ -110,21 +109,9 @@ impl Record {
         }
     }
 
-    /// The record holding the non-secret outputs of `produced`, in place of any held before.
-    /// A secret output is dropped: the ledger never holds one.
+    /// The record, confirmed with the locator of what it stands for.
     #[must_use]
-    pub fn with_outputs(self, produced: &[Produced]) -> Self {
-        let outputs = produced
-            .iter()
-            .filter(|p| !p.secret)
-            .map(|p| (p.name.clone(), p.value.clone()))
-            .collect();
-        Self { outputs, ..self }
-    }
-
-    /// The record, confirmed with the object's physical id.
-    #[must_use]
-    pub fn confirmed(self, physical: PhysicalId) -> Self {
+    pub fn confirmed(self, physical: Locator) -> Self {
         Self {
             state: State::Confirmed,
             physical: Some(physical),
@@ -149,11 +136,18 @@ impl fmt::Display for Token {
     }
 }
 
-/// The whole document at one version.
+/// The whole document at one version, with the lease state read in the same step.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     pub token: Token,
-    pub records: BTreeMap<NodePath, Record>,
+    /// The highest fence ever granted; [`Fence::NONE`] when no lease was ever granted.
+    pub fence: Fence,
+    /// The lease as recorded, live or not; `None` when none is held.
+    pub lease: Option<Holding>,
+    /// The ledger's own clock reading, in milliseconds, taken with the read: what a
+    /// [`Holding`] is judged against.
+    pub at: u64,
+    pub records: BTreeMap<RecordPath, Record>,
 }
 
 /// One change to the document.
@@ -162,7 +156,7 @@ pub enum Change {
     /// Writes the record for its path, replacing any earlier one.
     Put(Record),
     /// Drops the record of a path; a path with none is left as it is.
-    Remove(NodePath),
+    Remove(RecordPath),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,6 +173,8 @@ pub enum LedgerError {
     LeaseLapsed,
     /// A write without a fence while another holder's lease is live. Nothing was written.
     Leased { holder: String },
+    /// The ledger was opened to read and does not write. Nothing was written.
+    ReadOnly,
 }
 
 impl fmt::Display for LedgerError {
@@ -191,6 +187,7 @@ impl fmt::Display for LedgerError {
             ),
             Self::LeaseLapsed => f.write_str("the lease lapsed before this write"),
             Self::Leased { holder } => write!(f, "the ledger is leased to {holder}"),
+            Self::ReadOnly => f.write_str("the ledger was opened read-only and cannot be written"),
         }
     }
 }
@@ -198,7 +195,7 @@ impl fmt::Display for LedgerError {
 impl std::error::Error for LedgerError {}
 
 /// A ledger: one document with compare-and-swap writes and a lease. Methods take `&self` so that
-/// two engines can hold one ledger; an implementation does its own locking.
+/// two writers can hold one ledger; an implementation does its own locking.
 ///
 /// A writer that takes part in the lease acquires it and writes with [`Ledger::write_fenced`];
 /// the lease and its fence are in [`crate::lease`]. [`Ledger::write`] is for a document nobody

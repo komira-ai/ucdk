@@ -14,8 +14,8 @@ const PURE: &str = "[package]\nname = \"p\"\n\n[package.metadata.ucdk]\npure = t
 
 /// The template the repository's own pure crates carry.
 fn template() -> String {
-    fs::read_to_string(workspace_root().join("crates/ucdk-provider/clippy.toml"))
-        .expect("the provider crate carries the template")
+    fs::read_to_string(workspace_root().join("crates/ucdk-core/clippy.toml"))
+        .expect("the core crate carries the template")
 }
 
 fn project(name: &str, manifest: &str, clippy: Option<&str>) -> (std::path::PathBuf, Vec<String>) {
@@ -128,13 +128,5 @@ fn the_repositorys_pure_crates_carry_the_template() {
                 .is_ok_and(|m| is_pure(&m))
         })
         .collect();
-    assert_eq!(
-        marked,
-        [
-            "ucdk-plan",
-            "ucdk-proto",
-            "ucdk-provider",
-            "ucdk-provider-fake"
-        ]
-    );
+    assert_eq!(marked, ["ucdk-core"]);
 }

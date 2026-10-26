@@ -2,10 +2,10 @@
 /**
  * What can go wrong in a call, as errors.
  *
- * A plan the engine refuses, a conflict, a run that fails half way: these are not errors. They
- * come back as data in the `Outcome` (`outcome.refused`, `outcome.failed`, `outcome.exit`). An
- * error here means the call itself did not work: the library could not be loaded, it is the
- * wrong version, the session is closed, or the library answered with a non-zero status code.
+ * A ledger that cannot be read is not an error. It comes back as data in the `Outcome`
+ * (`outcome.error`, `outcome.exit`). An error here means the call itself did not work: the
+ * library could not be loaded, it is the wrong version, the session is closed, or the library
+ * answered with a non-zero status code.
  */
 
 import * as wire from "./generated/wire.ts";
@@ -64,7 +64,7 @@ export class Panic extends UcdkError {
   override status = 100;
 }
 
-/** UCDK_INTERNAL: an invariant the library checks failed (for example, a ledger that is held). */
+/** UCDK_INTERNAL: an invariant the library checks failed. */
 export class Internal extends UcdkError {
   override status = 101;
 }

@@ -6,10 +6,10 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use ucdk_provider::NodePath;
+use ucdk_core::{RecordPath, millis};
 
-use crate::lease::{Fence, Lease, LeaseError, MAX_CLOCK_SKEW, millis};
-use crate::record::{Change, LedgerError, Record};
+use crate::lease::{Fence, Holding, Lease, LeaseError, LeaseState, MAX_CLOCK_SKEW};
+use crate::record::{Change, LedgerError, Record, Snapshot, Token};
 
 /// The holder of the lease now.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,10 +24,29 @@ pub(crate) struct Doc {
     /// The fence of the last grant. It never goes down, whether or not a lease is held.
     pub(crate) fence: u64,
     pub(crate) lease: Option<Held>,
-    pub(crate) records: BTreeMap<NodePath, Record>,
+    pub(crate) records: BTreeMap<RecordPath, Record>,
 }
 
 impl Doc {
+    /// The document as a snapshot read at `at`, a reading of the ledger's clock.
+    pub(crate) fn snapshot(&self, at: u64) -> Snapshot {
+        Snapshot {
+            token: Token(self.version),
+            fence: Fence(self.fence),
+            lease: self.lease.as_ref().map(|held| self.holding_of(held)),
+            at,
+            records: self.records.clone(),
+        }
+    }
+
+    fn holding_of(&self, held: &Held) -> Holding {
+        Holding {
+            holder: held.holder.clone(),
+            fence: Fence(self.fence),
+            expires_at: held.expires_at,
+        }
+    }
+
     fn lease_of(&self, held: &Held) -> Lease {
         Lease {
             holder: held.holder.clone(),
@@ -47,14 +66,14 @@ impl Doc {
         holder: &str,
         ttl: Duration,
     ) -> Result<Lease, LeaseError> {
-        if let Some(held) = self.lease.as_ref().filter(|held| held.holder != holder) {
+        if let Some(held) = self.lease.as_ref().filter(|held| held.holder != holder)
+            && self.holding_of(held).state(now) != LeaseState::Lapsed
+        {
             let free_at = held.expires_at.saturating_add(millis(MAX_CLOCK_SKEW));
-            if now < free_at {
-                return Err(LeaseError::Held {
-                    holder: held.holder.clone(),
-                    remaining: Duration::from_millis(free_at - now),
-                });
-            }
+            return Err(LeaseError::Held {
+                holder: held.holder.clone(),
+                remaining: Duration::from_millis(free_at - now),
+            });
         }
         self.fence += 1;
         let held = Held {
@@ -113,7 +132,7 @@ impl Doc {
     pub(crate) fn admit(&self, now: u64, fence: Option<Fence>) -> Result<(), LedgerError> {
         match (fence, &self.lease) {
             (Some(fence), _) => self.check(now, fence).map(|_| ()),
-            (None, Some(held)) if now < held.expires_at.saturating_add(millis(MAX_CLOCK_SKEW)) => {
+            (None, Some(held)) if self.holding_of(held).state(now) != LeaseState::Lapsed => {
                 Err(LedgerError::Leased {
                     holder: held.holder.clone(),
                 })

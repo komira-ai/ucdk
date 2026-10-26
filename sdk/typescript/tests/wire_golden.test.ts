@@ -15,9 +15,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import * as gp from "../src/generated/google_protobuf.ts";
 import * as api from "../src/generated/ucdk_api_v1.ts";
-import * as pb from "../src/generated/ucdk_resource_v1.ts";
 import * as wire from "../src/generated/wire.ts";
 import { REPO, bytesOf } from "./support.ts";
 
@@ -25,241 +23,63 @@ const GOLDEN = join(REPO, "sdk/wire-golden");
 
 type Case = wire.Message & { encode(): Uint8Array };
 
-function stepImage(): pb.Image {
-  return pb.Image.output("build", "img", { platform: "linux/amd64" });
+function error(code: api.ErrorCode, message: string): api.Error {
+  return new api.Error({ code, message });
 }
 
-function digestImage(): pb.Image {
-  return pb.Image.digest("sha256:aa", { platform: "linux/amd64" });
-}
-
-function secret(name: string): pb.SecretRef {
-  return new pb.SecretRef({ name, store: "vault", version: "7" });
-}
-
-function fullService(more: pb.ServiceInit): pb.Service {
-  return new pb.Service({
-    image: stepImage(),
-    port: 8080,
-    args: ["--a", "--b"],
-    env: {
-      K: pb.Value.literal("v"),
-      P: pb.Value.param("p"),
-      R: pb.Value.ref(pb.Ref.standard(pb.Output.URL, { resource: "db" })),
-      N: pb.Value.ref(pb.Ref.named("cert", { resource: "db" })),
-    },
-    size: new pb.Size({ cpuMillis: 500, memoryMb: 256 }),
-    healthPath: "/healthz",
-    requestTimeout: new gp.Duration({ seconds: 30n, nanos: 5 }),
-    maxConcurrency: 80,
-    secretEnv: { S: secret("sec") },
-    ...more,
-  });
-}
-
-function fullJob(maxRetries: number | undefined, trigger: pb.JobInit): pb.Job {
-  return new pb.Job({
-    image: digestImage(),
-    args: ["go"],
-    size: new pb.Size({ cpuMillis: 1000, memoryMb: 512 }),
-    maxRetries,
-    timeout: new gp.Duration({ seconds: -600n, nanos: -1 }),
-    env: { E: pb.Value.literal("e") },
-    secretEnv: { T: secret("tok") },
-    ...trigger,
-  });
-}
-
-function resourceList(): pb.ResourceList {
-  return new pb.ResourceList({
-    resource: [
-      new pb.Resource({
-        id: "web",
-        uses: [new pb.Uses({ target: new pb.Ref({ resource: "db" }), access: pb.Access.CALL })],
-        service: fullService({
-          public: new pb.Service_Public(),
-          scale: new pb.Scale({ min: 0, max: 10 }),
-        }),
-      }),
-      new pb.Resource({
-        id: "nightly",
-        job: fullJob(3, { schedule: new pb.Job_Schedule({ cron: "0 * * * *", timezone: "UTC" }) }),
+/** A document that sets every field of the response, with the lease as given. */
+function response(lease: api.LeaseView | undefined): api.LedgerShowResponse {
+  return new api.LedgerShowResponse({
+    token: "v7",
+    fence: 3n,
+    lease,
+    records: [
+      new api.LedgerRecord({
+        path: "app/run",
+        kind: "service",
+        name: "app-run",
+        origin: api.RecordOrigin.ADOPTED,
+        state: api.RecordState.REAPING,
+        physical: "run-1",
+        deps: ["app/db", "app/cache"],
+        outputs: [
+          new api.Pair({ key: "HOST", value: "run-host" }),
+          new api.Pair({ key: "PORT", value: "8080" }),
+        ],
       }),
     ],
-  });
-}
-
-function retained(): api.Retained {
-  return new api.Retained({
-    reason: api.RetainReason.UNDELETABLE,
-    detail: "held by the provider",
-  });
-}
-
-function report(): api.Report {
-  return new api.Report({
-    created: ["a/run", "b/run"],
-    updated: ["c/run"],
-    resumed: ["d/run"],
-    deleted: ["e/run"],
-    reaped: ["f/run"],
-    retained: [new api.RetainedObject({ path: "g/run", retained: retained() })],
-    converging: ["h/run"],
-    failed: ["i/run"],
-    blockedByFailed: [new api.Blocked({ path: "j/run", producer: "i/run" })],
-    rolledBack: ["k/run"],
-    rollbackFailed: [new api.RollbackFailure({ path: "l/run", message: "gone" })],
-    leaks: [leak()],
-    leakSweepFailed: error(),
-  });
-}
-
-function leak(): api.Leak {
-  return new api.Leak({
-    kind: "service",
-    physicalId: "svc-0001",
-    name: "ghost-run",
-    owner: "ghost",
-    node: "abcdefghijklmnopqrstuvwxyz",
-  });
-}
-
-function error(): api.Error {
-  return new api.Error({ code: api.ErrorCode.PROVIDER, message: "the provider said no" });
-}
-
-function finding(): api.Finding {
-  return new api.Finding({
-    resource: "web",
-    field: "service.env.DB_URL",
-    kind: api.FindingKind.UNBOUND_REF,
-    message: "db is not in the list",
-  });
-}
-
-function refused(reason: api.RefusalInit): api.Outcome {
-  return new api.Outcome({
-    refused: new api.Refusal({ message: "refused", ...reason }),
-    exit: api.ExitClass.REFUSED,
   });
 }
 
 function cases(): Record<string, Case> {
-  const plan = new api.Plan({
-    steps: [
-      new api.Step({ path: "web/run", kind: "service", action: api.StepAction.CREATE }),
-      new api.Step({
-        path: "old/run",
-        kind: "service",
-        action: api.StepAction.RETAIN,
-        physicalId: "fake-1",
-        retained: retained(),
-      }),
-    ],
-    hash: "ab".repeat(32),
+  const lease = new api.LeaseView({
+    holder: "ci-7",
+    expiresMs: 4_600_000n,
+    state: api.LeaseState.LAPSING,
+    yours: true,
   });
   return {
-    resource_list: resourceList(),
-    service_internal: fullService({
-      internal: new pb.Service_Internal(),
-      scale: new pb.Scale({ max: 10 }),
-    }),
-    job_on_demand: fullJob(undefined, { onDemand: new pb.Job_OnDemand() }),
-    map_defaults: new pb.Service({
-      env: { "": new pb.Value() },
-      secretEnv: { "": new pb.SecretRef() },
-    }),
     session_config: new api.SessionConfig({
-      provider: "fake",
-      providerOptions: { region: "r1", a: "b" },
       ledgerKind: "file",
       ledgerLocation: "/var/ucdk/ledger",
-      cell: "machine/cell/uid",
-      credentials: api.CredentialSource.PROFILE,
-      profile: "work",
       holder: "ci-7",
       testClockMs: 2_000_000n,
     }),
-    plan_request: new api.PlanRequest({ resources: resourceList(), mode: api.Mode.DESTROY }),
-    apply_request: new api.ApplyRequest({
-      resources: resourceList(),
-      planHash: "cd".repeat(32),
-      rollback: true,
+    error: error(api.ErrorCode.LEDGER, "the ledger is corrupt"),
+    outcome_invalid: new api.Outcome({
+      invalid: error(api.ErrorCode.INVALID_REQUEST, "the request is not valid"),
+      exit: api.ExitClass.USAGE,
     }),
-    destroy_request: new api.DestroyRequest({
-      resources: resourceList(),
-      planHash: "cd".repeat(32),
-    }),
-    status_request: new api.StatusRequest({ resources: resourceList() }),
-    leaks_request: new api.LeaksRequest({}),
-    outcome_planned: new api.Outcome({ planned: plan, exit: api.ExitClass.DONE }),
-    outcome_done: new api.Outcome({ done: report(), exit: api.ExitClass.DONE }),
-    outcome_refused_findings: refused({ findings: new api.Findings({ findings: [finding()] }) }),
-    outcome_refused_conflicts: refused({
-      conflicts: new api.Conflicts({
-        conflicts: [
-          new api.Conflict({
-            path: "web/run",
-            kind: api.ConflictKind.OTHER_TOOL,
-            marker: "other-tool",
-            message: "owned by another tool",
-          }),
-        ],
-      }),
-    }),
-    outcome_refused_empty_scope: refused({ emptyScope: new api.EmptyScope() }),
-    outcome_refused_plan_hash_mismatch: refused({
-      planHashMismatch: new api.PlanHashMismatch({
-        approved: "aa".repeat(32),
-        plan: "bb".repeat(32),
-      }),
-    }),
-    outcome_refused_plan_changed: refused({
-      planChanged: new api.PlanChanged({ approved: "aa".repeat(32), now: "bb".repeat(32) }),
-    }),
-    outcome_refused_unsupported_stamp_mode: refused({
-      unsupportedStampMode: new api.UnsupportedStampMode({ paths: ["web/run"] }),
-    }),
-    outcome_refused_lease_held: refused({
-      leaseHeld: new api.LeaseHeld({ holder: "ci-7", remainingMs: 95000n }),
-    }),
-    outcome_refused_unhosted_kinds: refused({
-      unhostedKinds: new api.UnhostedKinds({
-        kinds: [new api.UnhostedKind({ path: "batch/run", kind: "job" })],
-      }),
-    }),
-    outcome_failed: new api.Outcome({
-      failed: new api.Failure({ report: report(), at: "web/run", error: error() }),
-      exit: api.ExitClass.FAILED_CHANGED,
-    }),
-    outcome_invalid: new api.Outcome({ invalid: error(), exit: api.ExitClass.USAGE }),
-    outcome_status: new api.Outcome({
-      status: new api.StatusResponse({
-        objects: [
-          new api.ObjectStatus({
-            path: "web/run",
-            kind: "service",
-            record: api.RecordState.CONFIRMED,
-            live: api.LiveStatus.READY,
-            standing: api.Standing.AGREES,
-            outputs: { URL: "https://web.example.com" },
-          }),
-        ],
-      }),
+    ledger_show_request: new api.LedgerShowRequest(),
+    ledger_show_response: response(lease),
+    outcome_ledger_show: new api.Outcome({
+      ledgerShow: response(undefined),
       exit: api.ExitClass.DONE,
     }),
-    outcome_leaks: new api.Outcome({
-      leaks: new api.LeaksResponse({ leaks: [leak()] }),
-      exit: api.ExitClass.LEAKS,
+    outcome_error: new api.Outcome({
+      error: error(api.ErrorCode.LEDGER, "the ledger is corrupt"),
+      exit: api.ExitClass.FAILED_NO_EFFECT,
     }),
-    catalog_response: new api.CatalogResponse({
-      nodes: [
-        new api.CatalogNode({ path: "web/run", kind: "service", wanted: true, deps: ["db/run"] }),
-      ],
-      findings: [finding()],
-      exit: api.ExitClass.REFUSED,
-    }),
-    error: error(),
   };
 }
 
@@ -279,10 +99,7 @@ type Decoder = { decode(data: Uint8Array): Case };
 
 function classOf(messageName: string): Decoder {
   const at = messageName.lastIndexOf(".");
-  const modules: Record<string, Record<string, unknown>> = {
-    "ucdk.api.v1": api,
-    "ucdk.resource.v1": pb,
-  };
+  const modules: Record<string, Record<string, unknown>> = { "ucdk.api.v1": api };
   return (modules[messageName.slice(0, at)] as Record<string, Decoder>)[
     messageName.slice(at + 1)
   ] as Decoder;
@@ -322,4 +139,22 @@ test("a decoded golden encodes back to the same bytes", () => {
     const decoded = classOf(manifest()[name] as string).decode(data);
     assert.deepEqual(bytesOf(decoded), data, name);
   }
+});
+
+test("a message with no fields is no bytes", () => {
+  assert.equal(golden("ledger_show_request").length, 0);
+  assert.deepEqual(api.LedgerShowRequest.decode(new Uint8Array(0)), new api.LedgerShowRequest());
+});
+
+test("a lease that is absent and one that is present are different bytes", () => {
+  const absent = golden("outcome_ledger_show");
+  const present = bytesOf(
+    new api.Outcome({
+      ledgerShow: response(
+        new api.LeaseView({ holder: "ci-7", expiresMs: 4_600_000n, state: api.LeaseState.LAPSING, yours: true }),
+      ),
+    }),
+  );
+  assert.notDeepEqual(absent, present);
+  assert.equal(api.Outcome.decode(absent).ledgerShow?.lease, undefined);
 });

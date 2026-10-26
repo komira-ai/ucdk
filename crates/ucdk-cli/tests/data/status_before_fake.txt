@@ -1,6 +1,0 @@
-ucdk status
-provider: fake
-  example-db/run [service] record: none, live: absent, not applied
-  example-svc/public [public] record: none, live: absent, not applied
-  example-svc/run [service] record: none, live: absent, not applied
-3 objects
