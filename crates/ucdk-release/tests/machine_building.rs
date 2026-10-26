@@ -85,11 +85,11 @@ fn build_system_required_is_refused() {
 fn build_system_shape_is_refused() {
     refuses_only(Rule::BuildSystemShape, |m| system_mut(m).kind = 0);
     refuses_only(Rule::BuildSystemShape, |m| {
-        system_mut(m).binary = String::new()
+        system_mut(m).binary = String::new();
     });
     for binary in ["bin/buck2", "./buck2", "tools/"] {
         refuses_only(Rule::BuildSystemShape, |m| {
-            system_mut(m).binary = binary.to_owned()
+            system_mut(m).binary = binary.to_owned();
         });
     }
     for config in ["/etc/buckconfig", "..", "a/../b", "../x"] {
@@ -99,7 +99,7 @@ fn build_system_shape_is_refused() {
     }
     for mode in ["rel ease", "mode;rm", "m\u{e9}", "a\0b"] {
         refuses_only(Rule::BuildSystemShape, |m| {
-            system_mut(m).mode = mode.to_owned()
+            system_mut(m).mode = mode.to_owned();
         });
     }
     for flag in ["", "-c\0x"] {
@@ -189,7 +189,7 @@ fn a_reserved_flag_is_refused() {
     for layer in LAYERS {
         for flag in buck2_refused {
             refuses_only(Rule::ReservedFlag, |m| {
-                flags_of(m, layer).push(flag.to_owned())
+                flags_of(m, layer).push(flag.to_owned());
             });
         }
         for flag in buck2_accepted {
@@ -453,7 +453,7 @@ fn labels_on_a_non_file_artifact_are_refused() {
 #[test]
 fn a_test_action_without_targets_is_refused() {
     refuses_only(Rule::TestShape, |m| {
-        test_mut(m, "build", "test").targets.clear()
+        test_mut(m, "build", "test").targets.clear();
     });
     let too_many = |count: usize| {
         move |m: &mut Machine| {

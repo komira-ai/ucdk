@@ -179,7 +179,7 @@ fn a_name_outside_the_grammar_is_refused() {
         &"a".repeat(64),
     ] {
         refuses_only(Rule::BadName, |m| {
-            stage_mut(m, "check").name = bad.to_owned()
+            stage_mut(m, "check").name = bad.to_owned();
         });
     }
     refuses_only(Rule::BadName, |m| {
@@ -240,7 +240,7 @@ fn an_unknown_enum_value_is_refused() {
     refuses(Rule::UnknownEnum, |m| system_mut(m).kind = 9);
     for trigger in [0, 9] {
         refuses(Rule::UnknownEnum, |m| {
-            stage_mut(m, "check").trigger = trigger
+            stage_mut(m, "check").trigger = trigger;
         });
     }
     for kind in [0, 9] {
@@ -251,7 +251,7 @@ fn an_unknown_enum_value_is_refused() {
             action_mut(m, "publish", "smoke").validations[0].kind = kind;
         });
         refuses(Rule::UnknownEnum, |m| {
-            artifact_mut(m, "ucdk-lib").r#type = kind
+            artifact_mut(m, "ucdk-lib").r#type = kind;
         });
         refuses(Rule::UnknownEnum, |m| repo_mut(m).r#type = kind);
         refuses(Rule::UnknownEnum, |m| repo_mut(m).visibility = kind);
@@ -471,7 +471,7 @@ fn an_artifact_cycle_or_a_dangling_need_is_refused() {
     accepts(|m| {
         artifact_mut(m, "ucdk-cli")
             .needs
-            .push("ucdk-lib".to_owned())
+            .push("ucdk-lib".to_owned());
     });
 }
 

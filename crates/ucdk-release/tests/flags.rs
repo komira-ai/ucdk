@@ -43,14 +43,14 @@ fn an_element_equal_to_a_listed_flag_is_refused() {
     for flag in owned_flags(Buck2) {
         assert_eq!(
             reserved(Buck2, &format!("--{flag}")),
-            Some(Reserved::Owned(*flag)),
+            Some(Reserved::Owned(flag)),
             "{flag}"
         );
     }
     for flag in owned_flags(Bazel) {
         assert_eq!(
             reserved(Bazel, &format!("--{flag}")),
-            Some(Reserved::Owned(*flag)),
+            Some(Reserved::Owned(flag)),
             "{flag}"
         );
     }

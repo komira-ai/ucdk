@@ -95,16 +95,16 @@ fn check_versions_and_names(m: &Machine, f: &mut Findings) {
 fn check_enums(m: &Machine, f: &mut Findings) {
     // An unspecified value is refused by the rule of the thing it types; a number that is no
     // value of the enum at all is `machine.unknown_enum`.
-    if let Some(system) = &m.build_system {
-        if BuildSystemKind::try_from(system.kind).is_err() {
-            f.add(
-                Rule::UnknownEnum,
-                format!(
-                    "the build system has kind {}, which is not a build system kind",
-                    system.kind
-                ),
-            );
-        }
+    if let Some(system) = &m.build_system
+        && BuildSystemKind::try_from(system.kind).is_err()
+    {
+        f.add(
+            Rule::UnknownEnum,
+            format!(
+                "the build system has kind {}, which is not a build system kind",
+                system.kind
+            ),
+        );
     }
     for stage in &m.stages {
         if !matches!(

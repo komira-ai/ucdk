@@ -105,10 +105,10 @@ fn a_federated_identity_without_scopes_is_refused() {
         federated_mut(m).commit_scope = String::new();
     });
     refuses_only(Rule::FederatedShape, |m| {
-        federated_mut(m).subject = String::new()
+        federated_mut(m).subject = String::new();
     });
     refuses_only(Rule::FederatedShape, |m| {
-        federated_mut(m).audience = String::new()
+        federated_mut(m).audience = String::new();
     });
     // The scopes may be equal, and differ when the issuer has two.
     accepts(|m| federated_mut(m).commit_scope = "commit".to_owned());
