@@ -602,6 +602,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucdk-release"
+version = "0.0.0"
+dependencies = [
+ "ucdk-core",
+ "ucdk-release-proto",
+]
+
+[[package]]
+name = "ucdk-release-proto"
+version = "0.0.0"
+dependencies = [
+ "prost",
+ "prost-build",
+ "prost-reflect",
+ "protox",
+]
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"

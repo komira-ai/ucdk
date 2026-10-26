@@ -49,6 +49,26 @@ fn dependency_direction_violation_fails() {
 }
 
 #[test]
+fn the_release_model_crates_may_not_depend_on_the_ledger_or_the_release_engine() {
+    for lower in ["ucdk-release", "ucdk-release-proto"] {
+        for upper in ["ucdk-ledger", "ucdk-release-engine"] {
+            let manifest = with_deps(
+                IMPURE,
+                "dependencies",
+                &format!("{upper} = {{ path = \"../{upper}\" }}"),
+            );
+            let (root, names) =
+                project("direction-release", &[(lower, &manifest), (upper, IMPURE)]);
+            let findings = check_direction(&root, &names);
+            assert_eq!(findings.len(), 1, "{lower} -> {upper}: {findings:?}");
+            assert_eq!(findings[0].rule, "dependency-direction");
+            assert_eq!(findings[0].subject, format!("{lower}/Cargo.toml"));
+            assert!(findings[0].detail.contains(upper), "{}", findings[0].detail);
+        }
+    }
+}
+
+#[test]
 fn a_lower_crate_may_not_reach_a_higher_one_through_any_section() {
     for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
         let core = with_deps(IMPURE, section, "ucdk-ledger.workspace = true");

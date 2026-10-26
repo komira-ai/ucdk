@@ -1,0 +1,508 @@
+// SPDX-License-Identifier: Apache-2.0
+// The ucdk release messages (`ucdk.release.v1`): the declaration of a release machine, what a
+// build produces, the facts a driver supplies and the results a run reports.
+//
+// The messages are data. A result is never parsed for its text: `message` and `detail` fields are
+// for a person, and the closed `Reason` set is what a program reads. Numbers are a promise; a
+// field is added, never renumbered, and a number that is retired is `reserved`. Every enum has a
+// zero value named `*_UNSPECIFIED`, which a reader refuses.
+//
+// Names (stage, action, validation, channel) match `[a-z][a-z0-9-]*`, at most 63 bytes, with no
+// trailing `-`. Artifact names also allow `_`.
+
+syntax = "proto3";
+
+package ucdk.release.v1;
+
+// ---- declaration (authored; the SDKs build these) ----
+
+message Machine {
+  // 1. A newer major is a distinct refusal.
+  int32 schema_version = 1;
+  string name = 2;
+  repeated Stage stages = 3;
+  // Declaration order is part of the contract.
+  repeated ArtifactDecl artifacts = 4;
+  repeated Channel channels = 5;
+  // Path globs whose commits never raise the build number.
+  repeated string stamp_ignore = 6;
+  // Defined once; required when any stage holds a Build or a Test action.
+  BuildSystem build_system = 7;
+}
+
+// ---- the build system: defined once for the machine ----
+
+message BuildSystem {
+  BuildSystemKind kind = 1;
+  // A bare name (found on the child's own PATH, which the machine must name) or an absolute
+  // path; run as argv, never through a shell.
+  string binary = 2;
+  // Relative to the root: the kind's config file (Buck2 a config file, Bazel an rc file);
+  // empty means none.
+  string config_file = 3;
+  // The kind's named mode (Buck2 a mode file, Bazel a config name); empty means none.
+  string mode = 4;
+  // Base flags, one argv element each, in order.
+  repeated string flags = 5;
+  // Base environment; the child inherits nothing else.
+  map<string, string> env = 6;
+}
+
+enum BuildSystemKind {
+  BUILD_SYSTEM_KIND_UNSPECIFIED = 0;
+  BUCK2 = 1;
+  BAZEL = 2;
+}
+
+message Target {
+  // Exactly one target of the build system's label grammar; no pattern.
+  string label = 1;
+  // Per-target flags, one argv element each, appended after the base flags.
+  repeated string flags = 2;
+  // Per-target environment; a key also in the base environment replaces its value.
+  map<string, string> env = 3;
+}
+
+// ---- the spine: a stage is an ordered list of actions, and every action has its validations ----
+
+message Stage {
+  reserved "steps";
+  // Also the unit of trust and of driver job.
+  string name = 1;
+  // Earlier-declared stages: a graph ordered by dependency, each of which must be confirmed
+  // for the run before this stage's first effect.
+  repeated string needs = 2;
+  Trigger trigger = 3;
+  // The trust scope the driver gives this stage; the stage name when empty.
+  string environment = 4;
+  // May run off the mainline, with a reason.
+  bool exceptional = 5;
+  // Run in this order, stopping at the first one that is not SUCCEEDED or NOOP. A stage with a
+  // Publish action has no Build or Test action, and the actions that name a platform name the
+  // stage's.
+  repeated Action actions = 6;
+  // Stage-level validations: run after the last action, in this order. The stage is confirmed
+  // only when these passed too.
+  repeated Validation validations = 7;
+}
+
+// CHANGE_CHECK stages hold Build and Test actions only.
+enum Trigger {
+  TRIGGER_UNSPECIFIED = 0;
+  RELEASE = 1;
+  CHANGE_CHECK = 2;
+}
+
+message Action {
+  // Unique in the stage.
+  string name = 1;
+  oneof kind {
+    Build build = 2;
+    Test test = 3;
+    Publish publish = 4;
+    Smoke smoke = 5;
+  }
+  // A Build action's run after its seal. A Publish action's run in its preflight, before the
+  // first grant exchange, and only SET_CLOSURE may sit there. A Smoke action's run after its
+  // read. A Test action has none: its targets are its validations.
+  repeated Validation validations = 6;
+}
+
+message Build {
+  string platform = 1;
+  // Each artifact names its Target in its declaration.
+  repeated string artifacts = 2;
+}
+
+message Test {
+  // One to 32; each target is one row. The stage's platform is not named here.
+  repeated Target targets = 1;
+}
+
+message Publish {
+  string platform = 1;
+  repeated string artifacts = 2;
+  string channel = 3;
+  // Calls per phase that a transient, rate-limited or expired-grant answer may use; 0 reads as
+  // the default of 3; at most 10.
+  uint32 attempts = 4;
+  // Read-back polls per coordinate; 0 reads as the default of 3; at most 10.
+  uint32 polls = 5;
+}
+
+// Reads back what an earlier Publish action of the stage published to the channel.
+message Smoke {
+  string platform = 1;
+  repeated string artifacts = 2;
+  string channel = 3;
+}
+
+// The platform is "<os>-<cpu>" or "any", never a cloud or a registry. It is the stage's platform.
+// The two bounds are authored in the machine, so the machine hash covers them.
+
+// A validation is a built-in kind that ucdk evaluates. It runs no command and creates nothing
+// outside ucdk.
+message Validation {
+  // The validator kind name, the subject, the authored rows and the options belonged to the
+  // registered validators, which are gone.
+  reserved 2, 3, 4, 6;
+  reserved "validator", "subject", "rows", "options";
+  // Unique in the stage: action-level and stage-level validations share the namespace.
+  string name = 1;
+  ValidationKind kind = 7;
+  // For CHANNEL_READBACK, bounded polls for absence; 0 means none; at most 10.
+  uint32 wait_polls = 5;
+}
+
+enum ValidationKind {
+  VALIDATION_KIND_UNSPECIFIED = 0;
+  // Reads the sealed set; one derived row per member. Allowed on a Build action or a Publish
+  // action only; on a Publish action it runs in the preflight.
+  SET_CLOSURE = 1;
+  // Reads a channel through the publisher; one derived row per coordinate. Allowed on a Smoke
+  // action, or on the stage of a Publish action.
+  CHANNEL_READBACK = 2;
+}
+
+message ArtifactDecl {
+  // 3 was the builder (a Command), 5 was never used again, 6 was independent_version: every
+  // member carries the release version.
+  reserved 3, 5, 6;
+  reserved "builder", "independent_version";
+  // Byte-equal to its manifest name.
+  string name = 1;
+  ArtifactType type = 2;
+  // Artifacts that must exist first; a group names its members. Orders builds and publishes
+  // and passes no data.
+  repeated string needs = 4;
+  // Required: the target whose one output is the member.
+  Target target = 7;
+  // FILE only: the manifest's labels (SET_CLOSURE reads `requires`). An OCI member's os and cpu
+  // are read from its layout.
+  map<string, string> labels = 8;
+}
+
+enum ArtifactType {
+  ARTIFACT_TYPE_UNSPECIFIED = 0;
+  FILE = 1;
+  OCI = 2;
+  CONDA = 3;
+  PYTHON = 4;
+  NPM = 5;
+}
+
+message Channel {
+  string name = 1;
+  // At most one per artifact type.
+  repeated Repository repositories = 2;
+  // Never takes a build older than one it holds.
+  bool monotonic = 3;
+  // Selects the publisher and grant source implementation; the engine never branches on it.
+  ChannelKind kind = 4;
+}
+
+enum ChannelKind {
+  CHANNEL_KIND_UNSPECIFIED = 0;
+  // The first kind the project uses.
+  PACKAGE_REGISTRY = 1;
+  // The reference kind: no network and no grants.
+  DIRECTORY = 2;
+}
+
+message Repository {
+  ArtifactType type = 1;
+  // Compared byte for byte; no two repositories share one.
+  string location = 2;
+  // Per repository, hence per artifact type.
+  Visibility visibility = 3;
+  // Required; never defaulted.
+  PushIdentity push = 4;
+}
+
+enum Visibility {
+  VISIBILITY_UNSPECIFIED = 0;
+  PUBLIC = 1;
+  PRIVATE = 2;
+}
+
+message PushIdentity {
+  oneof kind {
+    Anonymous anonymous = 1;
+    Federated federated = 2;
+  }
+}
+
+message Anonymous {}
+
+message Federated {
+  // The one identity the registry trusts to push.
+  string subject = 1;
+  string audience = 2;
+  // Used by an exceptional run; must differ from `subject`.
+  string exceptional_subject = 3;
+  // The environment `subject` names; a stage that publishes here has this environment.
+  string environment = 4;
+  // The environment `exceptional_subject` names; set exactly when `exceptional_subject` is.
+  string exceptional_environment = 5;
+  // Other claims of the job's identity token that the issuer pins (ids, workflow file, ref,
+  // event). Compared exactly with the token before any exchange; ucdk interprets none of them.
+  map<string, string> pinned_claims = 6;
+  // The scope name the issuer grants for the stage phase of a Publish action; required.
+  string stage_scope = 7;
+  // The scope name the issuer grants for the commit phase; required. It may equal
+  // `stage_scope` when the issuer has one publish scope.
+  string commit_scope = 8;
+  // The scope name the issuer grants for a read of a PRIVATE repository (a Smoke action, a
+  // stage-level CHANNEL_READBACK). Required when the repository is PRIVATE and refused on a
+  // PUBLIC one, whose reads are anonymous. It may equal either other scope.
+  string read_scope = 9;
+}
+
+// ---- produced (by a build; read by publish and validate) ----
+
+message Manifest {
+  int32 schema_version = 1;
+  ArtifactType type = 2;
+  string name = 3;
+  // Equals the build stamp's version: the engine composes the manifest.
+  string version = 4;
+  // The release's platform, or "any".
+  string platform = 5;
+  // A bare name inside the store entry: a file, or an OCI layout directory.
+  string file = 6;
+  // The identity digest, 64 lowercase hex. What it digests depends on the type: the file's
+  // bytes for FILE, the image manifest digest of the layout for OCI.
+  string sha256 = 7;
+  // FILE: the file's length. OCI: the sum of the lengths of the blobs the image manifest
+  // reaches. Recomputed when a member is verified.
+  uint64 size = 8;
+  // Which build made it, so a registry can be asked and a monotonic channel decided.
+  Stamped stamp = 9;
+  // Typed per ecosystem.
+  oneof metadata {
+    FileMeta file_meta = 10;
+    OciMeta oci = 11;
+  }
+}
+
+// The build stamp without its version and timestamp.
+message Stamped {
+  uint64 build_number = 1;
+  string source_commit = 2;
+}
+
+// Copied from ArtifactDecl.labels.
+message FileMeta {
+  map<string, string> labels = 1;
+}
+
+// Read from the layout by the engine. The image manifest digest is the `sha256` field of the
+// manifest.
+message OciMeta {
+  reserved 3;
+  string os = 1;
+  string cpu = 2;
+}
+
+// A member carries no store key: its key is derived from the scope of the set and its name on
+// every read, so a document cannot point a reader at another generation or scope.
+message Member {
+  Manifest manifest = 1;
+}
+
+// The set document: stored once per sealed set.
+message ReleaseSet {
+  int32 schema_version = 1;
+  // The full commit id.
+  string revision = 2;
+  string platform = 3;
+  // Sorted by name.
+  repeated Member members = 4;
+  // Written with the set and recomputed on every read; a differing value is refused.
+  string set_hash = 5;
+  // Hashed: the stage and environment that built the set.
+  Producer producer = 6;
+  // Never hashed: which run and attempt.
+  ProducedBy produced_by = 7;
+}
+
+// The BUILD stage's name and its environment (the name when none was set).
+message Producer {
+  string stage = 1;
+  string environment = 2;
+}
+
+message ProducedBy {
+  string run_id = 1;
+  uint32 attempt = 2;
+}
+
+// An input to a build; never typed, never read from the environment. It reaches the build
+// system only through the placeholders of flag and environment values.
+message BuildStamp {
+  string version = 1;
+  uint64 build_number = 2;
+  string source_commit = 3;
+  uint64 timestamp_ms = 4;
+}
+
+message Coordinate {
+  string channel = 1;
+  ArtifactType type = 2;
+  string name = 3;
+  string version = 4;
+  string platform = 5;
+}
+
+// What a registry reports for a coordinate it holds.
+message Held {
+  string digest = 1;
+  Stamped stamp = 2;
+  bool exceptional = 3;
+}
+
+// ---- facts supplied by the driver ----
+
+message RunIdentity {
+  // [a-z0-9_-]{1,63}; never minted here.
+  string run_id = 1;
+  // At least 1, required, no default.
+  uint32 attempt = 2;
+  // At most 32 pairs, recorded verbatim, gating nothing.
+  map<string, string> context = 3;
+}
+
+message SourceFacts {
+  string revision = 1;
+  // UNKNOWN is never a pass.
+  Tri on_mainline = 2;
+  Tri is_tip = 3;
+  // 1 to 200 bytes, one line, for an exceptional run.
+  string reason = 4;
+}
+
+enum Tri {
+  TRI_UNSPECIFIED = 0;
+  YES = 1;
+  NO = 2;
+  UNKNOWN = 3;
+}
+
+// ---- results ----
+
+enum Verdict {
+  // 10 was CANCELLED: nothing can produce it while callbacks into the host are out of scope.
+  reserved 10;
+  VERDICT_UNSPECIFIED = 0;
+  // The exit class "done".
+  SUCCEEDED = 1;
+  NOOP = 2;
+  SUPERSEDED = 3;
+  REFUSED = 4;
+  FAILED = 5;
+  INDETERMINATE = 6;
+  PARTIAL = 7;
+  INTERRUPTED = 8;
+  VALIDATION_FAILED = 9;
+}
+
+// Stable: the message text is for humans and never parsed.
+enum Reason {
+  REASON_UNSPECIFIED = 0;
+  MACHINE_FORMAT = 1;
+  MACHINE_VERSION = 2;
+  STAGE_UNKNOWN = 3;
+  SELECTOR = 4;
+  SELECTOR_NO_MATCH = 5;
+  SET_MEMBER = 6;
+  SET_HASH = 7;
+  CHANNEL = 8;
+  CREDENTIAL = 9;
+  APPROVED_NAMES = 10;
+  PUBLISH_DIFFERENT_BYTES = 11;
+  PUBLISH_YANKED = 12;
+  PUBLISH_READ_BACK = 13;
+  PUBLISH_UPLOAD = 14;
+  NOT_ON_MAINLINE = 15;
+  EXCEPTIONAL_REASON = 16;
+  SUPERSEDED_BY_NEWER = 17;
+  INPUTS_CHANGED = 18;
+  VALIDATION = 19;
+  CANNOT_TELL = 20;
+  LEASE_HELD = 21;
+  LEASE_LOST = 22;
+  LEDGER = 23;
+  BUILD_FAILED = 24;
+  ROW_ACCOUNTING = 25;
+  PIN_MISMATCH = 26;
+  SOURCE = 27;
+  STAGE_NOT_ADMITTED = 28;
+  RUN_HASH_MISMATCH = 29;
+  LEASE_UNCONFIRMED = 30;
+  MEMBER_VERSION = 31;
+  PLATFORM_MISMATCH = 32;
+  // The build system named no output, or more than one, or one of the wrong shape or a symlink
+  // for the artifact's type.
+  BUILD_OUTPUT = 33;
+  // The staged state a commit needs is missing, or differs from the set, when the commit phase
+  // observes it.
+  PUBLISH_STAGE = 34;
+}
+
+enum RowState {
+  ROW_UNSPECIFIED = 0;
+  ROW_PASSED = 1;
+  ROW_FAILED = 2;
+  ROW_NOT_RUN = 3;
+  ROW_NOT_REACHED = 4;
+  ROW_UNREADABLE = 5;
+}
+
+message Row {
+  string name = 1;
+  RowState state = 2;
+  string detail = 3;
+}
+
+message ValidationReport {
+  // 4 was the leftovers and 5 the validation run id: no kept validation creates anything.
+  reserved 4, 5;
+  reserved "leftovers", "validation_run_id";
+  string name = 1;
+  Verdict verdict = 2;
+  repeated Row rows = 3;
+}
+
+message ActionReport {
+  string name = 1;
+  Verdict verdict = 2;
+  Reason reason = 3;
+  string message = 4;
+  repeated Effect effects = 5;
+  repeated ValidationReport validations = 6;
+  // Artifact names the channel has never held.
+  repeated string new_names = 7;
+  // A Test action: one row per target, named by its label. A vacuous or failed target is
+  // never a pass.
+  repeated Row rows = 8;
+}
+
+message Effect {
+  string what = 1;
+  string subject = 2;
+  EffectState state = 3;
+}
+
+enum EffectState {
+  EFFECT_UNSPECIFIED = 0;
+  BUILT = 1;
+  PUBLISHED = 2;
+  ALREADY_PRESENT = 3;
+  WOULD_BUILD = 4;
+  WOULD_PUBLISH = 5;
+  NOT_REACHED = 6;
+  YANKED = 7;
+  STAGED = 8;
+  TESTED = 9;
+  WOULD_TEST = 10;
+}

@@ -128,5 +128,5 @@ fn the_repositorys_pure_crates_carry_the_template() {
                 .is_ok_and(|m| is_pure(&m))
         })
         .collect();
-    assert_eq!(marked, ["ucdk-core"]);
+    assert_eq!(marked, ["ucdk-core", "ucdk-release", "ucdk-release-proto"]);
 }
