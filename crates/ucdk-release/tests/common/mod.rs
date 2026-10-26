@@ -10,13 +10,26 @@ use ucdk_release::machine::{Checked, Rule};
 use ucdk_release_proto::v1::action::Kind as ActionKind;
 use ucdk_release_proto::v1::push_identity::Kind as PushKind;
 use ucdk_release_proto::v1::{
-    Action, Anonymous, ArtifactDecl, ArtifactType, Build, BuildSystem, BuildSystemKind, Channel,
-    ChannelKind, Federated, Machine, Publish, PushIdentity, Repository, Smoke, Stage, Target, Test,
-    Trigger, Validation, ValidationKind, Visibility,
+    Action, Anonymous, ArtifactDecl, ArtifactType, Build, BuildStamp, BuildSystem, BuildSystemKind,
+    Channel, ChannelKind, Federated, Machine, Publish, PushIdentity, Repository, Smoke, Stage,
+    Target, Test, Trigger, Validation, ValidationKind, Visibility,
 };
 
 /// The release platform of the example.
 pub const PLATFORM: &str = "linux-x86_64";
+
+/// The commit of the examples that hash a revision.
+pub const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+
+/// The build stamp of the examples.
+pub fn stamp() -> BuildStamp {
+    BuildStamp {
+        version: "1.2.3".to_owned(),
+        build_number: 41,
+        source_commit: "abc123".to_owned(),
+        timestamp_ms: 1_700_000_000_000,
+    }
+}
 
 pub fn strings(items: &[&str]) -> Vec<String> {
     items.iter().map(|s| (*s).to_owned()).collect()

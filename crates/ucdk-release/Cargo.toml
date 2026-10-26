@@ -1,6 +1,6 @@
 [package]
 name = "ucdk-release"
-description = "The release model: a checked machine, the text rules of its flags and environment, and the selection of what a run does."
+description = "The release model: a checked machine, the text rules of its flags and environment, the selection of what a run does, the release hashes, the set document, store keys and the verification of a stored member."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,6 +14,9 @@ publish.workspace = true
 pure = true
 
 [dependencies]
+prost.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 ucdk-core = { path = "../ucdk-core" }
 ucdk-release-proto = { path = "../ucdk-release-proto" }
 
