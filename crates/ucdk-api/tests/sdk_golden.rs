@@ -312,6 +312,7 @@ fn cases() -> Vec<Case> {
                 cell: text("machine/cell/uid"),
                 credentials: CredentialSource::Profile as i32,
                 profile: text("work"),
+                holder: text("ci-7"),
             },
         ),
         case(

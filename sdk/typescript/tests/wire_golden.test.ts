@@ -177,6 +177,7 @@ function cases(): Record<string, Case> {
       cell: "machine/cell/uid",
       credentials: api.CredentialSource.PROFILE,
       profile: "work",
+      holder: "ci-7",
     }),
     plan_request: new api.PlanRequest({ resources: resourceList(), mode: api.Mode.DESTROY }),
     apply_request: new api.ApplyRequest({

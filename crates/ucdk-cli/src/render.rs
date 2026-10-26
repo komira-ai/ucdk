@@ -181,7 +181,7 @@ pub fn report_text(report: &Report) -> String {
 /// is read (planned) again before running again.
 pub fn failure(failure: &Failure, class: ExitClass) -> String {
     let advice = if matches!(failure.error, EngineError::LeaseUnconfirmed { .. }) {
-        "the ledger lease may still be held; run again as the same holder, or wait for it to lapse"
+        "the ledger lease may still be held; run again with the same --holder, or wait for it to lapse"
     } else if class == ExitClass::FailedNoEffect {
         "nothing was changed; it is safe to run again"
     } else {
@@ -219,7 +219,7 @@ mod tests {
         for class in [ExitClass::FailedNoEffect, ExitClass::FailedChanged] {
             let text = failure_of(class);
             assert!(
-                text.ends_with("run again as the same holder, or wait for it to lapse\n"),
+                text.ends_with("run again with the same --holder, or wait for it to lapse\n"),
                 "{text}"
             );
             assert!(!text.contains("safe to run again"), "{text}");

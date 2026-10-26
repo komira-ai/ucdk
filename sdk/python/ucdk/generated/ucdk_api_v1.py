@@ -185,6 +185,9 @@ class SessionConfig(_wire.Message):
         ledger_kind: The kind of ledger and where it is.
         cell: The cell identity every stamp of the session carries.
         profile: The profile, when `credentials` is PROFILE.
+        holder: The name the session's runs take the ledger lease as. A run is refused while another holder
+            has the lease; the holder a lease names takes it again at once, so naming it lets a rerun
+            reclaim a lease an earlier run left behind. Empty: a new name for every run.
     """
 
     _FIELDS = (
@@ -195,6 +198,7 @@ class SessionConfig(_wire.Message):
         "cell",
         "credentials",
         "profile",
+        "holder",
     )
 
     def __init__(
@@ -206,6 +210,7 @@ class SessionConfig(_wire.Message):
         cell: str = "",
         credentials: CredentialSource = CredentialSource.UNSPECIFIED,
         profile: str = "",
+        holder: str = "",
     ) -> None:
         self.provider = provider
         self.provider_options = {} if provider_options is None else dict(provider_options)
@@ -214,6 +219,7 @@ class SessionConfig(_wire.Message):
         self.cell = cell
         self.credentials = credentials
         self.profile = profile
+        self.holder = holder
 
     def _encode_into(self, out: bytearray) -> None:
         if self.provider:
@@ -236,6 +242,8 @@ class SessionConfig(_wire.Message):
             _wire.put_varint_field(out, 6, self.credentials)
         if self.profile:
             _wire.put_string(out, 7, self.profile)
+        if self.holder:
+            _wire.put_string(out, 8, self.holder)
 
     def _merge(self, data: bytes) -> None:
         for number, wire_type, value in _wire.read_fields(data):
@@ -268,6 +276,9 @@ class SessionConfig(_wire.Message):
             elif number == 7:
                 _wire.expect(wire_type, _wire.LEN)
                 self.profile = _wire.get_string(value)
+            elif number == 8:
+                _wire.expect(wire_type, _wire.LEN)
+                self.holder = _wire.get_string(value)
 
 
 class PlanRequest(_wire.Message):

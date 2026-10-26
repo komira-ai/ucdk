@@ -337,10 +337,26 @@ fn the_default_holder_names_the_process_and_a_holder_can_be_named(backend: Backe
         }
     });
     done(apply(&mut hooked, &ledger, &chain()));
-    assert_eq!(
-        *name.lock().expect("lock"),
-        format!("ucdk-{}", std::process::id())
+    drop(hooked);
+    let first = name.lock().expect("lock").clone();
+    assert!(
+        first.starts_with(&format!("ucdk-{}-", std::process::id())),
+        "{first}"
     );
+    // A second run names itself differently: the name is not the process alone.
+    let second_name: Arc<Mutex<String>> = Arc::default();
+    let seen = Arc::clone(&second_name);
+    let probe = ledger.clone();
+    let mut hooked = Hooked::new(&mut fake, at, move |_| {
+        if let Err(LeaseError::Held { holder, .. }) = probe.acquire("probe", Duration::from_secs(1))
+        {
+            *seen.lock().expect("lock") = holder;
+        }
+    });
+    done(destroy(&mut hooked, &ledger, &chain()));
+    let second = second_name.lock().expect("lock").clone();
+    assert!(!second.is_empty());
+    assert_ne!(first, second);
 }
 
 fn a_fence_the_ledger_never_granted_cannot_write(backend: Backend) {

@@ -43,6 +43,17 @@ pub struct Engine<'a> {
     fence: Fence,
 }
 
+/// The name a run takes the lease as when none is given: the process id and a random number,
+/// so two runs are told apart even when their process ids are equal (two containers on one
+/// ledger are both process 1).
+fn default_holder() -> String {
+    use std::hash::{BuildHasher, Hasher as _};
+    let random = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish();
+    format!("ucdk-{}-{random:016x}", std::process::id())
+}
+
 /// The resource whose `run` node is at `path`, or none for any other role: a resource's
 /// outputs are those of its `run` object.
 fn run_resource(path: &NodePath) -> Option<&str> {
@@ -67,13 +78,15 @@ impl<'a> Engine<'a> {
             provider,
             ledger,
             cell,
-            holder: format!("ucdk-{}", std::process::id()),
+            holder: default_holder(),
             ttl: DEFAULT_LEASE_TTL,
             fence: Fence::NONE,
         }
     }
 
-    /// The identity the run's lease is taken as. The default names the process.
+    /// The identity the run's lease is taken as. The default is new for every engine (the
+    /// process id and a random number), so it is never the name of an earlier run: to rerun
+    /// as the holder of a lease that run left behind, name it.
     #[must_use]
     pub fn with_holder(mut self, holder: impl Into<String>) -> Self {
         self.holder = holder.into();

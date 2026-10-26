@@ -567,14 +567,18 @@ unless the fence is the one it granted last and the lease has not lapsed.
   the grant landed, or giving it back fails after a run that stopped, the run is
   `EngineError::LeaseUnconfirmed` (wire code `ERROR_CODE_LEDGER`), exit class failed-changed
   (6), never "safe to run again": the same holder reruns at once, any other is refused until the
-  lease lapses. A run that finished stands when its release fails. A plan or a status takes no lease. The holder defaults to a name of
-  the process (`Engine::with_holder` names it) and the lease lasts ten minutes between renewals
+  lease lapses. A run that finished stands when its release fails. A plan or a status takes no lease. The holder defaults to a new name
+  per run (`Engine::with_holder` names it) and the lease lasts ten minutes between renewals
   (`Engine::with_lease_ttl`). A run refused for the lease is `Refusal::LeaseHeld` (holder and the
   longest wait), `ucdk.api.v1.LeaseHeld`, exit class refused, nothing read or written. A run
   whose lease is lost stops with `EngineError::LeaseLost` (`ERROR_CODE_LEASE_LOST`), does not roll
   back, and what it had begun is resolved by the next holder from the intent record and the stamp.
-- **Not yet.** The holder and the lease length are not in `SessionConfig`, and no verb reads or
-  breaks a lease by hand.
+- **Naming the holder.** `SessionConfig.holder` (both SDKs) and `ucdk apply|destroy --holder`
+  name the holder; unnamed, every run takes a new name (process id and a random number, so equal
+  process ids in two containers do not collide). Name the holder a run left a lease under to take
+  it again at once.
+- **Not yet.** The lease length is not in `SessionConfig`, and no verb reads or breaks a lease by
+  hand.
 
 ## 10. Testing plan
 

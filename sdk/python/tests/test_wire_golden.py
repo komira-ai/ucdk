@@ -164,6 +164,7 @@ def cases():
             cell="machine/cell/uid",
             credentials=api.CredentialSource.PROFILE,
             profile="work",
+            holder="ci-7",
         ),
         "plan_request": api.PlanRequest(resources=resource_list(), mode=api.Mode.DESTROY),
         "apply_request": api.ApplyRequest(

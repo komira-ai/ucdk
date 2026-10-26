@@ -274,6 +274,31 @@ test("an apply on a ledger another holder has leased is refused as data", () =>
     assert.ok(status.status?.objects.every((o) => o.record === undefined && o.live === undefined));
   }));
 
+test("a session named as the holder of a lease takes it again at once", () =>
+  inTemporaryDirectory(async (directory) => {
+    const wanted = pair();
+    const location = join(directory, "ledger");
+    copyFileSync(join(LEDGER_GOLDEN, "leased.ucdk"), location);
+    {
+      await using other = await openSession("fake", {
+        ledgerKind: "file",
+        ledgerLocation: location,
+        holder: "ci-8",
+      });
+      const plan = await other.plan(wanted);
+      const refused = await other.apply(wanted, plan.planned?.hash as string);
+      assert.equal(refused.exit, api.ExitClass.REFUSED);
+    }
+    await using same = await openSession("fake", {
+      ledgerKind: "file",
+      ledgerLocation: location,
+      holder: "ci-7",
+    });
+    const plan = await same.plan(wanted);
+    const applied = await same.apply(wanted, plan.planned?.hash as string);
+    assert.equal(applied.exit, api.ExitClass.DONE);
+  }));
+
 test("an apply on a ledger whose holder lapsed takes over and goes through", () =>
   inTemporaryDirectory(async (directory) => {
     const wanted = pair();

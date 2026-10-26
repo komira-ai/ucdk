@@ -12,8 +12,8 @@ usage: ucdk --version
        ucdk plan --provider=<fake|fake-limited> --input=<resources.pb> [--mode=<apply|destroy>] [--out=<plan file>]
        ucdk status --provider=<fake|fake-limited> --input=<resources.pb>
        ucdk leaks --provider=<fake|fake-limited>
-       ucdk apply --provider=<fake|fake-limited> --input=<resources.pb> --plan=<plan file> --expect-plan-hash=<hash>
-       ucdk destroy --provider=<fake|fake-limited> --input=<resources.pb> --plan=<plan file> --expect-plan-hash=<hash>
+       ucdk apply --provider=<fake|fake-limited> --input=<resources.pb> --plan=<plan file> --expect-plan-hash=<hash> [--holder=<name>]
+       ucdk destroy --provider=<fake|fake-limited> --input=<resources.pb> --plan=<plan file> --expect-plan-hash=<hash> [--holder=<name>]
 ";
 
 /// A saved plan and the hash the approver pinned for it.
@@ -61,6 +61,8 @@ pub struct Invocation {
     pub mode: Mode,
     /// The resource list file; empty for `leaks`, which reads no file.
     pub input: String,
+    /// The name the run takes the ledger lease as; none: a new name for every run.
+    pub holder: Option<String>,
 }
 
 #[derive(Debug)]
@@ -149,8 +151,8 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             Mode::Apply,
         ),
         "leaks" => (split_flags(flags, &["provider"], &[])?, Mode::Apply),
-        "apply" => (split_flags(flags, both, &[])?, Mode::Apply),
-        "destroy" => (split_flags(flags, both, &[])?, Mode::Destroy),
+        "apply" => (split_flags(flags, both, &["holder"])?, Mode::Apply),
+        "destroy" => (split_flags(flags, both, &["holder"])?, Mode::Destroy),
         other => return Err(format!("`{other}` is not a command")),
     };
     let verb = match verb {
@@ -169,5 +171,6 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             .ok_or_else(|| format!("`{provider}` is not a provider (fake, fake-limited)"))?,
         mode,
         input: values.get("input").cloned().unwrap_or_default(),
+        holder: values.get("holder").cloned(),
     }))
 }

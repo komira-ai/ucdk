@@ -248,6 +248,21 @@ class Lease(unittest.TestCase):
                     all(o.record is None and o.live is None for o in session.status(wanted).status.objects)
                 )
 
+    def test_a_session_named_as_the_holder_of_a_lease_takes_it_again_at_once(self):
+        wanted = pair()
+        with tempfile.TemporaryDirectory() as directory:
+            location = self.copy_of(directory, "leased.ucdk")
+            with open_session(
+                ledger_kind="file", ledger_location=location, holder="ci-8"
+            ) as other:
+                refused = other.apply(wanted, other.plan(wanted).planned.hash)
+            with open_session(
+                ledger_kind="file", ledger_location=location, holder="ci-7"
+            ) as same:
+                applied = same.apply(wanted, same.plan(wanted).planned.hash)
+        self.assertEqual(refused.exit, api.ExitClass.REFUSED)
+        self.assertEqual(applied.exit, api.ExitClass.DONE)
+
     def test_an_apply_on_a_ledger_whose_holder_lapsed_takes_over_and_goes_through(self):
         wanted = pair()
         with tempfile.TemporaryDirectory() as directory:
