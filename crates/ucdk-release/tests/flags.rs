@@ -4,6 +4,7 @@
 
 use ucdk_release::flags::{
     BraceError, EnvKeyError, Placeholder, Reserved, env_key, owned_flags, placeholders, reserved,
+    substitute,
 };
 use ucdk_release_proto::v1::BuildSystemKind;
 use ucdk_release_proto::v1::BuildSystemKind::{Bazel, Buck2, Unspecified};
@@ -359,4 +360,64 @@ fn a_ucdk_prefix_in_any_case_is_reserved() {
     }
     assert!(EnvKeyError::Grammar.to_string().contains("[A-Za-z_]"));
     assert!(EnvKeyError::Reserved.to_string().contains("UCDK_"));
+}
+
+fn named(p: Placeholder) -> String {
+    format!("<{}>", p.name())
+}
+
+#[test]
+fn substitution_replaces_each_placeholder_and_unescapes_each_doubled_brace() {
+    assert_eq!(substitute("plain", named).as_deref(), Ok("plain"));
+    assert_eq!(substitute("", named).as_deref(), Ok(""));
+    assert_eq!(
+        substitute("a={revision}/{platform}", named).as_deref(),
+        Ok("a=<revision>/<platform>")
+    );
+    assert_eq!(
+        substitute("{{x}} {{{platform}}} }}{{", named).as_deref(),
+        Ok("{x} {<platform>} }{")
+    );
+    // Multi-byte text around the braces is kept whole.
+    assert_eq!(
+        substitute("\u{e9}{{\u{e9}}}{revision}\u{e9}", named).as_deref(),
+        Ok("\u{e9}{\u{e9}}<revision>\u{e9}")
+    );
+}
+
+#[test]
+fn substitution_refuses_what_the_scanner_refuses_with_the_same_error() {
+    for text in [
+        "{nope}",
+        "{}",
+        "a}",
+        "{revision",
+        "{revision{platform}}",
+        "}",
+    ] {
+        assert_eq!(
+            substitute(text, named).map(drop),
+            placeholders(text).map(drop),
+            "{text}"
+        );
+        assert!(substitute(text, named).is_err(), "{text}");
+    }
+}
+
+#[test]
+fn substitution_asks_for_the_placeholders_in_the_order_they_occur() {
+    let asked = std::cell::RefCell::new(Vec::new());
+    let out = substitute("{platform}{revision}{platform}", |p| {
+        asked.borrow_mut().push(p);
+        String::new()
+    });
+    assert_eq!(out.as_deref(), Ok(""));
+    assert_eq!(
+        asked.into_inner(),
+        [
+            Placeholder::Platform,
+            Placeholder::Revision,
+            Placeholder::Platform
+        ]
+    );
 }

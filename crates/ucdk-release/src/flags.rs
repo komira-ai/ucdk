@@ -190,13 +190,49 @@ impl fmt::Display for BraceError {
 /// The placeholders of one flag or environment value, in the order they occur, or the first
 /// brace that is neither a placeholder nor a doubled brace. `{{` and `}}` are literal braces.
 pub fn placeholders(text: &str) -> Result<Vec<Placeholder>, BraceError> {
-    let bytes = text.as_bytes();
     let mut found = Vec::new();
+    walk(text, |piece| {
+        if let Piece::Holder(p) = piece {
+            found.push(p);
+        }
+    })?;
+    Ok(found)
+}
+
+/// `text` with each placeholder replaced by what `value` answers for it and each doubled brace
+/// replaced by one literal brace, or the first brace that is neither (the scanner of
+/// [`placeholders`] reads it, so a text the machine rules accept is a text this accepts).
+pub fn substitute(text: &str, value: impl Fn(Placeholder) -> String) -> Result<String, BraceError> {
+    let mut out = String::with_capacity(text.len());
+    walk(text, |piece| match piece {
+        Piece::Text(literal) => out.push_str(literal),
+        Piece::Holder(p) => out.push_str(&value(p)),
+    })?;
+    Ok(out)
+}
+
+/// One piece of a scanned text.
+enum Piece<'t> {
+    /// Literal text; a doubled brace gives the one brace it stands for.
+    Text(&'t str),
+    Holder(Placeholder),
+}
+
+/// The scanner: hands `sink` the pieces of `text` in order, or fails at the first brace that is
+/// neither a placeholder nor a doubled brace.
+fn walk<'t>(text: &'t str, mut sink: impl FnMut(Piece<'t>)) -> Result<(), BraceError> {
+    let bytes = text.as_bytes();
     let mut at = 0;
+    // Where the literal text not yet handed to `sink` begins.
+    let mut run = 0;
     while at < bytes.len() {
         match bytes[at] {
-            b'{' if bytes.get(at + 1) == Some(&b'{') => at += 2,
-            b'}' if bytes.get(at + 1) == Some(&b'}') => at += 2,
+            brace @ (b'{' | b'}') if bytes.get(at + 1) == Some(&brace) => {
+                // The literal text up to and including the first brace of the pair.
+                sink(Piece::Text(&text[run..=at]));
+                at += 2;
+                run = at;
+            }
             b'}' => return Err(BraceError::Stray { at }),
             b'{' => {
                 let close = bytes[at + 1..]
@@ -205,21 +241,22 @@ pub fn placeholders(text: &str) -> Result<Vec<Placeholder>, BraceError> {
                     .filter(|offset| bytes[at + 1 + offset] == b'}')
                     .ok_or(BraceError::Unclosed { at })?;
                 let name = &text[at + 1..at + 1 + close];
-                match Placeholder::named(name) {
-                    Some(p) => found.push(p),
-                    None => {
-                        return Err(BraceError::Unknown {
-                            at,
-                            name: name.to_owned(),
-                        });
-                    }
-                }
+                let Some(p) = Placeholder::named(name) else {
+                    return Err(BraceError::Unknown {
+                        at,
+                        name: name.to_owned(),
+                    });
+                };
+                sink(Piece::Text(&text[run..at]));
+                sink(Piece::Holder(p));
                 at += close + 2;
+                run = at;
             }
             _ => at += 1,
         }
     }
-    Ok(found)
+    sink(Piece::Text(&text[run..]));
+    Ok(())
 }
 
 /// Why an environment key is refused.
