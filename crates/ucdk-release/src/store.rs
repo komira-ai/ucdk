@@ -57,7 +57,7 @@ fn join(scope: &SetScope, member: Option<&str>) -> Result<String, StoreKeyError>
     ];
     let named: Option<(&'static str, &str)> = member.map(|name| ("member", name));
     if let Some((part, _)) = head.iter().chain(&named).find(|(_, p)| !is_plain(p)) {
-        return Err(StoreKeyError { part: *part });
+        return Err(StoreKeyError { part });
     }
     let head: Vec<&str> = head.iter().map(|(_, p)| *p).collect();
     Ok(match member {

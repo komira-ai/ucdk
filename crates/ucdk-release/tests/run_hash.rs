@@ -298,8 +298,8 @@ fn plan_and_run_agree_for_a_stage_without_build() {
 
 #[test]
 fn a_change_check_stage_takes_its_version_from_the_flag() {
-    // The stage holds a Test action, so its stamp comes from the flags of the run: the version
-    // the driver gives is the version approved, and another one is another approval.
+    // The stage holds a Build and a Test action, so its stamp comes from the flags of the run:
+    // the version the driver gives is the version approved, and another is another approval.
     let checked = Checked::read(good()).expect("read");
     let ask = |version: &str| {
         run_hash(
@@ -320,7 +320,7 @@ fn a_change_check_stage_takes_its_version_from_the_flag() {
         "check",
         "0",
         REVISION,
-        "",
+        PLATFORM,
         "1.2.3",
         "41",
         "abc123",

@@ -188,7 +188,7 @@ fn a_validation_edit_does_not_change_it() {
 fn a_bound_edit_does_not_change_it() {
     let edits: Vec<(&str, Edit)> = vec![
         ("attempts", |m| {
-            publish_mut(m, "publish", "publish").attempts = 7
+            publish_mut(m, "publish", "publish").attempts = 7;
         }),
         ("polls", |m| publish_mut(m, "publish", "publish").polls = 9),
         ("wait polls", |m| {
@@ -241,13 +241,13 @@ fn a_flag_or_target_order_edit_changes_it() {
             test_mut(m, "build", "test").targets.pop();
         }),
         ("a base flag", |m| {
-            system_mut(m).flags.push("--keep-going".to_owned())
+            system_mut(m).flags.push("--keep-going".to_owned());
         }),
         ("the base environment", |m| {
             system_mut(m).env.insert("HOME".to_owned(), "/h".to_owned());
         }),
         ("the binary", |m| {
-            system_mut(m).binary = "/usr/bin/buck2".to_owned()
+            system_mut(m).binary = "/usr/bin/buck2".to_owned();
         }),
         ("the mode", |m| system_mut(m).mode.clear()),
         ("the config file", |m| system_mut(m).config_file.clear()),

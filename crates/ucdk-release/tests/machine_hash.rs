@@ -91,7 +91,7 @@ fn covers_the_build_system_and_every_target() {
             system_mut(m).kind = BuildSystemKind::Bazel as i32;
         }),
         ("binary", |m| {
-            system_mut(m).binary = "/usr/bin/buck2".to_owned()
+            system_mut(m).binary = "/usr/bin/buck2".to_owned();
         }),
         ("config file", |m| system_mut(m).config_file.clear()),
         ("mode", |m| system_mut(m).mode = "debug".to_owned()),
@@ -162,14 +162,14 @@ fn covers_the_build_system_and_every_target() {
         }),
         ("name", |m| m.name = "other".to_owned()),
         ("stamp ignore", |m| {
-            m.stamp_ignore.push("docs/**".to_owned())
+            m.stamp_ignore.push("docs/**".to_owned());
         }),
         ("validation kind", |m| {
             action_mut(m, "publish", "smoke").validations[0].kind =
                 ValidationKind::SetClosure as i32;
         }),
         ("bound", |m| {
-            publish_mut(m, "publish", "publish").attempts = 5
+            publish_mut(m, "publish", "publish").attempts = 5;
         }),
         ("channel trust", |m| {
             federated_mut(m).audience = "other.example.com".to_owned();

@@ -13,6 +13,8 @@ use ucdk_release_proto::v1::{
     Stamped,
 };
 
+type Edit = fn(&mut Machine);
+
 const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
 const SHA_TOOL: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 const SHA_IMAGE: &str = "2222222222222222222222222222222222222222222222222222222222222222";
@@ -405,16 +407,16 @@ fn ignores_the_build_system_and_the_targets() {
     // that yields the same members has the same set hash, while the build-inputs hash, which
     // does cover them, tells the two builds apart.
     let base = good();
-    let edits: Vec<(&str, fn(&mut Machine))> = vec![
+    let edits: Vec<(&str, Edit)> = vec![
         ("binary", |m| {
-            system_mut(m).binary = "/usr/bin/buck2".to_owned()
+            system_mut(m).binary = "/usr/bin/buck2".to_owned();
         }),
         ("config file", |m| {
             system_mut(m).config_file = "release/other.buckconfig".to_owned();
         }),
         ("mode", |m| system_mut(m).mode = "other".to_owned()),
         ("flags", |m| {
-            system_mut(m).flags.push("--keep-going".to_owned())
+            system_mut(m).flags.push("--keep-going".to_owned());
         }),
         ("environment", |m| {
             system_mut(m).env.insert("HOME".to_owned(), "/h".to_owned());

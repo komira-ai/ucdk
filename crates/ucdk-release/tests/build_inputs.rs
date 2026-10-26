@@ -154,7 +154,7 @@ fn an_unrelated_stage_edit_does_not_change_it() {
             ));
         }),
         ("stamp ignore", |m| {
-            m.stamp_ignore.push("other/**".to_owned())
+            m.stamp_ignore.push("other/**".to_owned());
         }),
         ("machine name", |m| m.name = "renamed".to_owned()),
         ("publish bound", |m| {
@@ -210,10 +210,10 @@ fn a_build_system_target_or_artifact_edit_changes_it() {
     let base = inputs(with_lib(), &stamp());
     let edits: Vec<(&str, Edit)> = vec![
         ("kind", |m| {
-            system_mut(m).kind = BuildSystemKind::Bazel as i32
+            system_mut(m).kind = BuildSystemKind::Bazel as i32;
         }),
         ("binary", |m| {
-            system_mut(m).binary = "/usr/bin/buck2".to_owned()
+            system_mut(m).binary = "/usr/bin/buck2".to_owned();
         }),
         ("config file", |m| system_mut(m).config_file.clear()),
         ("mode", |m| system_mut(m).mode.clear()),
