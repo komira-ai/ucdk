@@ -124,16 +124,21 @@ struct Inner {
     provider: Box<dyn Provider>,
     ledger: Box<dyn Ledger>,
     cell: CellIdentity,
+    /// The lease holder name; none: the engine's own, new for every run.
+    holder: Option<String>,
 }
 
 impl Inner {
     fn handle(&mut self, request: Request) -> Outcome {
-        Engine::new(
+        let mut engine = Engine::new(
             self.provider.as_mut(),
             self.ledger.as_ref(),
             self.cell.clone(),
-        )
-        .handle(request)
+        );
+        if let Some(holder) = &self.holder {
+            engine = engine.with_holder(holder);
+        }
+        engine.handle(request)
     }
 
     /// The bytes of the answer to a request message that may be refused before the engine.
@@ -241,11 +246,26 @@ impl Session {
         } else {
             parse_cell(&config.cell)?
         };
-        Ok(Self::with_parts(
+        let session = Self::with_parts(
             provider_named(&config.provider, &cell)?,
             ledger_for(&config.ledger_kind, &config.ledger_location)?,
             cell,
-        ))
+        );
+        Ok(if config.holder.is_empty() {
+            session
+        } else {
+            session.with_holder(config.holder)
+        })
+    }
+
+    /// The session, with its runs taking the ledger lease as `holder`.
+    #[must_use]
+    pub fn with_holder(mut self, holder: impl Into<String>) -> Self {
+        self.inner
+            .get_mut()
+            .expect("the lock is never poisoned")
+            .holder = Some(holder.into());
+        self
     }
 
     /// A session over the given parts: how a Rust host, or a test with a provider of its own,
@@ -260,6 +280,7 @@ impl Session {
                 provider,
                 ledger,
                 cell,
+                holder: None,
             }),
         }
     }

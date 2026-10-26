@@ -154,6 +154,26 @@ fn a_failure_whose_call_may_have_changed_something_needs_a_new_plan() {
 }
 
 #[test]
+fn a_run_that_may_still_hold_the_lease_is_never_safe_to_run_again() {
+    let unconfirmed = |run| EngineError::LeaseUnconfirmed {
+        why: "down".to_owned(),
+        run,
+    };
+    for stopped in [
+        failed(Report::default(), None, unconfirmed(None)),
+        failed(
+            Report::default(),
+            Some("web/run"),
+            unconfirmed(Some(Box::new(EngineError::Provider(
+                ProviderError::Transient("later".to_owned()),
+            )))),
+        ),
+    ] {
+        assert_eq!(failure_class(&stopped), ExitClass::FailedChanged);
+    }
+}
+
+#[test]
 fn a_failure_after_earlier_steps_changed_things_needs_a_new_plan_even_if_the_error_is_safe() {
     let stopped = failed(
         changed(),

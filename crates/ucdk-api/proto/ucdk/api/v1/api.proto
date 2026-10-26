@@ -65,6 +65,10 @@ message SessionConfig {
   CredentialSource credentials = 6;
   // The profile, when `credentials` is PROFILE.
   string profile = 7;
+  // The name the session's runs take the ledger lease as. A run is refused while another holder
+  // has the lease; the holder a lease names takes it again at once, so naming it lets a rerun
+  // reclaim a lease an earlier run left behind. Empty: a new name for every run.
+  string holder = 8;
 }
 
 // Observe and plan; changes nothing.

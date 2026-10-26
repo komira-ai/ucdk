@@ -318,6 +318,142 @@ fn refusals_and_fences_read_as_sentences() {
     );
 }
 
+// ---- two live openers ------------------------------------------------------------------------
+
+fn two_handles(name: &str) -> (Scratch, ManualClock, FileLedger, FileLedger) {
+    let scratch = Scratch::new(name);
+    let clock = ManualClock::at(1_000_000);
+    let open =
+        || FileLedger::open_with_clock(scratch.file(), Arc::new(clock.clone())).expect("open");
+    let (first, second) = (open(), open());
+    (scratch, clock, first, second)
+}
+
+#[test]
+fn a_second_live_handle_is_refused_the_lease_until_it_lapses_and_then_fences_the_first_out() {
+    let (_scratch, clock, first, second) = two_handles("live_openers");
+    let lease = first.acquire("alice", TTL).expect("acquire");
+    write_as(&first, lease.fence, "a/run").expect("alice writes");
+
+    clock.advance(secs(10));
+    let refused = second.acquire("bob", TTL).expect_err("alice holds it");
+    assert!(matches!(refused, LeaseError::Held { ref holder, .. } if holder == "alice"));
+    // The second handle's unfenced write is refused too, and alice is unharmed by both.
+    let token = second.read().expect("read").token;
+    assert!(matches!(
+        second.write(&token, Change::Put(record("b/run"))),
+        Err(LedgerError::Leased { .. })
+    ));
+    write_as(&first, lease.fence, "a/two").expect("alice still writes");
+
+    // Alice stalls past her lease and the skew bound; bob, on the other handle, takes over.
+    clock.advance(TTL + MAX_CLOCK_SKEW);
+    let taken = second.acquire("bob", TTL).expect("lapsed");
+    assert!(taken.fence > lease.fence);
+    assert_eq!(
+        write_as(&first, lease.fence, "a/late"),
+        Err(LedgerError::Fenced)
+    );
+    write_as(&second, taken.fence, "b/run").expect("bob writes");
+    let records = first.read().expect("read").records;
+    assert!(records.contains_key(&path("b/run")));
+    assert!(!records.contains_key(&path("a/late")));
+}
+
+/// The helper a test process runs in a second process: it opens the ledger the parent named
+/// and tries to acquire it as the holder the parent named, at the time the parent named. It is
+/// ignored in a normal run; the parent runs it by name.
+#[test]
+#[ignore = "run by a_second_process_..., which sets what it reads"]
+fn child_process_acquires() {
+    let var = |name: &str| std::env::var(name).expect("the parent sets it");
+    let clock = ManualClock::at(var("UCDK_TEST_NOW").parse().expect("a number"));
+    let ledger = FileLedger::open_with_clock(var("UCDK_TEST_LEDGER"), Arc::new(clock))
+        .expect("the child opens a ledger the parent holds open");
+    let result = ledger.acquire(&var("UCDK_TEST_HOLDER"), TTL);
+    match var("UCDK_TEST_EXPECT").as_str() {
+        "held" => assert!(matches!(result, Err(LeaseError::Held { .. })), "{result:?}"),
+        "granted" => {
+            let lease = result.expect("the lease is granted");
+            write_as(&ledger, lease.fence, "child/run").expect("the child writes");
+        }
+        other => panic!("unknown expectation {other}"),
+    }
+}
+
+/// Runs `child_process_acquires` in another process, which exits cleanly only if it saw `expect`.
+fn child(scratch: &Scratch, now: u64, holder: &str, expect: &str) {
+    let exe = std::env::current_exe().expect("this test binary");
+    let output = std::process::Command::new(exe)
+        .args(["--ignored", "--exact", "child_process_acquires"])
+        .env("UCDK_TEST_LEDGER", scratch.file())
+        .env("UCDK_TEST_NOW", now.to_string())
+        .env("UCDK_TEST_HOLDER", holder)
+        .env("UCDK_TEST_EXPECT", expect)
+        .output()
+        .expect("run the child");
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+        "the child test ran"
+    );
+}
+
+#[test]
+fn a_second_process_is_refused_while_the_first_holds_the_lease_and_takes_over_after_it_lapses() {
+    let scratch = Scratch::new("live_processes");
+    let clock = ManualClock::at(1_000_000);
+    let parent =
+        FileLedger::open_with_clock(scratch.file(), Arc::new(clock.clone())).expect("open");
+    let lease = parent.acquire("alice", TTL).expect("acquire");
+    write_as(&parent, lease.fence, "a/run").expect("alice writes");
+
+    // The parent keeps its handle open throughout: the child still opens the ledger.
+    child(&scratch, 1_010_000, "bob", "held");
+    write_as(&parent, lease.fence, "a/two").expect("alice still writes");
+
+    let after = 1_000_000 + 60_000 + 5_000;
+    child(&scratch, after, "bob", "granted");
+    assert_eq!(
+        write_as(&parent, lease.fence, "a/late"),
+        Err(LedgerError::Fenced)
+    );
+    assert!(
+        parent
+            .read()
+            .expect("read")
+            .records
+            .contains_key(&path("child/run"))
+    );
+}
+
+#[test]
+fn a_holder_that_ended_without_releasing_takes_its_own_lease_again_at_once() {
+    on_every_ledger("same_holder", |ledger, clock| {
+        let first = ledger.acquire("alice", TTL).expect("acquire");
+        clock.advance(secs(1));
+        // Alice's run ended with the release lost: her rerun is not made to wait.
+        let again = ledger.acquire("alice", TTL).expect("her own lease");
+        assert!(again.fence > first.fence);
+        assert_eq!(again.expires_at, 1_001_000 + 60_000);
+        assert_eq!(
+            write_as(ledger, first.fence, "a/run"),
+            Err(LedgerError::Fenced)
+        );
+        write_as(ledger, again.fence, "a/run").expect("the new grant writes");
+        // Someone else is still held off.
+        assert!(matches!(
+            ledger.acquire("bob", TTL),
+            Err(LeaseError::Held { .. })
+        ));
+    });
+}
+
 #[test]
 fn the_system_clock_reads_the_wall_time_and_a_manual_clock_only_moves_when_told() {
     use ucdk_ledger::{Clock as _, SystemClock};

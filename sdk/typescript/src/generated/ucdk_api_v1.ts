@@ -180,6 +180,12 @@ export interface SessionConfigInit {
   credentials?: CredentialSource;
   /** The profile, when `credentials` is PROFILE. */
   profile?: string;
+  /**
+   * The name the session's runs take the ledger lease as. A run is refused while another holder
+   * has the lease; the holder a lease names takes it again at once, so naming it lets a rerun
+   * reclaim a lease an earlier run left behind. Empty: a new name for every run.
+   */
+  holder?: string;
 }
 
 /** What a session is opened with. */
@@ -195,6 +201,12 @@ export class SessionConfig extends wire.Message {
   credentials: CredentialSource;
   /** The profile, when `credentials` is PROFILE. */
   profile: string;
+  /**
+   * The name the session's runs take the ledger lease as. A run is refused while another holder
+   * has the lease; the holder a lease names takes it again at once, so naming it lets a rerun
+   * reclaim a lease an earlier run left behind. Empty: a new name for every run.
+   */
+  holder: string;
 
   constructor(init: SessionConfigInit = {}) {
     super();
@@ -205,6 +217,7 @@ export class SessionConfig extends wire.Message {
     this.cell = init.cell ?? "";
     this.credentials = init.credentials ?? CredentialSource.UNSPECIFIED;
     this.profile = init.profile ?? "";
+    this.holder = init.holder ?? "";
   }
 
   protected encodeInto(out: wire.Out): void {
@@ -235,6 +248,9 @@ export class SessionConfig extends wire.Message {
     }
     if (this.profile !== "") {
       wire.putString(out, 7, this.profile);
+    }
+    if (this.holder !== "") {
+      wire.putString(out, 8, this.holder);
     }
   }
 
@@ -277,6 +293,10 @@ export class SessionConfig extends wire.Message {
         }
         case 7: {
           this.profile = wire.str(value);
+          break;
+        }
+        case 8: {
+          this.holder = wire.str(value);
           break;
         }
         default:

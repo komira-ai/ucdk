@@ -136,36 +136,73 @@ fn a_relative_path_with_no_directory_part_works() {
     }
 }
 
-// ---- one writer at a time ----------------------------------------------------------------
+// ---- more than one handle ----------------------------------------------------------------
 
 #[test]
-fn a_second_open_is_refused_while_the_first_handle_or_a_clone_is_alive() {
-    let scratch = Scratch::new("lock");
+fn a_second_handle_opens_beside_the_first_and_each_sees_what_the_other_wrote() {
+    let scratch = Scratch::new("two_handles");
     let first = open(&scratch);
-    let clone = first.clone();
+    let second = open(&scratch);
+    put(&first, Change::Put(record("app/one")));
+    assert_eq!(second.read().expect("read").records.len(), 1);
+    put(&second, Change::Put(record("app/two")));
+    assert_eq!(first.read().expect("read").records.len(), 2);
+    // A write made against a token the other handle moved is stale, not lost.
+    let old = first.read().expect("read").token;
+    put(&second, Change::Put(record("app/three")));
     assert_eq!(
-        refused(&scratch),
-        OpenError::Locked {
-            path: scratch.file()
-        }
+        first.write(&old, Change::Put(record("app/four"))),
+        Err(LedgerError::Stale)
     );
-    drop(first);
-    assert!(matches!(refused(&scratch), OpenError::Locked { .. }));
-    // The clone still writes, and still holds the ledger.
-    put(&clone, Change::Put(record("app/run")));
-    drop(clone);
-    assert_eq!(open(&scratch).read().expect("read").records.len(), 1);
 }
 
 #[test]
-fn a_refused_open_changes_nothing() {
-    let scratch = Scratch::new("lock_nothing");
-    let first = open(&scratch);
-    put(&first, Change::Put(record("app/run")));
-    let bytes = fs::read(scratch.file()).expect("read");
-    let _ = refused(&scratch);
-    assert_eq!(fs::read(scratch.file()).expect("read"), bytes);
-    assert_eq!(first.read().expect("read").records.len(), 1);
+fn handles_writing_at_once_lose_no_write() {
+    let scratch = Scratch::new("racing_handles");
+    let file = scratch.file();
+    let threads: Vec<_> = (0..4)
+        .map(|n| {
+            let file = file.clone();
+            std::thread::spawn(move || {
+                let ledger = FileLedger::open(&file).expect("open");
+                for i in 0..10 {
+                    // Each write is retried against the token it finds, as the engine does.
+                    loop {
+                        let token = ledger.read().expect("read").token;
+                        let change = Change::Put(record(&format!("app{n}/r{i}")));
+                        match ledger.write(&token, change) {
+                            Ok(_) => break,
+                            Err(LedgerError::Stale) => {}
+                            Err(other) => panic!("{other:?}"),
+                        }
+                    }
+                }
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().expect("a writer finished");
+    }
+    let snapshot = open(&scratch).read().expect("read");
+    assert_eq!(snapshot.records.len(), 40);
+    assert_eq!(snapshot.token.to_string(), "v40");
+}
+
+#[test]
+fn a_handle_gives_the_file_lock_back_after_each_call() {
+    // A second descriptor on the lock file takes the lock between two calls of the handle:
+    // nothing holds it for the handle's life.
+    let scratch = Scratch::new("lock_between_calls");
+    let ledger = open(&scratch);
+    put(&ledger, Change::Put(record("app/run")));
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(scratch.dir().join("ledger.ucdk.lock"))
+        .expect("open the lock file");
+    lock.try_lock().expect("the lock is free between calls");
+    drop(lock);
+    put(&ledger, Change::Put(record("app/again")));
 }
 
 #[test]
@@ -218,7 +255,7 @@ fn a_failed_write_changes_neither_the_file_nor_what_the_handle_reads() {
 }
 
 #[test]
-fn a_failed_write_to_a_directory_that_has_gone_keeps_what_the_handle_had() {
+fn a_write_to_a_directory_that_has_gone_is_unavailable_and_reads_as_an_empty_ledger() {
     let scratch = Scratch::new("gone_dir");
     let dir = scratch.dir().join("sub");
     fs::create_dir(&dir).expect("mkdir");
@@ -226,18 +263,24 @@ fn a_failed_write_to_a_directory_that_has_gone_keeps_what_the_handle_had() {
     put(&ledger, Change::Put(record("app/run")));
     let token = ledger.read().expect("read").token;
     fs::remove_dir_all(&dir).expect("remove the directory");
-    let failed = ledger.write(&token, Change::Put(record("db/run")));
+    // Every call goes by the file, and there is none: the ledger is empty, as a new one is.
+    let snapshot = ledger.read().expect("read");
+    assert!(snapshot.records.is_empty());
+    assert_eq!(
+        ledger.write(&token, Change::Put(record("db/run"))),
+        Err(LedgerError::Stale)
+    );
+    let failed = ledger.write(&snapshot.token, Change::Put(record("db/run")));
     let Err(LedgerError::Unavailable(why)) = failed else {
         panic!("the write should be unavailable: {failed:?}");
     };
     assert!(why.contains("may or may not have landed"), "{why}");
-    assert_eq!(ledger.read().expect("read").token, token);
 }
 
 #[test]
-fn after_a_failed_write_the_handle_takes_the_file_as_it_stands() {
-    // The rename lands and a later step fails: the file holds the new document. Simulated by
-    // putting the next document in the file by hand and then failing a write.
+fn every_call_goes_by_the_file_as_it_stands_even_after_a_failed_write() {
+    // Another handle's document is put in the file by hand; this handle's next write against
+    // its old token is stale, and the one that then fails to write leaves the file as it was.
     let scratch = Scratch::new("reload");
     let ledger = open(&scratch);
     put(&ledger, Change::Put(record("app/run")));
@@ -249,9 +292,6 @@ fn after_a_failed_write_the_handle_takes_the_file_as_it_stands() {
     put(&theirs, Change::Put(record("db/run")));
     drop(theirs);
     fs::copy(other.join("ledger.ucdk"), scratch.file()).expect("copy");
-    fs::create_dir(scratch.dir().join("ledger.ucdk.tmp")).expect("block");
-    let failed = ledger.write(&token, Change::Put(record("web/run")));
-    assert!(matches!(failed, Err(LedgerError::Unavailable(_))));
     let snapshot = ledger.read().expect("read");
     assert_eq!(snapshot.token.to_string(), "v2");
     assert_eq!(snapshot.records.len(), 2);
@@ -259,6 +299,12 @@ fn after_a_failed_write_the_handle_takes_the_file_as_it_stands() {
         ledger.write(&token, Change::Put(record("web/run"))),
         Err(LedgerError::Stale)
     );
+    let bytes = fs::read(scratch.file()).expect("read");
+    fs::create_dir(scratch.dir().join("ledger.ucdk.tmp")).expect("block");
+    let failed = ledger.write(&snapshot.token, Change::Put(record("web/run")));
+    assert!(matches!(failed, Err(LedgerError::Unavailable(_))));
+    assert_eq!(fs::read(scratch.file()).expect("read"), bytes);
+    assert_eq!(ledger.read().expect("read").records.len(), 2);
 }
 
 // ---- refusals ----------------------------------------------------------------------------
@@ -612,7 +658,6 @@ fn an_open_that_the_file_system_refuses_says_which_path_and_why() {
 fn every_refusal_reads_as_a_sentence_naming_the_file() {
     let file = std::path::PathBuf::from("/x/ledger.ucdk");
     let sentences = [
-        OpenError::Locked { path: file.clone() }.to_string(),
         OpenError::Corrupt {
             path: file.clone(),
             line: 3,
@@ -628,7 +673,6 @@ fn every_refusal_reads_as_a_sentence_naming_the_file() {
     assert_eq!(
         sentences,
         [
-            "/x/ledger.ucdk: the ledger is open elsewhere (one writer at a time)",
             "/x/ledger.ucdk: the ledger is corrupt at line 3: bad; it was not changed",
             "/x/ledger.ucdk: the ledger is format version 2, newer than this build reads (version 1); use a newer build",
         ]
@@ -694,6 +738,32 @@ fn a_lease_line_that_is_not_a_lease_is_refused_with_its_line() {
             &["ucdk-ledger 1.1", "version 1", "fence 1", "lease alice"][..],
             "needs 2 value",
         ),
+        (
+            &["ucdk-ledger 1.1", "version 1", "fence 0", "lease alice 5"][..],
+            "the fence is missing or 0",
+        ),
+        (
+            &["ucdk-ledger 1.1", "version 1", "lease alice 5"][..],
+            "the fence is missing or 0",
+        ),
+        (
+            &["ucdk-ledger 1.1", "version 1", "fence 1", "fence 2"][..],
+            "`fence` is given twice",
+        ),
+        (
+            &["ucdk-ledger 1.1", "version 1", "fence 1", "version 2"][..],
+            "`version` is given twice",
+        ),
+        (
+            &[
+                "ucdk-ledger 1.1",
+                "version 1",
+                "fence 1",
+                "lease alice 5",
+                "lease bob 9",
+            ][..],
+            "`lease` is given twice",
+        ),
     ];
     for (lines, expected) in cases {
         fs::write(scratch.file(), sealed(lines, 0)).expect("write");
@@ -714,21 +784,17 @@ fn a_lease_change_that_cannot_be_written_is_unavailable_and_changes_nothing() {
     let lease = ledger.acquire("alice", TTL).expect("acquire");
     fs::remove_dir_all(&dir).expect("remove the directory");
 
+    // The file is gone with its directory, so there is no lease to be refused by, and no place
+    // to write one.
     let acquired = ledger.acquire("bob", TTL);
     assert!(
-        matches!(acquired, Err(LeaseError::Held { .. })),
-        "a refusal needs no write: {acquired:?}"
+        matches!(acquired, Err(LeaseError::Unavailable(_))),
+        "{acquired:?}"
     );
     let renewed = ledger.renew(lease.fence, TTL);
-    let Err(LedgerError::Unavailable(why)) = renewed else {
-        panic!("the renewal should be unavailable: {renewed:?}");
-    };
-    assert!(why.contains("may or may not have landed"), "{why}");
-    assert!(matches!(
-        ledger.release(lease.fence),
-        Err(LedgerError::Unavailable(_))
-    ));
-    // The handle still has the lease it was granted.
+    assert_eq!(renewed, Err(LedgerError::Fenced), "no lease is on file");
+    let release = ledger.release(lease.fence);
+    assert_eq!(release, Err(LedgerError::Fenced));
     let token = ledger.read().expect("read").token;
     assert!(
         ledger

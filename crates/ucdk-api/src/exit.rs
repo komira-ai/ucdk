@@ -51,7 +51,8 @@ pub fn exit_class(outcome: &Outcome) -> ExitClass {
 /// The class of a run that stopped. Failed with no effect (safe to repeat) when nothing was
 /// done and either nothing was started or the provider's error says the call changed nothing
 /// (a refusal, a permanent or a transient error); otherwise failed after changing something,
-/// and the world is planned again before running again.
+/// and the world is planned again before running again. A run that may still hold the ledger's
+/// lease ([`EngineError::LeaseUnconfirmed`]) is always the second kind.
 pub fn failure_class(failure: &Failure) -> ExitClass {
     let safe_error = matches!(
         &failure.error,
@@ -60,7 +61,10 @@ pub fn failure_class(failure: &Failure) -> ExitClass {
         )
     );
     let nothing_done = failure.report == Report::default();
-    if nothing_done && (failure.at.is_none() || safe_error) {
+    if matches!(failure.error, EngineError::LeaseUnconfirmed { .. }) {
+        // The lease may be held, so a rerun by another holder is refused for a while.
+        ExitClass::FailedChanged
+    } else if nothing_done && (failure.at.is_none() || safe_error) {
         ExitClass::FailedNoEffect
     } else {
         ExitClass::FailedChanged

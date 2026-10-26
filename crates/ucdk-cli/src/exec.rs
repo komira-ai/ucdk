@@ -103,6 +103,9 @@ fn execute(invocation: &Invocation, world: &mut World) -> Result<ExitClass, Exit
     let ledger = world.ledger.clone();
     let cell = world.cell.clone();
     let mut engine = Engine::new(world.cloud(invocation.provider), &ledger, cell);
+    if let Some(holder) = &invocation.holder {
+        engine = engine.with_holder(holder);
+    }
     if matches!(invocation.verb, Verb::Status) {
         let outcome = engine.handle(Request::Status { desired });
         return finish(outcome, invocation, world);

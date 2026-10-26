@@ -5,7 +5,7 @@
 use std::fmt::Write as _;
 
 use ucdk_api::v1::ExitClass;
-use ucdk_engine::{Failure, Leak, ObjectStatus, Report, Standing, State};
+use ucdk_engine::{EngineError, Failure, Leak, ObjectStatus, Report, Standing, State};
 use ucdk_plan::{Action, Plan, PlanHash, Retained};
 use ucdk_provider::Status;
 
@@ -180,7 +180,9 @@ pub fn report_text(report: &Report) -> String {
 /// nothing was changed, so the run is safe to repeat; or something may have been, so the world
 /// is read (planned) again before running again.
 pub fn failure(failure: &Failure, class: ExitClass) -> String {
-    let advice = if class == ExitClass::FailedNoEffect {
+    let advice = if matches!(failure.error, EngineError::LeaseUnconfirmed { .. }) {
+        "the ledger lease may still be held; run again with the same --holder, or wait for it to lapse"
+    } else if class == ExitClass::FailedNoEffect {
         "nothing was changed; it is safe to run again"
     } else {
         "the run changed things before it stopped; plan again before running again"
@@ -195,8 +197,34 @@ pub fn failure(failure: &Failure, class: ExitClass) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ucdk_engine::EngineError;
     use ucdk_provider::{Kind, NodePath, PhysicalId, ProviderError};
+
+    /// Proves: a run that may still hold the ledger lease is not told it is "safe to run
+    /// again" whatever its exit class, and is told how to proceed.
+    #[test]
+    fn a_failure_that_may_hold_the_lease_gives_its_own_advice() {
+        let failure_of = |class| {
+            failure(
+                &Failure {
+                    report: Report::default(),
+                    at: None,
+                    error: EngineError::LeaseUnconfirmed {
+                        why: "down".to_owned(),
+                        run: None,
+                    },
+                },
+                class,
+            )
+        };
+        for class in [ExitClass::FailedNoEffect, ExitClass::FailedChanged] {
+            let text = failure_of(class);
+            assert!(
+                text.ends_with("run again with the same --holder, or wait for it to lapse\n"),
+                "{text}"
+            );
+            assert!(!text.contains("safe to run again"), "{text}");
+        }
+    }
 
     /// Proves: a report that carries a leak and a sweep that could not read prints both, under
     /// the run's lines and above its summary. Catches a failed sweep that leaves no trace in the

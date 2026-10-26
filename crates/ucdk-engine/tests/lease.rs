@@ -120,16 +120,72 @@ fn a_run_gives_the_lease_back_when_it_ends_even_when_it_failed(backend: Backend)
         .expect("free after a finished run");
 }
 
-fn a_run_that_cannot_reach_the_lease_fails_with_no_effect(backend: Backend) {
+fn a_run_that_cannot_confirm_the_lease_is_not_safe_to_run_again(backend: Backend) {
     let (mut fake, flaky) = (Fake::standard(), FlakyLedger::on(backend));
     flaky.fail_acquire(true);
     let f = failure(apply(&mut fake, &flaky, &chain()));
     assert_eq!(f.at, None);
-    assert!(matches!(
-        f.error,
-        EngineError::Ledger(LedgerError::Unavailable(_))
-    ));
+    let EngineError::LeaseUnconfirmed { why, run: None } = &f.error else {
+        panic!("{:?}", f.error);
+    };
+    assert!(why.contains("the lease is down"), "{why}");
     assert_eq!(mutations(&fake), 0);
+}
+
+fn a_grant_whose_answer_was_lost_is_taken_again_at_once_by_the_same_holder_only(backend: Backend) {
+    let (mut fake, flaky) = (Fake::standard(), FlakyLedger::on(backend));
+    flaky.lose_acquire_answer(true);
+    let lost = failure(apply_as("first", &mut fake, &flaky, &chain()));
+    assert!(matches!(
+        lost.error,
+        EngineError::LeaseUnconfirmed { run: None, .. }
+    ));
+    flaky.lose_acquire_answer(false);
+    // The lease is on the ledger, in the first holder's name.
+    let other = apply_as("second", &mut fake, &flaky, &chain());
+    assert!(
+        matches!(&other, Outcome::Refused(Refusal::LeaseHeld { holder, .. }) if holder == "first"),
+        "{other:?}"
+    );
+    assert_eq!(mutations(&fake), 0);
+    done(apply_as("first", &mut fake, &flaky, &chain()));
+    assert_eq!(fake.object_count(), 4);
+}
+
+fn a_failed_release_after_a_failed_run_is_not_safe_to_run_again(backend: Backend) {
+    let (mut fake, flaky) = (Fake::standard(), FlakyLedger::on(backend));
+    flaky.fail_release(true);
+    fake.faults_mut().fail_at_call.replace(1);
+    let f = failure(apply_as("first", &mut fake, &flaky, &chain()));
+    // The provider's error is kept, inside the one that says the lease may be held.
+    let EngineError::LeaseUnconfirmed {
+        why,
+        run: Some(run),
+    } = &f.error
+    else {
+        panic!("{:?}", f.error);
+    };
+    assert!(why.contains("the release was lost"), "{why}");
+    assert!(matches!(**run, EngineError::Provider(_)), "{run:?}");
+    let text = f.error.to_string();
+    assert!(text.contains("may still be held"), "{text}");
+    assert!(text.contains("the run had stopped: provider"), "{text}");
+
+    // The lease is still on the ledger: another holder is refused, the same one is not.
+    *fake.faults_mut().fail_at_call = None;
+    flaky.fail_release(false);
+    assert!(matches!(
+        apply_as("second", &mut fake, &flaky, &chain()),
+        Outcome::Refused(Refusal::LeaseHeld { .. })
+    ));
+    done(apply_as("first", &mut fake, &flaky, &chain()));
+}
+
+fn a_failed_release_after_a_finished_run_leaves_the_run_done(backend: Backend) {
+    let (mut fake, flaky) = (Fake::standard(), FlakyLedger::on(backend));
+    flaky.fail_release(true);
+    done(apply_as("first", &mut fake, &flaky, &chain()));
+    assert_eq!(fake.object_count(), 4);
 }
 
 fn a_run_whose_lease_was_taken_over_stops_at_its_next_write_and_the_new_holder_is_unharmed(
@@ -281,10 +337,26 @@ fn the_default_holder_names_the_process_and_a_holder_can_be_named(backend: Backe
         }
     });
     done(apply(&mut hooked, &ledger, &chain()));
-    assert_eq!(
-        *name.lock().expect("lock"),
-        format!("ucdk-{}", std::process::id())
+    drop(hooked);
+    let first = name.lock().expect("lock").clone();
+    assert!(
+        first.starts_with(&format!("ucdk-{}-", std::process::id())),
+        "{first}"
     );
+    // A second run names itself differently: the name is not the process alone.
+    let second_name: Arc<Mutex<String>> = Arc::default();
+    let seen = Arc::clone(&second_name);
+    let probe = ledger.clone();
+    let mut hooked = Hooked::new(&mut fake, at, move |_| {
+        if let Err(LeaseError::Held { holder, .. }) = probe.acquire("probe", Duration::from_secs(1))
+        {
+            *seen.lock().expect("lock") = holder;
+        }
+    });
+    done(destroy(&mut hooked, &ledger, &chain()));
+    let second = second_name.lock().expect("lock").clone();
+    assert!(!second.is_empty());
+    assert_ne!(first, second);
 }
 
 fn a_fence_the_ledger_never_granted_cannot_write(backend: Backend) {
@@ -355,7 +427,10 @@ on_every_ledger!(
     second_writer_is_refused_while_another_run_is_in_progress,
     a_refused_run_changes_nothing_and_a_plan_or_status_needs_no_lease,
     a_run_gives_the_lease_back_when_it_ends_even_when_it_failed,
-    a_run_that_cannot_reach_the_lease_fails_with_no_effect,
+    a_run_that_cannot_confirm_the_lease_is_not_safe_to_run_again,
+    a_grant_whose_answer_was_lost_is_taken_again_at_once_by_the_same_holder_only,
+    a_failed_release_after_a_failed_run_is_not_safe_to_run_again,
+    a_failed_release_after_a_finished_run_leaves_the_run_done,
     a_run_whose_lease_was_taken_over_stops_at_its_next_write_and_the_new_holder_is_unharmed,
     a_lost_lease_is_not_rolled_back_over_the_new_holders_work,
     a_run_that_lasts_longer_than_its_lease_keeps_it_by_renewing,

@@ -122,8 +122,10 @@ fn a_config_that_asks_for_what_is_not_here_is_refused() {
 }
 
 /// Proves: the supported providers and ledgers open; a config with no cell gets the local one;
-/// a file ledger that cannot be opened (a directory that does not exist, or a ledger held by
-/// another session) is INTERNAL. Catches a ledger failure reported as success.
+/// a file ledger that cannot be opened (a directory that does not exist, or a file that is not
+/// a ledger) is INTERNAL, while a second session on a ledger a first has open is fine: the lease
+/// arbitrates between their runs. Catches a ledger failure reported as success, and a session
+/// that keeps others out of the file.
 #[test]
 fn the_supported_configs_open_and_a_ledger_that_cannot_open_is_internal() {
     for provider in ["fake", "fake-limited", "fake-leaky"] {
@@ -142,6 +144,7 @@ fn the_supported_configs_open_and_a_ledger_that_cannot_open_is_internal() {
     close(local.session);
 
     let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("abi-file-ledger");
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     let mut config = fake_config();
     config.ledger_kind = "file".to_owned();
@@ -149,12 +152,14 @@ fn the_supported_configs_open_and_a_ledger_that_cannot_open_is_internal() {
     let first = open(&config);
     assert_eq!(first.status, OK);
     let second = open(&config);
-    assert_eq!(
-        second.status, INTERNAL,
-        "the ledger is held by the first session"
-    );
-    assert!(second.session.is_null());
+    assert_eq!(second.status, OK, "a ledger open in a first session opens");
+    close(second.session);
     close(first.session);
+
+    std::fs::write(dir.join("ledger"), "not a ledger\n").expect("write");
+    let corrupt = open(&config);
+    assert_eq!(corrupt.status, INTERNAL, "the file is not a ledger");
+    assert!(corrupt.session.is_null());
 
     config.ledger_location = dir.join("missing/ledger").to_string_lossy().into_owned();
     assert_eq!(open(&config).status, INTERNAL);
@@ -815,7 +820,13 @@ fn file_ledger_leased_by(
 /// The outcome of planning `list` and applying it under that plan's hash through a session on
 /// the file ledger at `location`.
 fn apply_through_the_abi(location: &str, list: &ResourceList) -> Outcome {
+    apply_through_the_abi_as(location, list, "")
+}
+
+/// [`apply_through_the_abi`] in a session whose runs take the lease as `holder` (empty: unnamed).
+fn apply_through_the_abi_as(location: &str, list: &ResourceList, holder: &str) -> Outcome {
     let mut config = fake_config();
+    config.holder = holder.to_owned();
     config.ledger_kind = "file".to_owned();
     config.ledger_location = location.to_owned();
     let opened = open(&config);
@@ -870,6 +881,30 @@ fn an_apply_on_a_ledger_leased_to_another_holder_is_refused_as_data_until_it_lap
         Arc::new(ManualClock::at(1_000)),
     );
     let answer = apply_through_the_abi(&dead, &list);
+    assert_eq!(answer.exit, ExitClass::Done as i32, "{answer:?}");
+}
+
+/// Proves: a session whose config names the holder a lease is in takes that lease again at once
+/// and applies, where an unnamed session, or one with another name, is refused. Catches a
+/// config holder that is ignored (each run then gets a name no earlier run had).
+#[test]
+fn a_session_named_as_the_holder_of_a_lease_reclaims_it() {
+    let list = list_of(vec![service_of("a-svc", 80)]);
+    let leased = file_ledger_leased_by(
+        "abi-reclaim",
+        "ci-7",
+        Duration::from_secs(3600),
+        Arc::new(ucdk_ledger::SystemClock) as Arc<dyn ucdk_ledger::Clock>,
+    );
+    for holder in ["", "ci-8"] {
+        let answer = apply_through_the_abi_as(&leased, &list, holder);
+        assert_eq!(
+            answer.exit,
+            ExitClass::Refused as i32,
+            "{holder:?}: {answer:?}"
+        );
+    }
+    let answer = apply_through_the_abi_as(&leased, &list, "ci-7");
     assert_eq!(answer.exit, ExitClass::Done as i32, "{answer:?}");
 }
 

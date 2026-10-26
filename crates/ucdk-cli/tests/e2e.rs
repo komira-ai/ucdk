@@ -531,6 +531,47 @@ fn second_apply_of_a_list_with_a_ref_prints_no_changes() {
     assert!(!ran.out.contains("later"), "{}", ran.out);
 }
 
+/// Proves: a lease an earlier run left behind (its release was lost) is taken again at once by
+/// a rerun that names the same `--holder`, while a rerun that names another holder, or none, is
+/// refused with exit 3 and changes nothing. Catches a rerun that is made to wait out its own
+/// lease, and a holder flag that lets any name in.
+#[test]
+fn a_rerun_with_the_same_holder_reclaims_the_lease_a_lost_release_left() {
+    let dir = scratch("a_rerun_with_the_same_holder_reclaims_the_lease_a_lost_release_left");
+    let input = write_list(&dir, "list.pb", pair());
+    let saved = dir.join("saved.plan").to_string_lossy().into_owned();
+    let mut world = World::new();
+    let (_, hash) = plan(&mut world, "fake", "apply", &input, &saved);
+    // The earlier run, as `ci-7`, ended without giving the lease back.
+    ucdk_ledger::Ledger::acquire(&world.ledger, "ci-7", std::time::Duration::from_secs(600))
+        .expect("the earlier run's lease");
+    let with = |holder: Option<&str>, world: &mut World| {
+        let mut args = vec![
+            "apply".to_owned(),
+            "--provider=fake".to_owned(),
+            format!("--input={input}"),
+            format!("--plan={saved}"),
+            format!("--expect-plan-hash={hash}"),
+        ];
+        args.extend(holder.map(|h| format!("--holder={h}")));
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        cmd(world, &args)
+    };
+
+    for holder in [None, Some("ci-8")] {
+        let refused = with(holder, &mut world);
+        assert_eq!(refused.code, 3, "{holder:?}: {refused:?}");
+        assert!(refused.err.contains("leased to ci-7"), "{refused:?}");
+        assert!(
+            untouched(&world),
+            "{holder:?}: a refused apply changes nothing"
+        );
+    }
+    let reclaimed = with(Some("ci-7"), &mut world);
+    assert_eq!(reclaimed.code, 0, "{reclaimed:?}");
+    assert!(!untouched(&world), "the rerun applied");
+}
+
 /// Proves: an apply on a ledger another holder has leased exits 3 (refused), says
 /// who holds it on standard error, and creates nothing; a plan and a status are
 /// answered anyway; once the holder releases, the same apply goes through. Catches a command

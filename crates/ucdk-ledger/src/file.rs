@@ -3,7 +3,7 @@
 
 use std::ffi::OsString;
 use std::fmt;
-use std::fs::{self, File, OpenOptions, TryLockError};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -17,8 +17,6 @@ use crate::record::{Change, Ledger, LedgerError, Snapshot, Token};
 /// Why a file ledger was not opened. Nothing is written in any of these cases.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpenError {
-    /// Another handle (in this process or another) has the ledger open.
-    Locked { path: PathBuf },
     /// The file is not a whole, valid ledger: it was cut short, changed, or is not a ledger.
     /// It is left as it is; nothing is repaired.
     Corrupt {
@@ -35,11 +33,6 @@ pub enum OpenError {
 impl fmt::Display for OpenError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Locked { path } => write!(
-                f,
-                "{}: the ledger is open elsewhere (one writer at a time)",
-                path.display()
-            ),
             Self::Corrupt { path, line, why } => write!(
                 f,
                 "{}: the ledger is corrupt at line {line}: {why}; it was not changed",
@@ -58,7 +51,7 @@ impl fmt::Display for OpenError {
 
 impl std::error::Error for OpenError {}
 
-/// What the handle holds of the file: the document as of the last read or write.
+/// The document as one read of the file saw it.
 #[derive(Debug)]
 struct Document {
     /// The format minor the file was written with. A build refuses to rewrite a file with a
@@ -67,21 +60,35 @@ struct Document {
     doc: Doc,
 }
 
+impl Default for Document {
+    fn default() -> Self {
+        Self {
+            minor: MINOR,
+            doc: Doc::default(),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Inner {
     path: PathBuf,
-    document: Mutex<Document>,
     clock: Arc<dyn Clock>,
-    /// Holds the advisory lock on `<path>.lock` until the last handle is dropped.
-    _lock: File,
+    /// `<path>.lock`: held (exclusively) only for the length of one read-modify-write, never
+    /// between calls.
+    lock: File,
+    /// Orders the calls of the handles that share this one. An advisory lock held through one
+    /// open file does not exclude another user of the same file, so threads queue here first.
+    turn: Mutex<()>,
 }
 
-/// A ledger kept in a file. For one machine and one writer: it lets a run resume after a crash
-/// of the process, and is not a team backend.
+/// A ledger kept in a file. For one machine: it lets a run resume after a crash of the process,
+/// and is not a team backend.
 ///
-/// Opening takes an advisory lock, so a second open of the same path (here or in another
-/// process) is refused while the first handle, or a clone of it, is alive. The lock is not a
-/// lease: it does not expire, and it does not stop a process that ignores it. The lease is in the
+/// Any number of handles, in this process or in others, may be open on one path at once. Each
+/// call reads the file afresh, and each change takes an exclusive advisory lock on
+/// `<path>.lock` for the read-modify-write alone and gives it back before returning, so two
+/// changes never interleave. The lock is not a lease: it is never held between calls, so it
+/// never keeps a live process out. What arbitrates between two live runs is the lease in the
 /// document (see [`crate::lease`]): it expires, and a write under a fence that is not the
 /// current one is refused, so a writer that lost the lease cannot write whatever it holds. A
 /// lease change is a write of the file too, but does not move the version. A write is
@@ -140,13 +147,14 @@ fn load(path: &Path) -> Result<Option<Document>, OpenError> {
 
 impl FileLedger {
     /// Opens the ledger at `path`, which need not exist yet (it is made by the first write; its
-    /// directory must exist). Takes the advisory lock on `<path>.lock`, and removes a
-    /// `<path>.tmp` left by a write that never finished.
+    /// directory must exist). Reads it once to refuse a file that is not a whole ledger, and
+    /// removes a `<path>.tmp` left by a write that never finished. Another handle may be open
+    /// on the same path.
     ///
     /// # Errors
     ///
-    /// [`OpenError`] when the ledger is open elsewhere, the file is corrupt or newer than this
-    /// build reads, or the file system refuses.
+    /// [`OpenError`] when the file is corrupt or newer than this build reads, or the file
+    /// system refuses.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, OpenError> {
         Self::open_with_clock(path, Arc::new(SystemClock))
     }
@@ -167,29 +175,30 @@ impl FileLedger {
             .truncate(false)
             .open(&lock_path)
             .map_err(|e| io_error(&lock_path, &e))?;
-        match lock.try_lock() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) => return Err(OpenError::Locked { path }),
-            Err(TryLockError::Error(e)) => return Err(io_error(&lock_path, &e)),
-        }
-        let stale = sibling(&path, ".tmp");
+        let ledger = Self {
+            inner: Arc::new(Inner {
+                path,
+                clock,
+                lock,
+                turn: Mutex::new(()),
+            }),
+        };
+        let turn = ledger.turn();
+        let held = Held::take(&ledger.inner.lock).map_err(|e| io_error(&lock_path, &e))?;
+        // Writes happen under the lock, so a `.tmp` seen under it is a write that never finished.
+        let stale = sibling(&ledger.inner.path, ".tmp");
         match fs::remove_file(&stale) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(io_error(&stale, &e)),
         }
-        let document = load(&path)?.unwrap_or_else(|| Document {
-            minor: MINOR,
-            doc: Doc::default(),
-        });
-        Ok(Self {
-            inner: Arc::new(Inner {
-                path,
-                document: Mutex::new(document),
-                clock,
-                _lock: lock,
-            }),
-        })
+        load(&ledger.inner.path)?;
+        drop((held, turn));
+        Ok(ledger)
+    }
+
+    fn turn(&self) -> MutexGuard<'_, ()> {
+        self.inner.turn.lock().expect("the lock is never poisoned")
     }
 
     /// Replaces the file with `text`: temp file, flush, rename, flush the directory.
@@ -207,76 +216,112 @@ impl FileLedger {
         };
         File::open(dir)?.sync_all()
     }
-}
 
-impl FileLedger {
-    fn document(&self) -> MutexGuard<'_, Document> {
-        self.inner
-            .document
-            .lock()
-            .expect("the lock is never poisoned")
+    /// The document in the file now, or why it cannot be had.
+    fn current(&self) -> Result<Document, String> {
+        load(&self.inner.path)
+            .map(Option::unwrap_or_default)
+            .map_err(|e| e.to_string())
     }
 
-    /// Stores `next` as the document, if the file can be rewritten by this build, and keeps it
-    /// in `document` once it is stored. On failure the write may or may not have landed: take
-    /// the file as the truth, when there is one and it can be read, so the next write is
-    /// compared against what is there.
-    fn persist(&self, document: &mut Document, next: Doc) -> Result<(), String> {
-        if document.minor > MINOR {
-            return Err(format!(
-                "{}: written by a newer build (format {MAJOR}.{}, this build writes {MAJOR}.{MINOR}); \
-                 rewriting it would drop what this build does not know",
-                self.inner.path.display(),
-                document.minor
-            ));
-        }
-        match self.store(&format::encode(&next)) {
-            Ok(()) => {
-                document.doc = next;
-                Ok(())
-            }
-            Err(e) => {
-                if let Ok(Some(disk)) = load(&self.inner.path) {
-                    *document = disk;
-                }
-                Err(format!(
-                    "{}: the write failed ({e}); it may or may not have landed",
-                    self.inner.path.display()
-                ))
-            }
-        }
+    /// Begins a read-modify-write: waits for its turn and for the file lock, then reads the
+    /// file. Both are given back when the `Txn` is dropped.
+    fn begin(&self) -> Result<Txn<'_>, String> {
+        let turn = self.turn();
+        let held = Held::take(&self.inner.lock).map_err(|e| {
+            format!(
+                "{}: the lock could not be taken ({e})",
+                self.inner.path.display()
+            )
+        })?;
+        let document = self.current()?;
+        Ok(Txn {
+            ledger: self,
+            document,
+            _held: held,
+            _turn: turn,
+        })
     }
 
-    fn put(
+    fn change(
         &self,
         fence: Option<Fence>,
         expected: &Token,
         change: Change,
     ) -> Result<Token, LedgerError> {
-        let mut document = self.document();
-        document.doc.admit(self.inner.clock.now_millis(), fence)?;
-        if expected.0 != document.doc.version {
+        let txn = self.begin().map_err(LedgerError::Unavailable)?;
+        let doc = &txn.document.doc;
+        doc.admit(self.inner.clock.now_millis(), fence)?;
+        if expected.0 != doc.version {
             return Err(LedgerError::Stale);
         }
-        let mut next = document.doc.clone();
+        let mut next = doc.clone();
         let version = next.apply(change);
-        self.persist(&mut document, next)
-            .map_err(LedgerError::Unavailable)?;
+        txn.persist(&next).map_err(LedgerError::Unavailable)?;
         Ok(Token(version))
+    }
+}
+
+/// The exclusive file lock, held until dropped.
+struct Held<'a>(&'a File);
+
+impl<'a> Held<'a> {
+    fn take(file: &'a File) -> io::Result<Self> {
+        file.lock()?;
+        Ok(Self(file))
+    }
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        // Closing the file gives the lock back too, so a failure here costs nothing.
+        let _ = self.0.unlock();
+    }
+}
+
+/// One read-modify-write, under the file lock.
+struct Txn<'a> {
+    ledger: &'a FileLedger,
+    document: Document,
+    // Field order is drop order: the file lock is given back before the turn.
+    _held: Held<'a>,
+    _turn: MutexGuard<'a, ()>,
+}
+
+impl Txn<'_> {
+    /// Stores `next` as the document, if the file can be rewritten by this build. On failure
+    /// the write may or may not have landed; the next call reads the file and goes by that.
+    fn persist(&self, next: &Doc) -> Result<(), String> {
+        let path = &self.ledger.inner.path;
+        if self.document.minor > MINOR {
+            return Err(format!(
+                "{}: written by a newer build (format {MAJOR}.{}, this build writes {MAJOR}.{MINOR}); \
+                 rewriting it would drop what this build does not know",
+                path.display(),
+                self.document.minor
+            ));
+        }
+        self.ledger.store(&format::encode(next)).map_err(|e| {
+            format!(
+                "{}: the write failed ({e}); it may or may not have landed",
+                path.display()
+            )
+        })
     }
 }
 
 impl Ledger for FileLedger {
     fn read(&self) -> Result<Snapshot, LedgerError> {
-        let document = self.document();
+        // A rename replaces the file whole, so a read needs no lock.
+        let document = self.current().map_err(LedgerError::Unavailable)?;
         Ok(Snapshot {
             token: Token(document.doc.version),
-            records: document.doc.records.clone(),
+            records: document.doc.records,
         })
     }
 
     fn write(&self, expected: &Token, change: Change) -> Result<Token, LedgerError> {
-        self.put(None, expected, change)
+        self.change(None, expected, change)
     }
 
     fn write_fenced(
@@ -285,32 +330,29 @@ impl Ledger for FileLedger {
         expected: &Token,
         change: Change,
     ) -> Result<Token, LedgerError> {
-        self.put(Some(fence), expected, change)
+        self.change(Some(fence), expected, change)
     }
 
     fn acquire(&self, holder: &str, ttl: Duration) -> Result<Lease, LeaseError> {
-        let mut document = self.document();
-        let mut next = document.doc.clone();
+        let txn = self.begin().map_err(LeaseError::Unavailable)?;
+        let mut next = txn.document.doc.clone();
         let lease = next.acquire(self.inner.clock.now_millis(), holder, ttl)?;
-        self.persist(&mut document, next)
-            .map_err(LeaseError::Unavailable)?;
+        txn.persist(&next).map_err(LeaseError::Unavailable)?;
         Ok(lease)
     }
 
     fn renew(&self, fence: Fence, ttl: Duration) -> Result<Lease, LedgerError> {
-        let mut document = self.document();
-        let mut next = document.doc.clone();
+        let txn = self.begin().map_err(LedgerError::Unavailable)?;
+        let mut next = txn.document.doc.clone();
         let lease = next.renew(self.inner.clock.now_millis(), fence, ttl)?;
-        self.persist(&mut document, next)
-            .map_err(LedgerError::Unavailable)?;
+        txn.persist(&next).map_err(LedgerError::Unavailable)?;
         Ok(lease)
     }
 
     fn release(&self, fence: Fence) -> Result<(), LedgerError> {
-        let mut document = self.document();
-        let mut next = document.doc.clone();
+        let txn = self.begin().map_err(LedgerError::Unavailable)?;
+        let mut next = txn.document.doc.clone();
         next.release(fence)?;
-        self.persist(&mut document, next)
-            .map_err(LedgerError::Unavailable)
+        txn.persist(&next).map_err(LedgerError::Unavailable)
     }
 }

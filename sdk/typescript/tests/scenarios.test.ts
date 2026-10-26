@@ -9,7 +9,7 @@
  */
 
 import assert from "node:assert/strict";
-import { copyFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -208,10 +208,29 @@ test("the ledger outlives the session and a second session reads it", () =>
     );
   }));
 
-test("a ledger that another session holds cannot be opened", () =>
+test("a second session opens beside the first and sees what it writes", () =>
+  inTemporaryDirectory(async (directory) => {
+    const wanted = pair();
+    const location = join(directory, "ledger");
+    await using first = await openSession("fake", { ledgerKind: "file", ledgerLocation: location });
+    await using second = await openSession("fake", { ledgerKind: "file", ledgerLocation: location });
+    const before = objectsOf(await second.status(wanted));
+    assert.ok(before.length > 0);
+    for (const [, , , , standing] of before) assert.equal(standing, api.Standing.NOT_APPLIED);
+    const plan = await first.plan(wanted);
+    assert.equal((await first.apply(wanted, plan.planned?.hash as string)).whichResult(), "done");
+    const seen = objectsOf(await second.status(wanted));
+    assert.ok(seen.length > 0);
+    for (const [, , record, , standing] of seen) {
+      assert.equal(record, api.RecordState.CONFIRMED);
+      assert.equal(standing, api.Standing.MISSING);
+    }
+  }));
+
+test("a file that is not a ledger cannot be opened", () =>
   inTemporaryDirectory(async (directory) => {
     const location = join(directory, "ledger");
-    await using _first = await openSession("fake", { ledgerKind: "file", ledgerLocation: location });
+    writeFileSync(location, "not a ledger\n");
     await assert.rejects(
       openSession("fake", { ledgerKind: "file", ledgerLocation: location }),
       (error: unknown) => {
@@ -253,6 +272,31 @@ test("an apply on a ledger another holder has leased is refused as data", () =>
     // Nothing was created or recorded.
     const status = await session.status(wanted);
     assert.ok(status.status?.objects.every((o) => o.record === undefined && o.live === undefined));
+  }));
+
+test("a session named as the holder of a lease takes it again at once", () =>
+  inTemporaryDirectory(async (directory) => {
+    const wanted = pair();
+    const location = join(directory, "ledger");
+    copyFileSync(join(LEDGER_GOLDEN, "leased.ucdk"), location);
+    {
+      await using other = await openSession("fake", {
+        ledgerKind: "file",
+        ledgerLocation: location,
+        holder: "ci-8",
+      });
+      const plan = await other.plan(wanted);
+      const refused = await other.apply(wanted, plan.planned?.hash as string);
+      assert.equal(refused.exit, api.ExitClass.REFUSED);
+    }
+    await using same = await openSession("fake", {
+      ledgerKind: "file",
+      ledgerLocation: location,
+      holder: "ci-7",
+    });
+    const plan = await same.plan(wanted);
+    const applied = await same.apply(wanted, plan.planned?.hash as string);
+    assert.equal(applied.exit, api.ExitClass.DONE);
   }));
 
 test("an apply on a ledger whose holder lapsed takes over and goes through", () =>
