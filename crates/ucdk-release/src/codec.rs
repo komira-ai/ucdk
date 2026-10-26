@@ -9,7 +9,7 @@
 //! `<tag>/k<key>`, the key hashed from the readable name, which is kept in the record because
 //! versions hold characters a path segment does not allow.
 //!
-//! A name that is made of parts (stage, action, platform, revision) and a generation are held
+//! A name that is made of parts (run id, stage, action, platform, revision) and a generation are held
 //! to the rule of the parts of a store key (`store::is_plain`), so a part read back from a
 //! record can be put into a key without meeting another part.
 
@@ -447,17 +447,21 @@ impl Record {
     pub fn encode(&self) -> Result<Encoded, CodecError> {
         let kind = self.kind();
         Ok(match self {
-            Record::Run(r) => encoded(
-                kind,
-                r.run_id.clone(),
-                Out::default()
-                    .put("machine", &r.machine)
-                    .put("revision", &r.revision)
-                    .put("version", &r.version)
-                    .put("build", r.build)
-                    .put("commit", &r.commit)
-                    .put("timestamp", r.timestamp),
-            ),
+            Record::Run(r) => {
+                plain(kind, "run_id", &r.run_id)?;
+                plain(kind, "revision", &r.revision)?;
+                encoded(
+                    kind,
+                    r.run_id.clone(),
+                    Out::default()
+                        .put("machine", &r.machine)
+                        .put("revision", &r.revision)
+                        .put("version", &r.version)
+                        .put("build", r.build)
+                        .put("commit", &r.commit)
+                        .put("timestamp", r.timestamp),
+                )
+            }
             Record::Stage(s) => {
                 plain(kind, "stage", &s.stage)?;
                 plain(kind, "platform", &s.platform)?;
@@ -491,6 +495,7 @@ impl Record {
                 )
             }
             Record::Publication(p) => {
+                plain(kind, "run", &p.run)?;
                 plain(kind, "stage", &p.stage)?;
                 encoded(
                     kind,
@@ -553,6 +558,7 @@ impl Record {
                 plain(kind, "platform", &s.platform)?;
                 plain(kind, "revision", &s.revision)?;
                 plain(kind, "generation", &s.generation)?;
+                plain(kind, "run", &s.run)?;
                 encoded(
                     kind,
                     format!("{}/{}/{}", s.stage, s.platform, s.revision),
@@ -593,15 +599,18 @@ impl Record {
             map: &e.outputs,
         };
         Ok(match kind {
-            Kind::Run => Record::Run(Run {
-                run_id: e.name.clone(),
-                machine: r.hash("machine")?,
-                revision: r.text("revision")?,
-                version: r.text("version")?,
-                build: r.number("build")?,
-                commit: r.text("commit")?,
-                timestamp: r.number("timestamp")?,
-            }),
+            Kind::Run => {
+                plain(kind, "run_id", &e.name)?;
+                Record::Run(Run {
+                    run_id: e.name.clone(),
+                    machine: r.hash("machine")?,
+                    revision: r.part("revision", "revision")?,
+                    version: r.text("version")?,
+                    build: r.number("build")?,
+                    commit: r.text("commit")?,
+                    timestamp: r.number("timestamp")?,
+                })
+            }
             Kind::Stage => {
                 plain(kind, "stage", &e.name)?;
                 Record::Stage(Stage {
@@ -629,7 +638,7 @@ impl Record {
                 build: r.number("build")?,
                 commit: r.text("commit")?,
                 exceptional: r.flag("exceptional")?,
-                run: r.text("run")?,
+                run: r.part("run", "run")?,
                 stage: r.part("stage", "stage")?,
                 attempt: r.attempt()?,
                 phase: r.opt_word("phase")?,
@@ -698,7 +707,7 @@ impl Record {
                     build: r.number("build")?,
                     commit: r.text("commit")?,
                     timestamp: r.number("timestamp")?,
-                    run: r.text("run")?,
+                    run: r.part("run", "run")?,
                     attempt: r.attempt()?,
                 })
             }

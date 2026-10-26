@@ -6,12 +6,12 @@
 mod codec_records;
 
 use codec_records::{
-    action, action_of, every_record, grant, grant_of, publication, publication_of, run, seal,
-    seal_of, stage, stage_of, validation, validation_of, written,
+    action, action_of, every_record, grant, grant_of, publication, publication_of, run, run_of,
+    seal, seal_of, stage, stage_of, validation, validation_of, written,
 };
 use ucdk_core::{Locator, RecordKey, Tag};
 use ucdk_release::codec::{
-    Action, CodecError, Encoded, Grant, Phase, Publication, Record, Seal, Stage, Validation,
+    Action, CodecError, Encoded, Grant, Phase, Publication, Record, Run, Seal, Stage, Validation,
     keys_of,
 };
 use ucdk_release::transitions::Kind;
@@ -388,7 +388,13 @@ fn parts_records(part: &str) -> Vec<Record> {
     let sl = seal_of(seal());
     let g = grant_of(grant());
     let pb = publication_of(publication(true, None));
+    let r = run_of(run());
     vec![
+        Record::Run(Run {
+            run_id: p(),
+            ..r.clone()
+        }),
+        Record::Run(Run { revision: p(), ..r }),
         Record::Stage(Stage {
             stage: p(),
             ..s.clone()
@@ -435,14 +441,19 @@ fn parts_records(part: &str) -> Vec<Record> {
         }),
         Record::Seal(Seal {
             generation: p(),
-            ..sl
+            ..sl.clone()
         }),
+        Record::Seal(Seal { run: p(), ..sl }),
         Record::Grant(Grant {
             stage: p(),
             ..g.clone()
         }),
         Record::Grant(Grant { holder: p(), ..g }),
-        Record::Publication(Publication { stage: p(), ..pb }),
+        Record::Publication(Publication {
+            stage: p(),
+            ..pb.clone()
+        }),
+        Record::Publication(Publication { run: p(), ..pb }),
     ]
 }
 
@@ -483,11 +494,14 @@ fn parts_are_held_to_the_store_key_part_rule() {
     // The reader holds payload parts and name parts to the same rule, whatever wrote them.
     for part in bad {
         for (record, key) in [
+            (run(), "revision"),
             (stage(true), "generation"),
             (stage(true), "platform"),
             (action(true), "generation"),
             (seal(), "generation"),
             (publication(true, None), "stage"),
+            (publication(true, None), "run"),
+            (seal(), "run"),
         ] {
             let mut encoded = written(&record);
             encoded.outputs.insert(key.to_owned(), part.to_owned());
@@ -497,6 +511,15 @@ fn parts_are_held_to_the_store_key_part_rule() {
                 "{key} = {part:?}: {got:?}"
             );
         }
+        let mut named_run = written(&run());
+        named_run.name = part.to_owned();
+        assert!(
+            matches!(
+                Record::decode(&named_run),
+                Err(CodecError::Part { part: "run_id", .. })
+            ),
+            "{part:?}"
+        );
         let mut named_stage = written(&stage(true));
         named_stage.name = part.to_owned();
         assert!(

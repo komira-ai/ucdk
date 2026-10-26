@@ -25,6 +25,13 @@ pub fn run() -> Record {
     })
 }
 
+pub fn run_of(record: Record) -> Run {
+    let Record::Run(r) = record else {
+        panic!("a run")
+    };
+    r
+}
+
 pub fn stage_of(record: Record) -> Stage {
     let Record::Stage(s) = record else {
         panic!("a stage")
