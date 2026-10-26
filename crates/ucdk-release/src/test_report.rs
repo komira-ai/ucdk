@@ -4,9 +4,10 @@
 //! nothing counted, or no report, is zero.
 //!
 //! - Buck2 (`events.json-lines`): `ran` counts the lines that carry a `TestResult` record,
-//!   anywhere in the event, whose `status` is a name other than `SKIP`, `OMITTED`,
-//!   `LISTING_SUCCESS` and `LISTING_FAILED` (a listing is not a run). A record with no status
-//!   name is not counted.
+//!   anywhere in the event, whose `status` is one of `PASS`, `FAIL`, `FATAL`, `TIMEOUT` and
+//!   `RERUN` (the names of Buck2's `TestStatus` that mean a test ran); any other status, or a
+//!   record with no status name, is not counted. A line counts once however many records it
+//!   holds, so the number says whether tests ran and is not a count of tests.
 //! - Bazel (`events.json`, the build event protocol's JSON form): `ran` is the sum of
 //!   `totalRunCount` over the lines whose `testSummary` has an `overallStatus` other than
 //!   `NO_STATUS`, `FAILED_TO_BUILD` and `TOOL_HALTED_BEFORE_TESTING` (nothing was tested). A
@@ -19,8 +20,11 @@
 use serde_json::Value;
 use ucdk_release_proto::v1::BuildSystemKind;
 
-/// Buck2 statuses of a test result that is not a test having run.
-const BUCK2_NOT_RUN: [&str; 4] = ["SKIP", "OMITTED", "LISTING_SUCCESS", "LISTING_FAILED"];
+/// The Buck2 `TestStatus` names that say a test ran (`PASS`, `FAIL`, `FATAL`, `TIMEOUT` and
+/// `RERUN`). Every other name does not count: `SKIP`, `OMITTED`, the two listing statuses,
+/// `UNKNOWN`, `INFRA_FAILURE`, `NOT_SET_TEST_STATUS`, a name a later Buck2 adds, and a name in
+/// any other case.
+const BUCK2_RAN: [&str; 5] = ["PASS", "FAIL", "FATAL", "TIMEOUT", "RERUN"];
 
 /// Bazel overall statuses of a summary that tested nothing.
 const BAZEL_NOT_TESTED: [&str; 3] = ["NO_STATUS", "FAILED_TO_BUILD", "TOOL_HALTED_BEFORE_TESTING"];
@@ -62,7 +66,7 @@ fn ran_status(result: &Value) -> bool {
     result
         .get("status")
         .and_then(Value::as_str)
-        .is_some_and(|status| !BUCK2_NOT_RUN.contains(&status))
+        .is_some_and(|status| BUCK2_RAN.contains(&status))
 }
 
 /// The runs of the test summary of the event, when it has one that tested something.

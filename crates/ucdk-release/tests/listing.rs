@@ -107,6 +107,62 @@ fn a_bazel_output_is_the_execution_root_joined_with_its_relative_path() {
 }
 
 #[test]
+fn a_buck2_line_must_name_the_target_asked_for() {
+    // The label itself, and a cell-qualified form of a label that starts with `//`.
+    assert_eq!(
+        buck2("root//a:b", b"root//a:b /out/b\n"),
+        Ok(output("root//a:b", "/out/b"))
+    );
+    assert_eq!(
+        buck2("//a:b", b"root//a:b /out/b\n"),
+        Ok(output("root//a:b", "/out/b"))
+    );
+    // Another target is a fault, with the path it printed not taken.
+    for (label, listing) in [
+        ("root//a:b", &b"other//x:y /etc/shadow\n"[..]),
+        ("root//a:b", b"other//a:b /out/b\n"),
+        ("//a:b", b"root//a:c /out/b\n"),
+        ("//a:b", b"root//x/a:b /out/b\n"),
+        ("//a:b", b"a:b /out/b\n"),
+        ("//a:b", b"//a:b2 /out/b\n"),
+    ] {
+        let err = buck2(label, listing).expect_err("another target");
+        assert!(
+            matches!(&err, ListingError::Malformed { label: l, why }
+                if l == label && why.contains("not the target asked for")),
+            "{label}: {err:?}"
+        );
+        assert_eq!(err.reason(), Reason::BuildOutput);
+    }
+}
+
+#[test]
+fn a_path_with_a_control_character_is_malformed() {
+    for path in [
+        "/out/to\0ol",
+        "/out/x\ty",
+        "/out/x\u{1b}[0m",
+        "/out/a\rb",
+        "/out/x\u{85}y",
+    ] {
+        let line = format!("//release:tool {path}\n");
+        let err = buck2(LABEL, line.as_bytes()).expect_err("control character");
+        assert!(
+            matches!(&err, ListingError::Malformed { .. }),
+            "{path:?}: {err:?}"
+        );
+        let rel = format!("{}\n", &path[1..]);
+        let err = bazel(LABEL, rel.as_bytes(), b"/exec\n").expect_err("control in output");
+        assert!(
+            matches!(&err, ListingError::Malformed { .. }),
+            "{path:?}: {err:?}"
+        );
+    }
+    let err = bazel(LABEL, b"out/tool\n", b"/ex\tec\n").expect_err("control in root");
+    assert!(matches!(&err, ListingError::Malformed { .. }), "{err:?}");
+}
+
+#[test]
 fn a_listing_that_cannot_be_read_is_build_output() {
     let malformed = |err: ListingError| {
         assert!(

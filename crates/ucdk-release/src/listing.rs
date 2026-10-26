@@ -7,7 +7,8 @@
 //! target as paths relative to the execution root (`cquery --output=files`) and the root itself
 //! (`info execution_root`), and the path of an output is the root joined with the relative
 //! path. A target has exactly one output: none, or more than one, is a fault, and so is a path
-//! that is not absolute or climbs with `..`, which the files seam would refuse anyway.
+//! that is not absolute, climbs with `..` or holds a control character (a NUL, a tab), and a
+//! Buck2 line that names a target other than the one asked for.
 
 use std::fmt;
 
@@ -64,9 +65,27 @@ fn malformed(label: &str, why: impl Into<String>) -> ListingError {
     }
 }
 
-/// Whether `path` is absolute and climbs nowhere.
+/// Whether `path` is absolute, climbs nowhere and holds no control character (a NUL, a tab or
+/// a stray carriage return is not part of a path a build wrote).
 fn absolute(path: &str) -> bool {
-    path.starts_with('/') && !climbs(path)
+    path.starts_with('/') && !climbs(path) && !has_control(path)
+}
+
+fn has_control(text: &str) -> bool {
+    text.chars().any(char::is_control)
+}
+
+/// Whether the label a Buck2 listing prints names the label asked for. Buck2 qualifies a label
+/// with its cell (`root//a:b` for `//a:b`), so a request that starts with `//` is named by any
+/// non-empty cell followed by the rest of it; any other request is named by itself.
+fn names(listed: &str, label: &str) -> bool {
+    if listed == label {
+        return true;
+    }
+    match (label.strip_prefix("//"), listed.split_once("//")) {
+        (Some(rest), Some((cell, listed_rest))) => !cell.is_empty() && listed_rest == rest,
+        _ => false,
+    }
 }
 
 fn climbs(path: &str) -> bool {
@@ -89,10 +108,16 @@ pub fn buck2(label: &str, stdout: &[u8]) -> Result<Output, ListingError> {
         let (listed, path) = line
             .split_once(' ')
             .ok_or_else(|| malformed(label, format!("the line {line:?} has no space")))?;
+        if !names(listed, label) {
+            return Err(malformed(
+                label,
+                format!("the line names {listed:?}, which is not the target asked for"),
+            ));
+        }
         if !absolute(path) {
             return Err(malformed(
                 label,
-                format!("the path {path:?} is not absolute, or climbs"),
+                format!("the path {path:?} is not absolute, climbs, or holds a control character"),
             ));
         }
         found.push(Output {
@@ -118,10 +143,10 @@ pub fn bazel(label: &str, query: &[u8], info: &[u8]) -> Result<Output, ListingEr
     };
     let mut found = Vec::new();
     for rel in lines(label, query)? {
-        if rel.starts_with('/') || climbs(rel) {
+        if rel.starts_with('/') || climbs(rel) || has_control(rel) {
             return Err(malformed(
                 label,
-                format!("the output {rel:?} is not relative, or climbs"),
+                format!("the output {rel:?} is not relative, climbs, or holds a control character"),
             ));
         }
         found.push(Output {

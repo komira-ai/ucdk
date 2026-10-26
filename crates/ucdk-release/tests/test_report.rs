@@ -68,6 +68,48 @@ fn a_buck2_event_log_counts_results_that_are_not_skips() {
 }
 
 #[test]
+fn only_the_statuses_that_mean_a_test_ran_count_in_a_buck2_event_log() {
+    // Each status that means a test ran counts once.
+    for status in ["PASS", "FAIL", "FATAL", "TIMEOUT", "RERUN"] {
+        assert_eq!(
+            ran(Buck2, Some(buck2_result(status).as_bytes())),
+            1,
+            "{status}"
+        );
+    }
+    // Every other status is not a run: the ones Buck2 names that are not a run, a name it may
+    // add later, an empty name, and a run status in another case.
+    for status in [
+        "SKIP",
+        "OMITTED",
+        "LISTING_SUCCESS",
+        "LISTING_FAILED",
+        "UNKNOWN",
+        "INFRA_FAILURE",
+        "NOT_SET_TEST_STATUS",
+        "NOT_SET",
+        "banana",
+        "skip",
+        "pass",
+        "Pass",
+        "",
+    ] {
+        assert_eq!(
+            ran(Buck2, Some(buck2_result(status).as_bytes())),
+            0,
+            "{status:?}"
+        );
+    }
+    // A report of such results has not run a test, however many lines it holds.
+    let none = lines(&[
+        buck2_result("banana"),
+        buck2_result("NOT_SET"),
+        buck2_result("skip"),
+    ]);
+    assert_eq!(ran(Buck2, Some(&none)), 0);
+}
+
+#[test]
 fn a_bazel_event_file_counts_the_runs_of_each_test_summary() {
     let build_event =
         r#"{"id":{"targetCompleted":{"label":"//release:set_test"}},"completed":{"success":true}}"#;
