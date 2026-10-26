@@ -170,11 +170,10 @@ fn a_concurrent_writers_objects_are_not_leaks(backend: Backend) {
 /// counted as standing for an object it has none of.
 fn an_intent_with_no_object_accounts_for_nothing(backend: Backend) {
     let (mut fake, ledger) = (Fake::standard(), backend.ledger());
-    fake.faults_mut().fail_at_call.replace(1);
-    assert!(matches!(
-        apply(&mut fake, &ledger, &chain()),
-        Outcome::Failed(_)
-    ));
+    // A run that wrote its intent and died before the create reached the cloud.
+    let token = ledger.read().expect("read").token;
+    let intent = Record::intent(path("db/run"), Kind::service(), "db-run", BTreeSet::new());
+    ledger.write(&token, Change::Put(intent)).expect("write");
     assert_eq!(records(&ledger)[&path("db/run")].physical, None);
     assert_eq!(fake.object_count(), 0);
     assert_eq!(leaks_of(sweep(&mut fake, &ledger)), []);
