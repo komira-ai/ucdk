@@ -9,10 +9,18 @@ use common::{
     AnyLedger, Backend, FlakyLedger, Hooked, apply, apply_with, cell, chain, destroy, done,
     lowered, mutations, objects, path, physical_of, records, service_of,
 };
+use std::collections::BTreeSet;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
 use ucdk_engine::{Engine, EngineError, Leak, Outcome, Report, Request, State};
-use ucdk_ledger::Ledger as _;
+use ucdk_ledger::{
+    Change, Fence, Lease, LeaseError, Ledger as _, LedgerError, Record, Snapshot, Token,
+};
 use ucdk_provider::{
-    CellIdentity, CellName, CellUid, Kind, PhysicalId, Provider as _, ProviderError, Stamp, kit,
+    CellIdentity, CellName, CellUid, Kind, Node, PhysicalId, Provider as _, ProviderError, Stamp,
+    kit,
 };
 use ucdk_provider_fake::{Fake, Op};
 
@@ -62,6 +70,143 @@ fn an_object_we_stamped_with_no_record_is_a_leak(backend: Backend) {
     assert_eq!(leak.name, "ghost-run");
     assert_eq!(leak.owner, path("ghost/run").owner());
     assert_eq!(leak.node, path("ghost/run").key());
+}
+
+type Writer = Box<dyn FnOnce(&AnyLedger) + Send>;
+
+/// A ledger that runs `then` right after its `nth` read has been answered: a writer that gets in
+/// between the sweep's reads.
+struct Interleaved {
+    inner: AnyLedger,
+    reads: AtomicUsize,
+    nth: usize,
+    then: Mutex<Option<Writer>>,
+}
+
+impl Interleaved {
+    fn new(inner: &AnyLedger, nth: usize, then: impl FnOnce(&AnyLedger) + Send + 'static) -> Self {
+        Self {
+            inner: inner.clone(),
+            reads: AtomicUsize::new(0),
+            nth,
+            then: Mutex::new(Some(Box::new(then))),
+        }
+    }
+}
+
+impl ucdk_ledger::Ledger for Interleaved {
+    fn read(&self) -> Result<Snapshot, LedgerError> {
+        let answer = self.inner.read();
+        if self.reads.fetch_add(1, Ordering::SeqCst) + 1 == self.nth
+            && let Some(then) = self.then.lock().expect("lock").take()
+        {
+            then(&self.inner);
+        }
+        answer
+    }
+
+    fn write(&self, expected: &Token, change: Change) -> Result<Token, LedgerError> {
+        self.inner.write(expected, change)
+    }
+
+    fn write_fenced(
+        &self,
+        fence: Fence,
+        expected: &Token,
+        change: Change,
+    ) -> Result<Token, LedgerError> {
+        self.inner.write_fenced(fence, expected, change)
+    }
+
+    fn acquire(&self, holder: &str, ttl: Duration) -> Result<Lease, LeaseError> {
+        self.inner.acquire(holder, ttl)
+    }
+
+    fn renew(&self, fence: Fence, ttl: Duration) -> Result<Lease, LedgerError> {
+        self.inner.renew(fence, ttl)
+    }
+
+    fn release(&self, fence: Fence) -> Result<(), LedgerError> {
+        self.inner.release(fence)
+    }
+}
+
+/// Proves: an object a concurrent run created after the sweep read the ledger (its intent is
+/// written before the object exists, so the sweep's second read has it) is not reported, and
+/// neither is one that run deleted and unrecorded after the sweep read the ledger but before it
+/// listed. Catches a sweep that judges the listing by a ledger read made before it.
+fn a_concurrent_writers_objects_are_not_leaks(backend: Backend) {
+    let (mut fake, ledger) = applied(backend);
+    // A writer that, right after the sweep's first read, records an intent for a new object that
+    // already exists, and drops the record of a recorded one that is still listed.
+    let new = stamped(&mut fake, "fresh", &cell());
+    let old = physical_of(&ledger, "db/run");
+    let racing = Interleaved::new(&ledger, 1, |ledger| {
+        let intent = Record::intent(
+            path("fresh/run"),
+            Kind::service(),
+            "fresh-run",
+            BTreeSet::new(),
+        );
+        let token = ledger.read().expect("read").token;
+        ledger
+            .write(&token, Change::Put(intent))
+            .expect("the writer records its intent");
+        let token = ledger.read().expect("read").token;
+        ledger
+            .write(&token, Change::Remove(path("db/run")))
+            .expect("the writer drops a record");
+    });
+    assert_eq!(leaks_of(sweep(&mut fake, &racing)), []);
+    // Settled, nothing hides them: the new object has its intent, and the old one lost its record.
+    let rest = leaks_of(sweep(&mut fake, &ledger));
+    assert_eq!(rest.len(), 1, "{rest:?}");
+    assert_eq!(rest[0].physical, old);
+    assert_ne!(rest[0].physical, new);
+}
+
+/// Proves: an intent whose create never happened (no object, no physical id) reports nothing,
+/// and a stamped object of another node is still reported beside it. Catches an intent that is
+/// counted as standing for an object it has none of.
+fn an_intent_with_no_object_accounts_for_nothing(backend: Backend) {
+    let (mut fake, ledger) = (Fake::standard(), backend.ledger());
+    fake.faults_mut().fail_at_call.replace(1);
+    assert!(matches!(
+        apply(&mut fake, &ledger, &chain()),
+        Outcome::Failed(_)
+    ));
+    assert_eq!(records(&ledger)[&path("db/run")].physical, None);
+    assert_eq!(fake.object_count(), 0);
+    assert_eq!(leaks_of(sweep(&mut fake, &ledger)), []);
+    let ghost = stamped(&mut fake, "ghost", &cell());
+    let leaks = leaks_of(sweep(&mut fake, &ledger));
+    assert_eq!(leaks.len(), 1, "{leaks:?}");
+    assert_eq!(leaks[0].physical, ghost);
+}
+
+/// Proves: a stamped object beside an intent that names no physical id is reported when the
+/// intent already stands for another object of its node, and the intent's own object is not.
+/// Catches an intent that hides every stamped object of its node.
+fn a_duplicate_beside_an_intent_with_no_physical_id_is_a_leak(backend: Backend) {
+    let (mut fake, ledger) = (Fake::standard(), backend.ledger());
+    fake.faults_mut().ambiguous_at_call.replace(1);
+    assert!(matches!(
+        apply(&mut fake, &ledger, &chain()),
+        Outcome::Failed(_)
+    ));
+    let intent = records(&ledger)[&path("db/run")].clone();
+    assert_eq!((intent.state, intent.physical), (State::Intent, None));
+    // A second object for the same node, under another name, as a retried create would leave.
+    let node = Node::new(path("db/run"), Kind::service(), "db-run-again", Vec::new())
+        .expect("a node with no fields");
+    let twin = fake
+        .create(&node, &Stamp::for_node(&cell(), node.path()))
+        .expect("create")
+        .physical;
+    let leaks = leaks_of(sweep(&mut fake, &ledger));
+    assert_eq!(leaks.len(), 1, "{leaks:?}");
+    assert_eq!(leaks[0].physical, twin);
+    assert_eq!(leaks[0].node, path("db/run").key());
 }
 
 /// Proves: an object stamped by another cell (another id, another cell name, another machine) is
@@ -300,6 +445,9 @@ macro_rules! on_every_ledger {
 on_every_ledger!(
     an_object_we_stamped_with_no_record_is_a_leak,
     a_stamp_of_another_cell_is_not_a_leak,
+    a_concurrent_writers_objects_are_not_leaks,
+    a_duplicate_beside_an_intent_with_no_physical_id_is_a_leak,
+    an_intent_with_no_object_accounts_for_nothing,
     a_recorded_object_is_not_a_leak,
     a_record_of_another_object_does_not_hide_a_duplicate,
     a_stripped_stamp_is_not_reported,
