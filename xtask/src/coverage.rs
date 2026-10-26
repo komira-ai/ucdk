@@ -308,6 +308,8 @@ pub fn run(root: &Path, runner: &dyn Runner) -> (Vec<Finding>, Vec<String>) {
             "llvm-cov",
             "--branch",
             "--workspace",
+            "--features",
+            "ucdk-capi/test-clock",
             "--locked",
             "--lcov",
             "--output-path",
@@ -316,7 +318,21 @@ pub fn run(root: &Path, runner: &dyn Runner) -> (Vec<Finding>, Vec<String>) {
         root,
     )
     .with_path(&bin);
-    for cmd in [rustup, llvm_cov] {
+    // The tests above run with the `test-clock` feature on. A default build, the one that ships,
+    // must refuse a fixed clock, and this is where it is built and tried.
+    let default_build = Cmd::new(
+        "cargo",
+        &[
+            "test",
+            "--locked",
+            "-p",
+            "ucdk-capi",
+            "--test",
+            "test_clock_default",
+        ],
+        root,
+    );
+    for cmd in [rustup, llvm_cov, default_build] {
         if let Err(e) = runner.run(&cmd) {
             return (
                 vec![Finding::new("coverage-run", cmd.to_string(), e)],

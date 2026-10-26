@@ -11,7 +11,9 @@ use ucdk_api::v1::{
 };
 use ucdk_api::{Approved, RequestError, catalog_response};
 use ucdk_engine::{Engine, Outcome, Request};
-use ucdk_ledger::{Clock, FileLedger, Ledger, ManualClock, MemoryLedger, SystemClock};
+#[cfg(feature = "test-clock")]
+use ucdk_ledger::ManualClock;
+use ucdk_ledger::{Clock, FileLedger, Ledger, MemoryLedger, SystemClock};
 use ucdk_plan::{Plan, lower};
 use ucdk_proto::v1::ResourceList;
 use ucdk_provider::{CellIdentity, CellName, CellUid, Kind, Node, NodePath, Provider, Stamp};
@@ -97,11 +99,26 @@ fn provider_named(name: &str, cell: &CellIdentity) -> Result<Box<dyn Provider>, 
 }
 
 /// The clock the ledger times its leases by: the wall clock, or one fixed at `test_clock_ms`.
-fn clock_for(test_clock_ms: u64) -> Arc<dyn Clock> {
-    if test_clock_ms == 0 {
+#[cfg(feature = "test-clock")]
+fn clock_for(test_clock_ms: u64) -> Result<Arc<dyn Clock>, CallError> {
+    Ok(if test_clock_ms == 0 {
         Arc::new(SystemClock)
     } else {
         Arc::new(ManualClock::at(test_clock_ms))
+    })
+}
+
+/// The clock the ledger times its leases by: the wall clock. A caller that could fix it would
+/// defeat the lease and the fence, so this build refuses `test_clock_ms`.
+#[cfg(not(feature = "test-clock"))]
+fn clock_for(test_clock_ms: u64) -> Result<Arc<dyn Clock>, CallError> {
+    if test_clock_ms == 0 {
+        Ok(Arc::new(SystemClock))
+    } else {
+        Err(CallError::new(
+            status::INVALID_ARGUMENT,
+            "test_clock_ms needs a library built with the `test-clock` feature",
+        ))
     }
 }
 
@@ -264,7 +281,7 @@ impl Session {
             ledger_for(
                 &config.ledger_kind,
                 &config.ledger_location,
-                clock_for(config.test_clock_ms),
+                clock_for(config.test_clock_ms)?,
             )?,
             cell,
         );

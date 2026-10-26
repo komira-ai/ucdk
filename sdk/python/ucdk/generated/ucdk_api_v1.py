@@ -190,7 +190,9 @@ class SessionConfig(_wire.Message):
             reclaim a lease an earlier run left behind. Empty: a new name for every run.
         test_clock_ms: For tests: when not zero, the ledger times its leases by a clock fixed at this many
             milliseconds since the Unix epoch, instead of the wall clock, so a test says when a lease
-            lapses without waiting or reading the time. Zero: the wall clock.
+            lapses without waiting or reading the time. Zero: the wall clock. Only a library built with
+            the `test-clock` feature honours it; every other build refuses a non-zero value as an
+            invalid argument, because a caller able to fix the clock would defeat the lease.
     """
 
     _FIELDS = (

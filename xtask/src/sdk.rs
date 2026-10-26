@@ -155,7 +155,18 @@ pub fn test(root: &Path, runner: &dyn Runner) -> (Vec<Finding>, String) {
         test_files_of("TypeScript", typescript_files.len()),
     );
     // The tests load `target/debug/libucdk_capi.<so|dylib>`; the SDKs are given its path.
-    let build = Cmd::new("cargo", &["build", "--locked", "-p", "ucdk-capi"], root);
+    let build = Cmd::new(
+        "cargo",
+        &[
+            "build",
+            "--locked",
+            "-p",
+            "ucdk-capi",
+            "--features",
+            "test-clock",
+        ],
+        root,
+    );
     // `-B`: no bytecode files in the tree.
     let python_run = Cmd::new(
         "python3",

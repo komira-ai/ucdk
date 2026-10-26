@@ -203,7 +203,7 @@ fn sdk_test_runs_the_python_tests_then_the_typescript_tests_in_their_directories
     assert_eq!(
         *fake.log.borrow(),
         [
-            "cargo build --locked -p ucdk-capi",
+            "cargo build --locked -p ucdk-capi --features test-clock",
             "python3 -B -m unittest discover -s tests -t .",
             "node --test --test-timeout=60000 tests/a.test.ts tests/b.test.ts"
         ]
@@ -239,7 +239,10 @@ fn a_failing_suite_is_a_finding_and_the_next_one_does_not_run() {
     let (findings, _) = test(&root, &unbuilt);
     assert_eq!(findings.len(), 1);
     assert!(findings[0].subject.starts_with("cargo build"));
-    assert_eq!(*unbuilt.log.borrow(), ["cargo build --locked -p ucdk-capi"]);
+    assert_eq!(
+        *unbuilt.log.borrow(),
+        ["cargo build --locked -p ucdk-capi --features test-clock"]
+    );
 }
 
 #[test]

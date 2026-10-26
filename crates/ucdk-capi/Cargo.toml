@@ -13,6 +13,13 @@ publish.workspace = true
 # functions in-process.
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Honour `SessionConfig.test_clock_ms`, which fixes the clock the ledger judges leases by.
+# Off in every build that ships: a caller able to freeze that clock defeats the lease and the
+# fence, so the default build refuses a non-zero value. `cargo xtask coverage` and
+# `cargo xtask sdk-test` turn it on, and nothing else does.
+test-clock = []
+
 [dependencies]
 prost.workspace = true
 ucdk-api = { path = "../ucdk-api" }

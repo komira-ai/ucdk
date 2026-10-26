@@ -209,9 +209,13 @@ fn the_verb_runs_the_tests_on_the_pinned_nightly_and_gates_the_lcov_file() {
     assert!(log.contains("rustup toolchain install nightly-2026-10-01 --profile minimal --component llvm-tools-preview"), "{log}");
     assert!(
         log.contains(
-            "cargo +nightly-2026-10-01 llvm-cov --branch --workspace --locked --lcov --output-path"
+            "cargo +nightly-2026-10-01 llvm-cov --branch --workspace --features ucdk-capi/test-clock --locked --lcov --output-path"
         ),
         "{log}"
+    );
+    assert!(
+        log.contains("cargo test --locked -p ucdk-capi --test test_clock_default"),
+        "the default-feature build is tried too: {log}"
     );
 
     let bad = [
@@ -271,6 +275,17 @@ fn the_verb_reports_a_failed_step_or_a_missing_lcov_file() {
         found.iter().map(|f| f.rule).collect::<Vec<_>>(),
         ["coverage-read"]
     );
+
+    let fake = Fake {
+        fail_on: vec!["test_clock_default"],
+        ..Fake::default()
+    };
+    let (found, report) = run(&project("verb-fail-default"), &fake);
+    assert_eq!(
+        found.iter().map(|f| f.rule).collect::<Vec<_>>(),
+        ["coverage-run"]
+    );
+    assert!(report.is_empty());
 }
 
 #[test]

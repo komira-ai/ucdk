@@ -209,7 +209,10 @@ Where the code is more specific than the text above:
   lacks is `UCDK_ABI`. A ledger that cannot be opened (a missing directory, a file that is not a
   ledger) is `UCDK_INTERNAL`; another session may have the same file open (9.1). `holder` names
   the lease holder of the session's runs (9.2). `test_clock_ms`, when not zero, fixes the clock
-  the ledger times its leases by, so a test chooses when a lease lapses and reads no time.
+  the ledger times its leases by, so a test chooses when a lease lapses and reads no time. Only a
+  library built with the `test-clock` cargo feature honours it (`cargo xtask coverage` and
+  `cargo xtask sdk-test` build with it); the default build, which ships, refuses a non-zero value
+  with `UCDK_INVALID_ARGUMENT`, because a caller able to fix that clock would defeat the lease.
 - **Handles are numbers.** A `ucdk_session *` carries a number from a counter that only grows,
   and the library keeps the map from open numbers to sessions. A closed, twice-closed or
   never-opened handle is refused (`UCDK_INVALID_ARGUMENT`), and stays refused when the allocator
