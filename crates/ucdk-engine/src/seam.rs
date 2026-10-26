@@ -43,8 +43,9 @@ pub enum Request {
     /// Read the ledger and the live objects it records and `desired` names, and change
     /// nothing: no ledger write, no provider call that mutates.
     Status { desired: Lowered },
-    /// Compare the cell's stamped objects with the ledger and change nothing: one list call
-    /// and one ledger read. An object that carries our stamp and has no record is reported; it
+    /// Compare the cell's stamped objects with the ledger and change nothing: one ledger
+    /// read, one list call and another ledger read (an object counts as accounted for if
+    /// either read accounts for it, so a run writing at the time is not reported). An object that carries our stamp and has no record is reported; it
     /// is never deleted on that evidence.
     Leaks,
 }

@@ -134,8 +134,13 @@ What each verb is, in terms of what exists:
 
 - `ucdk_leaks`: request is a `LeaksRequest` (empty: it is about the cell, not about a file);
   response is an `Outcome` whose `leaks` arm lists the objects that carry the cell's stamp and
-  that no ledger record accounts for. Read-only: `Request::Leaks` reads the ledger and calls
-  `Provider::list_stamped` and nothing else. Its exit class is done when the list is empty and
+  that no ledger record accounts for. Read-only: `Request::Leaks` reads the ledger, calls
+  `Provider::list_stamped`, reads the ledger again, and does nothing else. It takes no lease, so a
+  run may be writing; an object is accounted for if the record of either read names it, which
+  keeps a concurrent run's new object (its intent is recorded before the object exists) and one it
+  just deleted out of the report. A record names an object by its physical id; an intent with no
+  physical id stands for one object stamped for its node (the lowest physical id), so a second
+  stamped object for that node is reported. Its exit class is done when the list is empty and
   `leaks` (8) when it is not. A stamp is a claim, never an authority: nothing is deleted on it,
   and an object whose stamp was stripped is not listed by the provider and so is not reported. An
   apply ends with the same sweep and carries its leaks in its report (`Report.leaks`); it is still
