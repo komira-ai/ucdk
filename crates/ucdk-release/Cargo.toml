@@ -1,6 +1,6 @@
 [package]
 name = "ucdk-release"
-description = "The release model: a checked machine, the text rules of its flags and environment, the selection of what a run does, the release hashes, the set document, store keys, the verification of a stored member, the layering of a build-system invocation, the parse of its listing and test report, manifest composition, the set closure and the accounting of rows."
+description = "The release model: a checked machine, the text rules of its flags and environment, the selection of what a run does, the release hashes, the set document, store keys, the verification of a stored member, the layering of a build-system invocation, the parse of its listing and test report, manifest composition, the set closure, the accounting of rows, the decisions to publish and to stand down for a newer build, and the record codec with its state-transition table."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

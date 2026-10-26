@@ -131,6 +131,7 @@ ucdk.release.v1.Reason PUBLISH_DIFFERENT_BYTES = 11
 ucdk.release.v1.Reason PUBLISH_READ_BACK = 13
 ucdk.release.v1.Reason PUBLISH_STAGE = 34
 ucdk.release.v1.Reason PUBLISH_UPLOAD = 14
+ucdk.release.v1.Reason PUBLISH_VANISHED = 35
 ucdk.release.v1.Reason PUBLISH_YANKED = 12
 ucdk.release.v1.Reason REASON_UNSPECIFIED = 0
 ucdk.release.v1.Reason ROW_ACCOUNTING = 25

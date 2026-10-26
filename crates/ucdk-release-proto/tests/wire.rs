@@ -319,3 +319,15 @@ fn a_retired_number_is_skipped_not_read_as_another_field() {
         }
     );
 }
+
+#[test]
+fn the_vanished_publication_reason_decodes_from_literal_bytes() {
+    // 3 reason 35 (a confirmed publication whose coordinate reads absent), then 1 name "a". A
+    // number added at the end of the enum keeps every earlier number as it was.
+    let bytes = [0x18, 0x23, 0x0A, 0x01, b'a'];
+    let report = ActionReport::decode(bytes.as_slice()).expect("decodes");
+    assert_eq!(report.reason, Reason::PublishVanished as i32);
+    assert_eq!(report.reason, 35);
+    assert_eq!(report.name, "a");
+    assert_eq!(Reason::PublishStage as i32, 34);
+}
