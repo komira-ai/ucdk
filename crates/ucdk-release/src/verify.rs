@@ -17,11 +17,18 @@ use ucdk_release_proto::v1::{
 
 use crate::machine::{Identity, identity};
 use crate::oci;
-use crate::store::{SetScope, StoreKey};
+use crate::store::{SetScope, StoreKey, is_plain};
+
+/// The schema version of a manifest that [`verify_member`] reads. The version is not part of
+/// the set hash (the design's field list for it does not name it), so this check is the only
+/// thing that holds a stored manifest to it.
+const MANIFEST_SCHEMA: i32 = 1;
 
 /// One check of a member or of a generation; each has a test that breaks it alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Check {
+    /// The manifest is of the schema version this release reads.
+    Schema,
     /// The manifest name equals the declaration's, byte for byte.
     Name,
     /// The manifest type equals the declaration's, and names an identity.
@@ -115,8 +122,19 @@ pub fn verify_member(
             ),
         ));
     }
+    if manifest.schema_version != MANIFEST_SCHEMA {
+        return Err(fail(
+            Check::Schema,
+            format!(
+                "the manifest of {} is of schema version {}, and only {MANIFEST_SCHEMA} is read",
+                decl.name, manifest.schema_version
+            ),
+        ));
+    }
+    // The set document is not trusted, and the store reader joins this name to the entry path:
+    // it is held to the rule every part of a store key is held to.
     let file = &manifest.file;
-    if file.is_empty() || file.contains('/') || file == "." || file == ".." {
+    if !is_plain(file) {
         return Err(fail(
             Check::EntryShape,
             format!(
@@ -230,7 +248,10 @@ fn check_same(manifest: &Manifest, digest: &str, size: u64) -> Result<(), Verify
     Ok(())
 }
 
-/// An image carries the platform of its config: the run's, never `any`.
+/// An image carries the platform of its config: the run's, never `any`. The config's `os` and
+/// `architecture` each equal the manifest's metadata, and their join with `-` is the run's
+/// platform. The config's `variant` is ignored: a platform here is an OS and a CPU, and an
+/// image of another variant of the same CPU is the same platform.
 fn check_oci(manifest: &Manifest, layout: &oci::Layout, platform: &str) -> Result<(), VerifyError> {
     let meta_agrees = matches!(&manifest.metadata, Some(Metadata::Oci(o)) if o.os == layout.os && o.cpu == layout.cpu);
     let own = format!("{}-{}", layout.os, layout.cpu);

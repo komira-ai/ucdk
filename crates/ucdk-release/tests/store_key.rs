@@ -115,3 +115,11 @@ fn names_that_only_look_like_dot_parts_are_kept() {
     let key = StoreKey::member(&s, "tool.1").expect("a key");
     assert_eq!(key.as_str(), "build/linux-x86_64/..abc/a.b/m/tool.1");
 }
+
+#[test]
+fn names_are_byte_exact_with_no_normalization_and_no_case_folding() {
+    let key = |name: &str| StoreKey::member(&scope(), name).expect("a key");
+    assert_ne!(key("\u{e9}"), key("e\u{301}"));
+    assert_ne!(key("Tool"), key("tool"));
+    assert!(key("e\u{301}").as_str().ends_with("/m/e\u{301}"));
+}

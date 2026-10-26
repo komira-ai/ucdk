@@ -68,7 +68,12 @@ fn join(scope: &SetScope, member: Option<&str>) -> Result<String, StoreKeyError>
 
 /// A part that names one thing: not empty, not `.` or `..`, and with no `/`, `\` or control
 /// character, so it cannot stand for a parent, a root or a second part.
-fn is_plain(part: &str) -> bool {
+///
+/// The rule is byte-exact: no Unicode normalization and no case folding is applied, so `é`
+/// (U+00E9) and `e` followed by U+0301 are two parts, and `Tool` and `tool` are two parts. A
+/// store that normalizes or folds names would make such parts meet at one key; the rule is
+/// written for a case-sensitive store that keeps names as bytes.
+pub(crate) fn is_plain(part: &str) -> bool {
     !part.is_empty()
         && part != "."
         && part != ".."

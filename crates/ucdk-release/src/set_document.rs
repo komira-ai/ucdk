@@ -1,7 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
-//! The set document: the `ReleaseSet` a build stores beside its members, in canonical
-//! encoding. It is not trusted: every reader recomputes the set hash from the members and
-//! refuses a differing value, and a member's store key is never read from it.
+//! The set document: the `ReleaseSet` a build stores beside its members. [`seal`] fills in the
+//! schema version, sorts the members by name and writes the set hash, and [`encode`] gives the
+//! protobuf bytes of that. It is not trusted: every reader recomputes the set hash from the
+//! members and refuses a differing value, and a member's store key is never read from it.
+//!
+//! [`read`] accepts any protobuf bytes that decode to a document of the current schema version
+//! whose members each carry a manifest, are sorted by name with each name once, and whose stored
+//! hash is the hash of the members. It does not require the bytes to be what [`encode`] writes
+//! (unknown fields are dropped and fields may come in any order), so the bytes of a document
+//! are not an identity: compare set hashes, never documents. It does not compare the revision
+//! or the platform of the set with any scope; the caller does.
 
 use std::fmt;
 

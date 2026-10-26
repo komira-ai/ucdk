@@ -110,6 +110,34 @@ fn the_file_must_be_a_bare_name() {
 }
 
 #[test]
+fn the_file_is_held_to_the_rule_of_a_store_key_part_even_with_a_matching_entry() {
+    for file in ["..\\x", "a\\b", "a\nb", "a\0b", "a\u{85}b", "tab\there"] {
+        let mut m = file_member();
+        m.1.file = file.to_owned();
+        m.2 = Entry::from([(file.to_owned(), BYTES.to_vec())]);
+        assert_eq!(
+            refused(&m),
+            (Check::EntryShape, Reason::SetMember),
+            "{file:?}"
+        );
+    }
+    // The same entry under a plain name verifies: only the name was at fault.
+    let mut plain = file_member();
+    plain.1.file = "a b.bin".to_owned();
+    plain.2 = Entry::from([("a b.bin".to_owned(), BYTES.to_vec())]);
+    assert_eq!(verdict(&plain), Ok(()));
+}
+
+#[test]
+fn the_manifest_must_be_of_the_schema_version_read() {
+    for version in [0, 2, 99, -1] {
+        let mut m = file_member();
+        m.1.schema_version = version;
+        assert_eq!(refused(&m), (Check::Schema, Reason::SetMember), "{version}");
+    }
+}
+
+#[test]
 fn the_entry_must_hold_the_file_the_manifest_names() {
     let mut m = file_member();
     m.1.file = "other.bin".to_owned();
@@ -213,28 +241,46 @@ fn blob_path(bytes: &[u8]) -> String {
     format!("image/blobs/sha256/{}", hex(bytes))
 }
 
+const IMAGE_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
+
+/// A descriptor of `bytes`, as it stands in a manifest or an index.
+fn desc(bytes: &[u8]) -> String {
+    format!(
+        r#"{{"mediaType":"application/octet-stream","digest":"sha256:{}","size":{}}}"#,
+        hex(bytes),
+        bytes.len()
+    )
+}
+
+/// The index of a layout of one image whose manifest blob is `manifest`.
+fn index_of(manifest: &[u8]) -> Vec<u8> {
+    format!(
+        r#"{{"manifests":[{{"mediaType":"{IMAGE_MANIFEST}","digest":"sha256:{}","size":{}}}]}}"#,
+        hex(manifest),
+        manifest.len()
+    )
+    .into_bytes()
+}
+
 fn image_manifest_json() -> Vec<u8> {
     format!(
-        r#"{{"config":{{"digest":"sha256:{}"}},"layers":[{{"digest":"sha256:{}"}}]}}"#,
-        hex(CONFIG),
-        hex(LAYER)
+        r#"{{"config":{},"layers":[{}]}}"#,
+        desc(CONFIG),
+        desc(LAYER)
     )
     .into_bytes()
 }
 
 fn image_member() -> Member {
     let manifest_json = image_manifest_json();
-    let index = format!(
-        r#"{{"manifests":[{{"digest":"sha256:{}"}}]}}"#,
-        hex(&manifest_json)
-    );
+    let index = index_of(&manifest_json);
     let size = (manifest_json.len() + CONFIG.len() + LAYER.len()) as u64;
     let entry = Entry::from([
         (
             "image/oci-layout".to_owned(),
             br#"{"imageLayoutVersion":"1.0.0"}"#.to_vec(),
         ),
-        ("image/index.json".to_owned(), index.into_bytes()),
+        ("image/index.json".to_owned(), index),
         (blob_path(&manifest_json), manifest_json.clone()),
         (blob_path(CONFIG), CONFIG.to_vec()),
         (blob_path(LAYER), LAYER.to_vec()),
@@ -342,6 +388,18 @@ fn the_layout_file_and_the_index_must_be_readable() {
 }
 
 #[test]
+fn the_layout_version_must_be_the_one_of_the_specification() {
+    for version in ["9.9", "", "2.0.0", "1.0", "1.0.1", " 1.0.0"] {
+        let layout = format!(r#"{{"imageLayoutVersion":"{version}"}}"#);
+        assert_eq!(
+            refused(&image_with("image/oci-layout", Some(layout.as_bytes()))),
+            (Check::EntryShape, Reason::SetMember),
+            "{version:?}"
+        );
+    }
+}
+
+#[test]
 fn an_index_names_exactly_one_manifest() {
     for index in [
         &br#"{"manifests":[]}"#[..],
@@ -364,9 +422,15 @@ fn a_digest_in_the_layout_is_a_sha256_digest_of_a_blob_the_layout_holds() {
         "md5:abc".to_owned(),
         "sha256:xyz".to_owned(),
         format!("sha256:{}", "0".repeat(64)),
+        format!("sha256:{}", good.to_uppercase()),
+        format!("sha256:{}", &good[1..]),
+        "sha256:../../x".to_owned(),
         good.clone(),
     ] {
-        let index = format!(r#"{{"manifests":[{{"digest":"{digest}"}}]}}"#);
+        let index = format!(
+            r#"{{"manifests":[{{"mediaType":"{IMAGE_MANIFEST}","digest":"{digest}","size":{}}}]}}"#,
+            manifest_json.len()
+        );
         assert_eq!(
             refused(&image_with("image/index.json", Some(index.as_bytes()))),
             (Check::EntryShape, Reason::SetMember),
@@ -384,8 +448,7 @@ fn a_digest_in_the_layout_is_a_sha256_digest_of_a_blob_the_layout_holds() {
 fn image_with_manifest(json: &[u8]) -> Member {
     let mut m = image_member();
     m.2.insert(blob_path(json), json.to_vec());
-    let index = format!(r#"{{"manifests":[{{"digest":"sha256:{}"}}]}}"#, hex(json));
-    m.2.insert("image/index.json".to_owned(), index.into_bytes());
+    m.2.insert("image/index.json".to_owned(), index_of(json));
     m.1.sha256 = hex(json);
     m
 }
@@ -423,7 +486,7 @@ fn the_blobs_the_manifest_reaches_must_be_in_the_layout() {
 
 #[test]
 fn an_image_with_no_layers_has_the_size_of_its_manifest_and_config() {
-    let json = format!(r#"{{"config":{{"digest":"sha256:{}"}}}}"#, hex(CONFIG));
+    let json = format!(r#"{{"config":{}}}"#, desc(CONFIG));
     let mut m = image_with_manifest(json.as_bytes());
     m.1.size = (json.len() + CONFIG.len()) as u64;
     assert_eq!(verdict(&m), Ok(()));
@@ -436,7 +499,7 @@ fn the_image_config_must_be_readable_and_name_a_platform() {
         br#"{"os":"linux"}"#,
         br#"{"architecture":"x86_64"}"#,
     ] {
-        let json = format!(r#"{{"config":{{"digest":"sha256:{}"}}}}"#, hex(config));
+        let json = format!(r#"{{"config":{}}}"#, desc(config));
         let mut m = image_with_manifest(json.as_bytes());
         m.2.insert(blob_path(config), config.to_vec());
         assert_eq!(refused(&m), (Check::EntryShape, Reason::SetMember));
@@ -459,6 +522,98 @@ fn the_image_size_is_the_sum_of_the_blobs_the_manifest_reaches() {
     let mut spare = image_member();
     spare.2.insert(blob_path(b"spare"), b"spare".to_vec());
     assert_eq!(verdict(&spare), Ok(()));
+}
+
+#[test]
+fn the_index_must_point_at_an_image_manifest() {
+    let manifest = image_manifest_json();
+    for media in [
+        "application/vnd.oci.image.index.v1+json",
+        "application/json",
+        "",
+    ] {
+        let index = format!(
+            r#"{{"manifests":[{{"mediaType":"{media}","digest":"sha256:{}","size":{}}}]}}"#,
+            hex(&manifest),
+            manifest.len()
+        );
+        assert_eq!(
+            refused(&image_with("image/index.json", Some(index.as_bytes()))),
+            (Check::EntryShape, Reason::SetMember),
+            "{media:?}"
+        );
+    }
+    let none = format!(
+        r#"{{"manifests":[{{"digest":"sha256:{}","size":{}}}]}}"#,
+        hex(&manifest),
+        manifest.len()
+    );
+    assert_eq!(
+        refused(&image_with("image/index.json", Some(none.as_bytes()))),
+        (Check::EntryShape, Reason::SetMember)
+    );
+}
+
+#[test]
+fn the_size_of_a_descriptor_is_the_length_of_its_blob() {
+    let manifest = image_manifest_json();
+    let digest = hex(&manifest);
+    let too_big = manifest.len() + 1;
+    for size in [
+        format!(r#","size":{too_big}"#),
+        r#","size":"x""#.to_owned(),
+        r#","size":-1"#.to_owned(),
+        String::new(),
+    ] {
+        let index = format!(
+            r#"{{"manifests":[{{"mediaType":"{IMAGE_MANIFEST}","digest":"sha256:{digest}"{size}}}]}}"#
+        );
+        assert_eq!(
+            refused(&image_with("image/index.json", Some(index.as_bytes()))),
+            (Check::EntryShape, Reason::SetMember),
+            "{size}"
+        );
+    }
+    // The same holds for the config and for a layer of the image manifest.
+    let wrong = |config: String, layer: String| {
+        let json = format!(r#"{{"config":{config},"layers":[{layer}]}}"#);
+        refused(&image_with_manifest(json.as_bytes()))
+    };
+    let lied = |bytes: &[u8]| {
+        format!(
+            r#"{{"mediaType":"x","digest":"sha256:{}","size":{}}}"#,
+            hex(bytes),
+            bytes.len() + 1
+        )
+    };
+    let expected = (Check::EntryShape, Reason::SetMember);
+    assert_eq!(wrong(lied(CONFIG), desc(LAYER)), expected);
+    assert_eq!(wrong(desc(CONFIG), lied(LAYER)), expected);
+}
+
+#[test]
+fn a_blob_listed_twice_is_counted_once() {
+    let json = format!(
+        r#"{{"config":{},"layers":[{},{}]}}"#,
+        desc(CONFIG),
+        desc(LAYER),
+        desc(LAYER)
+    );
+    let mut m = image_with_manifest(json.as_bytes());
+    let once = (json.len() + CONFIG.len() + LAYER.len()) as u64;
+    m.1.size = once;
+    assert_eq!(verdict(&m), Ok(()));
+    m.1.size = once + LAYER.len() as u64;
+    assert_eq!(refused(&m), (Check::Size, Reason::SetMember));
+    // A layer that is the config blob is the same blob.
+    let same = format!(
+        r#"{{"config":{},"layers":[{}]}}"#,
+        desc(CONFIG),
+        desc(CONFIG)
+    );
+    let mut shared = image_with_manifest(same.as_bytes());
+    shared.1.size = (same.len() + CONFIG.len()) as u64;
+    assert_eq!(verdict(&shared), Ok(()));
 }
 
 #[test]
