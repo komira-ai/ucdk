@@ -92,9 +92,12 @@ pub(super) fn needs_a_registry_that_can_burn<R: PublisherRig>(rig: &R) -> Option
 }
 
 /// The scenarios of `scenarios` that `rig` skips for a capability it declares, each with the
-/// need its gate named. A skip is held to what the rig says about itself: the gate of a scenario
-/// that names a capability the rig has is wrong, and the kit that has it fails on the rig. Empty
-/// when every skip names a capability the rig declares absent.
+/// need its gate named. Each of the kit's own gates answers `lacks(rig, need)`, which computes
+/// `declares` from the same declarations, so for those gates this comparison cannot fail: a gate
+/// that names the wrong `Need` is found only by the run and skip sets the self-test pins. The
+/// comparison finds a mislabel on the rig's side: a skip that a gate supplied beside the kit's
+/// labels with a capability the rig declares. Empty when every skip names a capability the rig
+/// declares absent.
 pub fn skips_that_name_a_declared_capability<R: PublisherRig>(
     rig: &R,
     scenarios: &[Scenario<R>],

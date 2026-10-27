@@ -118,12 +118,8 @@ pub(super) fn a_grant_names_every_field_of_the_coordinates_it_covers<R: Publishe
                     |p| p.abort(&near_stage, &sought.coords),
                     &format!("an abort of a coordinate that differs in its {field} ({shape:?})"),
                 );
-                if !shape.group_addressed {
-                    // Staged state addressed by group is found only by an observe told the set:
-                    // the scenarios of that rule hold it, and this one does not depend on them.
-                    // A commit of what is still staged, next, finds out that it stayed.
-                    staged_held(observed(rig, &mut p, GrantPhase::Stage, &sought, at));
-                }
+                // A commit of what is still staged, next, finds out that it stayed.
+                staged_held(observed(rig, &mut p, GrantPhase::Stage, &sought, at));
             }
             commit(rig, &mut p, &sought);
             denied_unsent(

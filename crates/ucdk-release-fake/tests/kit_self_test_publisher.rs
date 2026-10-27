@@ -362,6 +362,7 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
                 ABORT,
                 SET_COMMIT,
                 LOST,
+                PHASE,
                 STAMP,
                 DECLARED_SET,
                 COMMIT_CARRIES,

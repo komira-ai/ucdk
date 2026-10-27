@@ -7,6 +7,7 @@
 
 use ucdk_release::codec::{GrantFault, GrantPhase};
 use ucdk_release::publish::{Held, Presence};
+use ucdk_release_fake::coordinate_key;
 use ucdk_release_proto::v1::{ArtifactType, Coordinate};
 use ucdk_release_seams::kit::{
     Arrangement, ChannelShape, Payload, PublisherRig, ReadStep, Sibling,
@@ -18,6 +19,7 @@ use ucdk_release_seams::{
 
 use super::publisher::{FakePublisherRig, Flawed};
 use super::publisher_lax::{Kind, Verb};
+use super::secret::texts;
 
 /// What a stub gets wrong.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +33,39 @@ pub enum Hole {
     RefusesOnlyWhatIsHeld(Kind, Verb),
     /// An observe told no set reads the group as well as the index, on a channel addressed by group.
     EmptySetReadsTheGroup,
+    /// `PublisherRig::sent` answers 0, whatever the publisher sent.
+    SentIsAlwaysZero,
+    /// `PublisherRig::sent` counts the requests the registry admitted and leaves out the ones it
+    /// refused.
+    SentCountsOnlyAdmitted,
+    /// On a channel addressed by group, an abort that is refused with `Denied` for the reason named
+    /// still drops the staged state it asked about.
+    RefusedAbortDropsStaged(Whose),
+}
+
+/// Why an abort is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Whose {
+    /// It carries no grant.
+    Stranger,
+    /// Its grant names some of the coordinates of the call and not all of them.
+    PartialGrant,
+}
+
+impl Whose {
+    /// Why an abort of `ks` with `g` is refused, when the grant is one of the two.
+    fn of(g: &Grant, ks: &[Coordinate]) -> Option<Self> {
+        if g.is_none() {
+            return Some(Self::Stranger);
+        }
+        let all = texts(g.secret());
+        let named = all.get(2..).unwrap_or_default();
+        let covered = ks
+            .iter()
+            .filter(|k| named.contains(&coordinate_key(k)))
+            .count();
+        (covered != 0 && covered != ks.len()).then_some(Self::PartialGrant)
+    }
 }
 
 /// Whether a channel of `shape` is of `kind`.
@@ -82,9 +117,20 @@ pub struct Holed {
     staged: Vec<Coordinate>,
     /// Where in the registry's log of reads the index read of each observe told no set is.
     without_a_set: Vec<usize>,
+    /// How many requests the registry logged and then refused.
+    refused_requests: usize,
 }
 
 impl Holed {
+    /// Counts a request that reached the registry and was refused, for the stub that counts only
+    /// the admitted ones.
+    fn tally<T>(&mut self, before: usize, result: Result<T, SeamError>) -> Result<T, SeamError> {
+        if Self::refused(&result) && self.base.sent() > before {
+            self.refused_requests += 1;
+        }
+        result
+    }
+
     fn is(&self, hole: Hole) -> bool {
         self.hole == hole
     }
@@ -120,6 +166,7 @@ impl PublisherRig for HoleRig {
             held: Vec::new(),
             staged: Vec::new(),
             without_a_set: Vec::new(),
+            refused_requests: 0,
         }
     }
 
@@ -145,7 +192,11 @@ impl PublisherRig for HoleRig {
     }
 
     fn sent(&self, p: &Holed) -> usize {
-        self.base.sent(&p.base)
+        match self.hole {
+            Hole::SentIsAlwaysZero => 0,
+            Hole::SentCountsOnlyAdmitted => self.base.sent(&p.base) - p.refused_requests,
+            _ => self.base.sent(&p.base),
+        }
     }
 
     fn reads(&self, p: &Holed) -> Vec<ReadStep> {
@@ -216,7 +267,9 @@ impl Publisher for Holed {
         set: &[StageItem<'_>],
     ) -> Result<Presence, SeamError> {
         let before = self.base.inner.read_log().len();
+        let sent = self.base.sent();
         let result = self.base.observe(g, k, set);
+        let result = self.tally(sent, result);
         if set.is_empty()
             && self.shape.group_addressed
             && self.is(Hole::EmptySetReadsTheGroup)
@@ -241,7 +294,9 @@ impl Publisher for Holed {
     }
 
     fn stage(&mut self, g: &Grant, items: &[StageItem<'_>]) -> Result<StageAnswer, SeamError> {
+        let sent = self.base.sent();
         let result = self.base.stage(g, items);
+        let result = self.tally(sent, result);
         if result == Ok(StageAnswer::Staged) {
             let ks: Vec<Coordinate> = items.iter().map(|i| i.coordinate.clone()).collect();
             self.held.extend(ks.iter().cloned());
@@ -251,11 +306,22 @@ impl Publisher for Holed {
     }
 
     fn abort(&mut self, g: &Grant, ks: &[Coordinate]) -> Result<(), SeamError> {
-        self.base.abort(g, ks)
+        let sent = self.base.sent();
+        let result = self.base.abort(g, ks);
+        if let Hole::RefusedAbortDropsStaged(whose) = self.hole
+            && self.shape.group_addressed
+            && Self::refused(&result)
+            && Whose::of(g, ks) == Some(whose)
+        {
+            self.base.inner.drop_staged(ks);
+        }
+        self.tally(sent, result)
     }
 
     fn commit(&mut self, g: &Grant, items: &[StageItem<'_>]) -> Result<CommitAnswer, SeamError> {
+        let sent = self.base.sent();
         let result = self.base.commit(g, items);
+        let result = self.tally(sent, result);
         if result == Ok(CommitAnswer::Committed) {
             self.held
                 .extend(items.iter().map(|item| item.coordinate.clone()));
@@ -264,11 +330,15 @@ impl Publisher for Holed {
     }
 
     fn yank(&mut self, g: &Grant, k: &Coordinate, reason: &str) -> Result<(), SeamError> {
-        self.base.yank(g, k, reason)
+        let sent = self.base.sent();
+        let result = self.base.yank(g, k, reason);
+        self.tally(sent, result)
     }
 
     fn fetch(&mut self, g: &Grant, k: &Coordinate) -> Result<Option<Vec<u8>>, SeamError> {
+        let sent = self.base.sent();
         let result = self.base.fetch(g, k);
+        let result = self.tally(sent, result);
         if Self::refused(&result) && self.answers_nothing(Verb::Fetch) && !self.held.contains(k) {
             return Ok(None);
         }
@@ -281,7 +351,9 @@ impl Publisher for Holed {
         ch: &str,
         name: &str,
     ) -> Result<Vec<(Coordinate, Held)>, SeamError> {
+        let sent = self.base.sent();
         let result = self.base.newest(g, ch, name);
+        let result = self.tally(sent, result);
         let holds = self.held.iter().any(|c| c.channel == ch && c.name == name);
         if Self::refused(&result) && self.answers_nothing(Verb::Newest) && !holds {
             return Ok(Vec::new());
@@ -290,7 +362,9 @@ impl Publisher for Holed {
     }
 
     fn list(&mut self, g: &Grant, scope: &ListScope) -> Result<Vec<Listed>, SeamError> {
+        let sent = self.base.sent();
         let result = self.base.list(g, scope);
+        let result = self.tally(sent, result);
         let holds = self
             .held
             .iter()

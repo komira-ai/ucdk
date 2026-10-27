@@ -296,9 +296,7 @@ fn a_stranger_writes_nothing<R: PublisherRig>(rig: &R, shape: &ChannelShape) {
         "the coordinate a stranger tried to stage or commit",
     );
     same(fetched(rig, &mut p, &new.coords[0]), None, "its bytes");
-    if p.stages() && !shape.group_addressed {
-        // Staged state addressed by group is found only by an observe told the set: the
-        // scenarios of that rule hold it, and this one does not depend on them.
+    if p.stages() {
         staged_held(observed(rig, &mut p, GrantPhase::Stage, &staged, 0));
     }
     present_held(seen(rig, &mut p, &held.coords[0]));
@@ -377,12 +375,8 @@ fn a_grant_covers_the_coordinates_it_names_and_no_others<R: PublisherRig>(
                 ),
             );
         }
-        if !shape.group_addressed {
-            // Staged state addressed by group is found only by an observe told the set: the
-            // scenarios of that rule hold it, and this one does not depend on them.
-            for at in 0..3 {
-                staged_held(observed(rig, &mut p, GrantPhase::Stage, &trio, at));
-            }
+        for at in 0..3 {
+            staged_held(observed(rig, &mut p, GrantPhase::Stage, &trio, at));
         }
     }
 }

@@ -12,8 +12,8 @@ use super::publisher_gates::skips_that_name_a_declared_capability;
 use super::publisher_list::publisher_scenarios;
 use super::publisher_rig::{
     Arrangement, ChannelShape, PublisherRig, Set, built, fetched, fetched_by_a_reader, looked,
-    observed, plain_shapes, present_held, publish, sha, siblings_beside, stage, staged_held,
-    stranger,
+    commit, observed, plain_shapes, present_held, publish, sha, siblings_beside, stage,
+    staged_held, stranger,
 };
 use super::{must, must_err, must_some, same};
 use crate::{
@@ -459,6 +459,7 @@ pub(super) fn the_declarations_of_a_rig_hold_of_what_it_builds<R: PublisherRig>(
     for shape in &shapes {
         built(rig, shape);
     }
+    sent_counts_every_request_the_publisher_makes(rig, &shapes);
     same(
         skips_that_name_a_declared_capability(rig, &publisher_scenarios::<R>()),
         Vec::new(),
@@ -483,6 +484,51 @@ pub(super) fn the_declarations_of_a_rig_hold_of_what_it_builds<R: PublisherRig>(
     members_depend_on_their_seed(rig);
     siblings_are_named(rig);
     siblings_differ_in_their_field(rig);
+}
+
+/// `PublisherRig::sent` counts the requests the publisher has made, taken before the registry
+/// admits one. The scenarios about a refused call only compare the count before and after, which a
+/// count that never moves passes, so it is asked to advance: across a good stage (on a channel that
+/// stages), across a good commit, and across a stranger's read of a private channel, which a
+/// conforming registry refuses, so that a count of the admitted requests alone is found as well.
+fn sent_counts_every_request_the_publisher_makes<R: PublisherRig>(
+    rig: &R,
+    shapes: &[ChannelShape],
+) {
+    let shape = must_some(
+        shapes.iter().find(|s| s.stages).or_else(|| shapes.first()),
+        "a shape the rig declares",
+    );
+    let mut p = built(rig, shape);
+    let set = Set::of(rig, &["s"]);
+    if p.stages() {
+        let before = rig.sent(&p);
+        stage(rig, &mut p, &set);
+        same(
+            rig.sent(&p) > before,
+            true,
+            &format!("the requests sent advance across a good stage ({shape:?})"),
+        );
+    }
+    let before = rig.sent(&p);
+    commit(rig, &mut p, &set);
+    same(
+        rig.sent(&p) > before,
+        true,
+        &format!("the requests sent advance across a good commit ({shape:?})"),
+    );
+    if let Some(shape) = shapes.iter().find(|s| s.private) {
+        let mut p = built(rig, shape);
+        let before = rig.sent(&p);
+        // The answer is not asked about: that a stranger is refused is held by the scenarios about
+        // reads. A conforming registry refuses it, and the request was sent all the same.
+        let _ = p.observe(&Grant::none(), &set.coords[0], &[]);
+        same(
+            rig.sent(&p) > before,
+            true,
+            &format!("the requests sent advance across a read the registry refuses ({shape:?})"),
+        );
+    }
 }
 
 /// The rig names a sibling the scenarios can publish beside the base: the checks about siblings

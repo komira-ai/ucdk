@@ -131,9 +131,10 @@ fn permanent_naming(error: &SeamError, path: &str) -> bool {
 }
 
 /// What a scenario needs of a rig and the rig can lack. A gate answers the need the rig does not
-/// meet, so that a skip can be held to the rig's own declarations: a skip that names a capability
-/// the rig declares is a defect of the gate, and the declarations scenario of the publisher kit
-/// fails it.
+/// meet, so that a skip can be compared with the rig's own declarations: the declarations scenario
+/// of the publisher kit fails a skip that names a capability the rig declares. The gates of the
+/// kit compute their answer from those declarations, so for them the comparison cannot fail; the
+/// run and skip sets the self-test pins are what hold which `Need` a gate names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Need {
     /// A channel of any shape.

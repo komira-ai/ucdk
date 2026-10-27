@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-//! The skips of the publisher kit are held to what a rig declares: a rig of one channel that
-//! stages and is addressed by group, private or public, runs every scenario but the ones whose
-//! needed capability it declares absent, and a gate that names a capability the rig declares is
-//! a defect that is found.
+//! The skips of the publisher kit: a rig of one channel that stages and is addressed by group,
+//! private or public, runs every scenario but the ones whose needed capability it declares absent,
+//! and these run and skip sets are what holds a gate of the kit to the `Need` it names. The
+//! comparison of a skip with the rig's declarations finds a skip whose `Need` the rig declares.
 
 mod rigs;
 
@@ -117,7 +117,9 @@ fn a_skip_that_names_a_capability_the_rig_declares_is_found() {
 }
 
 /// The gates of the kit name only what the rigs of the self-test declare absent: on a rig of every
-/// shape, of one shape, and of none.
+/// shape, of one shape, and of none. Each gate computes its answer from the declarations the
+/// comparison reads, so this holds by construction; the run and skip sets pinned above are what
+/// catch a gate that names the wrong `Need`.
 #[test]
 fn the_gates_of_the_kit_name_only_capabilities_a_rig_declares_absent() {
     let rigs = [

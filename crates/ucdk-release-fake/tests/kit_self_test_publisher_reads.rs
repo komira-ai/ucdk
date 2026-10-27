@@ -2,14 +2,16 @@
 //! The self-test of the publisher kit for what a read gives away and what a call sends: a stranger
 //! told the declared set who sees staged state, a private channel that refuses only what it holds
 //! and so tells a stranger which packages exist, an observe told no set that reads the group, a
-//! publisher that sends a call whose grant it can see is bad, a rig whose only channel that stages
+//! publisher that sends a call whose grant it can see is bad, a count of the requests sent that
+//! never moves or leaves out the refused ones, a channel addressed by group that drops staged state
+//! when it refuses an abort, a rig whose only channel that stages
 //! is private or addressed by group, a private channel that refuses the reads of a stage grant, and
 //! a registry that takes a sibling of a coordinate only together with it.
 
 mod rigs;
 
 use rigs::publisher::{FakePublisherRig, Flaw};
-use rigs::publisher_holes::{Hole, HoleRig, refusing_only_what_is_held};
+use rigs::publisher_holes::{Hole, HoleRig, Whose, refusing_only_what_is_held};
 use rigs::publisher_lax::{Defect, Kind};
 use rigs::publisher_more::{More, MoreRig};
 use rigs::publisher_names::*;
@@ -68,6 +70,20 @@ fn table() -> Vec<(Stub, &'static [&'static str])> {
             Stub::Flaw(Flaw::SendsRefused(Defect::OtherWritePhase)),
             &[PHASE],
         ),
+        // The count of requests sent is held to advance: a count that is always zero and a count
+        // of the admitted requests alone are failed by the scenario about what a rig declares.
+        (Stub::Hole(Hole::SentIsAlwaysZero), &[DECLARES]),
+        (Stub::Hole(Hole::SentCountsOnlyAdmitted), &[DECLARES]),
+        // A channel addressed by group that refuses an abort and drops the staged state all the
+        // same is told by an observe of that state, told the set, after the refusal.
+        (
+            Stub::Hole(Hole::RefusedAbortDropsStaged(Whose::Stranger)),
+            &[PHASE],
+        ),
+        (
+            Stub::Hole(Hole::RefusedAbortDropsStaged(Whose::PartialGrant)),
+            &[PHASE],
+        ),
     ];
     // A private channel that refuses only what it holds tells a stranger, and a bad grant, which
     // packages exist.
@@ -84,7 +100,7 @@ fn table() -> Vec<(Stub, &'static [&'static str])> {
 #[test]
 fn each_stub_of_what_a_read_gives_away_or_a_call_sends_fails_the_scenarios_that_hold_it() {
     let table = table();
-    assert_eq!(table.len(), 19, "the number of stubs of the table");
+    assert_eq!(table.len(), 23,"the number of stubs of the table");
     further_stubs_fail_exactly(
         "publisher",
         &names(&publisher_scenarios::<FakePublisherRig>()),
