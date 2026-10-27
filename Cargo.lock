@@ -766,6 +766,8 @@ dependencies = [
 name = "ucdk-release-seams"
 version = "0.0.0"
 dependencies = [
+ "sha2",
+ "ucdk-core",
  "ucdk-release",
  "ucdk-release-proto",
 ]
