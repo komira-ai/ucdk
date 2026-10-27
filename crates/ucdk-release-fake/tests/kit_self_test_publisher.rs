@@ -10,7 +10,10 @@ mod rigs;
 
 use rigs::publisher::{FakePublisherRig, Flaw};
 use rigs::publisher_flaw::{Bad, Call, Hook};
-use rigs::publisher_lax::{Defect, Verb, field_blind, on_shapes};
+use rigs::publisher_lax::{
+    Defect, Kind, Verb, coverage_of_two, field_blind, on_shapes, read_grant_writes,
+    read_grants_see_staged, writers_see_staged,
+};
 use rigs::publisher_more::{Field, More, MoreRig};
 use rigs::{further_stubs_fail_exactly, names};
 use ucdk_release_seams::kit::{ChannelShape, Report, publisher_scenarios, run_publisher_kit};
@@ -216,7 +219,13 @@ fn every_bad_grant_taken_by_a_call() -> Vec<(Call, Bad)> {
 /// channel: the one about the defect of the grant, or the one about a read grant for a read.
 fn held_by_the_lax_stub(stub: More) -> &'static [&'static str] {
     match stub {
-        More::GrantBlindToField(..) => &[PHASE],
+        More::GrantBlindToField(..) | More::CoverageOfTwo(..) => &[PHASE],
+        // A read grant taken for a write grant is refused on every shape the kit builds, and on a
+        // private channel the scenario about read grants holds it too.
+        More::ReadGrantWrites(Kind::Public, _) => &[PHASE],
+        More::ReadGrantWrites(..) => &[PHASE, READ_GRANT],
+        More::WriterSeesStaged(..) | More::ReadSeesStaged(_) => &[WRITER_READS],
+        More::ReadSeesOthersStaged => &[DUP_OTHER],
         More::BadGrantTakenOnShape(_, defect, verb) => match (verb, defect) {
             // A grant that names the base and not the coordinate read is also held by the
             // scenario about the fields of a coordinate, which reads the sibling of a base.
@@ -309,9 +318,18 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
             &[ANOTHER_GROUP],
         ),
         (Stub::Flaw(F::FailedGroupReadIsAbsent), &[FAILED_READ]),
-        (Stub::Flaw(F::TheDeclaredSetIsDropped), &[DECLARED_SET]),
-        (Stub::Flaw(F::AnEmptySetSeesStagedState), &[EMPTY_SET]),
-        (Stub::Flaw(F::AReadGrantMayWrite), &[READ_GRANT]),
+        // The scenario about what a grant reads of staged state runs on the channel addressed by
+        // group too: its observe that is told the set, and its observe with a read grant that is
+        // told none, are the two promises these stubs break.
+        (
+            Stub::Flaw(F::TheDeclaredSetIsDropped),
+            &[DECLARED_SET, WRITER_READS],
+        ),
+        (
+            Stub::Flaw(F::AnEmptySetSeesStagedState),
+            &[EMPTY_SET, WRITER_READS],
+        ),
+        (Stub::Flaw(F::AReadGrantMayWrite), &[PHASE, READ_GRANT]),
         (Stub::Flaw(F::ARacedCommitOverwrites), &[RACE]),
         (Stub::Flaw(F::TransientAfterCommitIsPermanent), &[TRANSIENT]),
         (Stub::Flaw(F::StageOverOtherBytesIsStaged), &[DUP_OTHER]),
@@ -532,7 +550,15 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
         ));
     }
     table.push((Stub::More(More::AbortTakesCommitGrant), &[PHASE]));
-    for stub in field_blind().into_iter().chain(on_shapes()) {
+    let lax = field_blind()
+        .into_iter()
+        .chain(on_shapes())
+        .chain(coverage_of_two())
+        .chain(read_grant_writes())
+        .chain(writers_see_staged())
+        .chain(read_grants_see_staged())
+        .chain([More::ReadSeesOthersStaged]);
+    for stub in lax {
         table.push((Stub::More(stub), held_by_the_lax_stub(stub)));
     }
     for field in Field::ALL {

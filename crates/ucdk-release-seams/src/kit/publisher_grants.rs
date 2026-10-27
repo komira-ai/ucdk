@@ -132,6 +132,8 @@ pub(super) enum Spoiled {
     Uncovered,
     /// It is the grant of the other write phase.
     OtherPhase,
+    /// It is a read grant, which is no grant of either write phase, and names every coordinate.
+    Read,
 }
 
 /// A stage, a commit, an abort and a yank (the first and the third are not asked of a channel
@@ -173,6 +175,11 @@ pub(super) fn every_shape_refuses_a_bad_write_grant<R: PublisherRig>(rig: &R, sp
             Spoiled::OtherPhase => (
                 rig.grant(&p, GrantPhase::Commit, &all.coords),
                 rig.grant(&p, GrantPhase::Stage, &all.coords),
+                GrantFault::Denied,
+            ),
+            Spoiled::Read => (
+                rig.grant(&p, GrantPhase::Read, &all.coords),
+                rig.grant(&p, GrantPhase::Read, &all.coords),
                 GrantFault::Denied,
             ),
         };

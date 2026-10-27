@@ -836,11 +836,10 @@ impl Publisher for Wrapped {
             && is_writer(g)
         {
             for (c, _) in self.staged.clone() {
-                if c.channel == ch
-                    && c.name == name
-                    && self.base.inner.is_staged(&c)
-                    && let Some(held) = self.base.held_now(&c)
-                {
+                if c.channel == ch && c.name == name && self.base.inner.is_staged(&c) {
+                    // A channel addressed by group shows no staged state to an observe that is
+                    // told no set: what the stub makes up has no digest.
+                    let held = self.base.held_now(&c).unwrap_or_default();
                     found.push((c, held));
                 }
             }
@@ -862,8 +861,8 @@ impl Publisher for Wrapped {
                 if c.channel == scope.channel
                     && c.name.starts_with(&scope.prefix)
                     && self.base.inner.is_staged(&c)
-                    && let Some(held) = self.base.held_now(&c)
                 {
+                    let held = self.base.held_now(&c).unwrap_or_default();
                     listed.push(Listed {
                         coordinate: c,
                         held,

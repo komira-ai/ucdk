@@ -306,42 +306,61 @@ pub(super) fn a_set_that_names_a_coordinate_twice_is_refused<R: PublisherRig>(ri
 }
 
 /// Staged state is no more readable to the one who staged it than to a stranger, but for an
-/// observe: a stage grant and a commit grant fetch nothing of it and find nothing of it with
-/// `newest` or `list`.
+/// observe, and an observe shows it only to a stage grant and a commit grant: a stage grant, a
+/// commit grant and a read grant fetch nothing of it and find nothing of it with `newest` or
+/// `list`, and a read grant observes it `Absent`, told the declared set or not. Held on every
+/// channel that stages: a public one, a private one and one addressed by group.
 pub(super) fn a_stage_or_commit_grant_reads_no_staged_state_but_through_observe<R: PublisherRig>(
     rig: &R,
 ) {
-    let mut p = staging_publisher(rig);
-    let set = Set::of(rig, &["a"]);
-    stage(rig, &mut p, &set);
-    let a = &set.coords[0];
-    let scope = ListScope {
-        channel: a.channel.clone(),
-        prefix: String::new(),
-    };
-    for phase in [GrantPhase::Stage, GrantPhase::Commit] {
-        let grant = rig.grant(&p, phase, &set.coords);
-        same(
-            must(p.fetch(&grant, a), "a fetch with a writer's grant"),
-            None,
-            &format!("the bytes of a staged coordinate fetched with a {phase:?} grant"),
-        );
-        same(
-            must(
-                p.newest(&grant, &a.channel, &a.name),
-                "a newest with a writer's grant",
-            )
-            .is_empty(),
-            true,
-            &format!("a staged coordinate found with newest and a {phase:?} grant"),
-        );
-        same(
-            must(p.list(&grant, &scope), "a list with a writer's grant").is_empty(),
-            true,
-            &format!("a staged coordinate listed with a {phase:?} grant"),
-        );
+    for shape in rig.shapes().into_iter().filter(|s| s.stages) {
+        let mut p = built(rig, &shape);
+        let set = Set::of(rig, &["a"]);
+        stage(rig, &mut p, &set);
+        let a = &set.coords[0];
+        let scope = ListScope {
+            channel: a.channel.clone(),
+            prefix: String::new(),
+        };
+        for phase in [GrantPhase::Stage, GrantPhase::Commit, GrantPhase::Read] {
+            let grant = rig.grant(&p, phase, &set.coords);
+            same(
+                must(p.fetch(&grant, a), "a fetch of a staged coordinate"),
+                None,
+                &format!(
+                    "the bytes of a staged coordinate fetched with a {phase:?} grant ({shape:?})"
+                ),
+            );
+            same(
+                must(
+                    p.newest(&grant, &a.channel, &a.name),
+                    "a newest of a staged coordinate",
+                )
+                .is_empty(),
+                true,
+                &format!("a staged coordinate found with newest and a {phase:?} grant ({shape:?})"),
+            );
+            same(
+                must(p.list(&grant, &scope), "a list of a staged coordinate").is_empty(),
+                true,
+                &format!("a staged coordinate listed with a {phase:?} grant ({shape:?})"),
+            );
+        }
+        let blobs = set.blobs();
+        let items = set.items(&blobs);
+        let read = rig.grant(&p, GrantPhase::Read, &set.coords);
+        for (told, set_told) in [("no set", &[][..]), ("the declared set", &items[..])] {
+            same(
+                must(
+                    p.observe(&read, a, set_told),
+                    "an observe of a staged coordinate with a read grant",
+                ),
+                Presence::Absent,
+                &format!("a staged coordinate observed with a read grant told {told} ({shape:?})"),
+            );
+        }
+        staged_held(observed(rig, &mut p, GrantPhase::Stage, &set, 0));
     }
-    staged_held(observed(rig, &mut p, GrantPhase::Stage, &set, 0));
 }
 
 /// On a channel that does not stage, a coordinate is created once too: a commit that lost a
