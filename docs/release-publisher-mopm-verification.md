@@ -1,6 +1,6 @@
 # The mopm release Publisher: the rig, the scenarios and the changes asked of mopm
 
-Status: design, revision 3. This is the second half of [release-publisher-mopm.md](release-publisher-mopm.md),
+Status: design, revision 4. This is the second half of [release-publisher-mopm.md](release-publisher-mopm.md),
 split out to keep both files under the project's size bound. It holds sections 11 to 13; section numbers
 are global, and sections 1 to 10 and 14 to 16 are in the first file. Nothing here is implemented yet.
 
@@ -91,13 +91,13 @@ only, so a TypeScript mopm cannot be a CI dependency. The rig is therefore:
   class once M13 exists; (3) a manually run job (not in CI, not in any pull request) executes the same kit
   script against a non-production mopm deployment with an identity provisioned for that purpose. It starts
   only from a protected environment by manual dispatch, never from a fork pull request, and checks before
-  any exchange that the registry's index configuration names a non-production stage (the index's `stage`
-  value is already the marker; the guard is ours, M5), refusing with nothing sent if it does not. `Config`
+  any exchange that the registry's index configuration, or its health route, names a non-production stage (both
+  carry `stage` already; the guard is ours, M5), refusing with nothing sent if it does not. `Config`
   has no default registry. No production registry is ever a rig target. The manual run's checklist confirms what the source says:
   that group create accepts a package the configured exchange created (owned by the CI identity); the uncached strongly
   consistent version record; `Present` at `committed` with repodata lagging; all members of a 20-member
   group reading `Present` in the same observe round; that `files[].sha256` equals the SHA-256 of the
-  downloaded bytes; that a burned member holds no files and a takedown keeps its digest; the group id derivation against the documented one (M1); yank retention at the
+  downloaded bytes; that a takedown keeps its digest; the group id derivation against the documented one (M1); yank retention at the
   channel host; and the real token exchange and its 10 minute life (section 9.3). The kit's new checks of
   `commit_unit()`, `conditional_put()` and `grant_limit()` (4g) and the rig assert the values section 4
   states.
@@ -200,7 +200,7 @@ Question 2 of section 16 asks to move a widened M3 ahead of M10, because four ki
 | Id | Verdict | What mopm does | Before it lands the publisher | After |
 |---|---|---|---|---|
 | M13 | take (stage 1) | keep 409 `group_conflict` (raised by create only) and add a stable `error.reason` from a closed documented enum; the reason on an overlap refusal names the actor's own group ids | maps every `group_conflict` to `Unknown`: the engine goes to its read-back (`Publish.polls`, default 3) and the action ends `INDETERMINATE`, **never `Duplicate`**; no message is parsed; a cap refusal ends the wave `REFUSED`, and the operator aborts the stale groups and reruns | maps by reason class (section 6 table) |
-| M14 | take (stage 1) | `POST /groups` takes `on_overlap: supersede` or `refuse`, default `supersede` (today's contract); the create response lists any superseded groups and gives a reason on a refusal | sends nothing new; the staged shape is not built, and in the one-call shape the engine's per-channel lease and the rule that exceptional runs share no members (section 9.1) keep overlap rare | sends `refuse` always and checks every create response for the superseded list or the new field; an old server that ignored the field is detected and refused (`Refused(Channel)`), never trusted; rows 32 and 34 in ST become met |
+| M14 | take (stage 1) | `POST /groups` takes `on_overlap: supersede` or `refuse`, default `supersede` (today's contract); the create response lists any superseded groups and gives a reason on a refusal | sends nothing new; the staged shape is not built, and the one-call shape is exposed to a same-actor supersede (section 6): the engine's per-channel lease and the rule that exceptional runs share no members (section 9.1) keep it rare | sends `refuse` always, in both shapes, and checks every create response for the superseded list or the new field; an old server that ignored the field is detected and refused (`Refused(Channel)`), never trusted; rows 32 and 34 in ST become met |
 | M1 | take, modified (stage 2) | `GET /groups/{id}` returns per-member `files [{subdir, filename, sha256, size, uploaded}]` (`uploaded` only while open), and the group id derivation (actor plus declared set) becomes a documented, test-pinned interface; the publisher recomputes the id and reads it (404 is no group). Never create to inspect: create on an ended group reopens it and charges the allowance | builds the one-call shape only; no staged shape, no local record of group ids | builds the staged shape; `observe` with a declared set, `stage`, `abort` use the group read |
 | M6 | take (stage 2) | `getVersion` emits `group_id` when the version came from a group | decides whose bytes a version holds by digest alone (the seam's rule); the version record cannot name its group | may tell its own group from a foreign one, and tell a burn from a takedown by the group's status |
 | M8 | take (stage 2) | `manifest_sha256` optional on commit: present is today's check, absent is server computed | extracts it client side from the archive in one small module; an invalid archive is `Permanent` before any I/O | stops sending it and **deletes the module**; an invalid archive is then a `rejected` group, not a pre-check, so no second path survives |
@@ -208,10 +208,10 @@ Question 2 of section 16 asks to move a widened M3 ahead of M10, because four ki
 | M3 | take, modified (stage 4) | one typed immutable field `source_commit` (a git sha) on commit, returned by `getVersion`; no free-form map | stores no stamp: `observe` reports `stamp: None` (truthful, and the engine already reads it as unstamped, which makes a supersede decision indeterminate); refuses an item whose `Held` carries the exceptional mark (`Refused(Channel)`, nothing sent) rather than record it as ordinary | stores and returns the source commit. The build number and the exceptional mark still have no home: rows 16, 21, 22 stay GAP (question 2) |
 | M2 | take (no deploy) | client side only: on a 401 `token_expired` re-request the identity JWT and exchange again; no longer token, no refresh route | does not rely on it; the call is bounded below the token and lease (section 9.3) | the grant source may re-exchange; using it inside a call needs a seam addition (question 3) |
 | M9 | take | group scenarios and goldens in the existing wire harness, not a separate transcript system | hand-written transcripts plus the manual run | goldens generate guard 2 of section 11 |
-| M5 | take as docs (no config change) | none: the index config's `stage` value is already the non-production marker | the manual run reads it and refuses a registry whose stage is not non-production (ours to enforce) | same |
+| M5 | take as docs (no config change) | none: `index/config.json` (`stage`, `api_url`, `channel_url`, `read_only`) and `GET /api/v1/health` (`stage`, `read_only`, `version`, `commit`) already carry the stage; nothing says whether group publish is enabled for an actor, and the 404 message covers that | the manual run reads the stage and refuses a registry whose stage is not non-production (ours to enforce) | same |
 | M11 | docs only | state that `getVersion` is `no-store`, and the token forms and `ci_owner` of group create | proven by the manual run at the channel host | the API description says it |
 | M7 | already exists | one anonymous GET of the sparse index gives every file digest | `newest` uses it (section 4), falling back to the record for a version the index lags on | same |
-| M15 | already exists | CI publishers are configured per deployment, and group create is allowed per actor; the identity needs a row in the deployment's list and an entry in the groups allow-list, which the operators add on request | both must be requested before the manual run; rig step 1 documents them | same |
+| M15 | already exists | CI publishers are configured per deployment (beta, or prod with `acts_for`; gamma has none), and group create is allowed per actor, not per stage; the identity needs a row in the deployment's list and an entry in the groups allow-list, which the operators add on request | both must be requested before the manual run; rig step 1 documents them | same |
 | M4 | rejected | none; the cost of a conflict mid-reservation is documented instead: a number taken after the preflight aborts the group and the next identical create is charged against the daily file allowance | states that cost (section 3) | same |
 | M12 | rejected | none; on `version_exists` the public `getVersion` `files[]` set is the comparison | compares that set (section 5.1) | same |
 | GAP-S | rejected | none; the publisher decides the full platform set before the first group | refuses a later platform (`Refused(Channel)`), and a multi-platform release needs the engine and machine change of section 5.1 | same |
