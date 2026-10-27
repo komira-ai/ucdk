@@ -3,7 +3,43 @@
 
 use ucdk_release::codec::GrantFault;
 use ucdk_release_proto::v1::Reason;
-use ucdk_release_seams::{Backoff, Grant, SeamError};
+use ucdk_release_seams::{Backoff, Grant, ObserveFailure, PAUSE_TICK_MS, SeamError};
+
+#[test]
+fn a_failed_observe_that_promises_no_effect_by_refusal_is_refused_not_indeterminate() {
+    // `Refused` and `Permanent` say nothing happened and the same call fails again, so the action
+    // is `REFUSED` with `CHANNEL` and nothing is retried. Every other failure leaves the registry
+    // unread and is `INDETERMINATE`.
+    let want = [
+        ObserveFailure::Refused(Reason::Channel),
+        ObserveFailure::Refused(Reason::Channel),
+        ObserveFailure::Indeterminate,
+        ObserveFailure::Indeterminate,
+        ObserveFailure::Indeterminate,
+        ObserveFailure::Indeterminate,
+        ObserveFailure::Indeterminate,
+    ];
+    let got: Vec<ObserveFailure> = every_variant()
+        .iter()
+        .map(SeamError::observe_failure)
+        .collect();
+    assert_eq!(got, want);
+    // The reason of a `Refused` is not the one the registry gave: the observe itself is refused.
+    assert_eq!(
+        SeamError::Refused(Reason::Credential).observe_failure(),
+        ObserveFailure::Refused(Reason::Channel)
+    );
+}
+
+#[test]
+fn a_pause_tick_is_one_second_and_a_registry_wait_in_seconds_is_the_same_count_of_ticks() {
+    // The one definition of the tick: a publisher that is told to wait `n` seconds states
+    // `n * 1000 / PAUSE_TICK_MS` ticks, so changing the constant changes every wait with it.
+    assert_eq!(PAUSE_TICK_MS, 1000);
+    let seconds = 7;
+    let ticks = seconds * 1000 / PAUSE_TICK_MS;
+    assert_eq!(Backoff { ticks }, Backoff { ticks: 7 });
+}
 
 fn every_variant() -> Vec<SeamError> {
     vec![

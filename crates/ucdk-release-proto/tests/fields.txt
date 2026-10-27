@@ -127,6 +127,7 @@ ucdk.release.v1.Reason MEMBER_VERSION = 31
 ucdk.release.v1.Reason NOT_ON_MAINLINE = 15
 ucdk.release.v1.Reason PIN_MISMATCH = 26
 ucdk.release.v1.Reason PLATFORM_MISMATCH = 32
+ucdk.release.v1.Reason PUBLISH_BURNED = 36
 ucdk.release.v1.Reason PUBLISH_DIFFERENT_BYTES = 11
 ucdk.release.v1.Reason PUBLISH_READ_BACK = 13
 ucdk.release.v1.Reason PUBLISH_STAGE = 34

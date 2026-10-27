@@ -8,7 +8,8 @@ use std::fmt;
 use ucdk_release::codec::GrantFault;
 use ucdk_release_proto::v1::Reason;
 
-/// How long a refusal asks the caller to wait, in ticks of [`crate::Pause`].
+/// How long a refusal asks the caller to wait, in ticks of [`crate::Pause`]: `ticks` of
+/// [`crate::PAUSE_TICK_MS`] milliseconds each.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Backoff {
     pub ticks: u32,
@@ -32,7 +33,34 @@ pub enum SeamError {
     GrantRefused(GrantFault),
 }
 
+/// What a failed `observe` makes of the action that called it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObserveFailure {
+    /// The action is `REFUSED` with this reason and nothing is retried.
+    Refused(Reason),
+    /// The action is `INDETERMINATE`: the registry could not be read, and a later run may.
+    Indeterminate,
+}
+
 impl SeamError {
+    /// What a failed `observe` is. An observe that answers `Refused` or `Permanent` says that
+    /// nothing happened and that the same call fails again (a coordinate the channel cannot
+    /// hold, a set that does not contain it), so it is not a retry class: the action is
+    /// `REFUSED` with `CHANNEL`. Every other failure leaves the registry unread, and the action
+    /// is `INDETERMINATE`.
+    pub fn observe_failure(&self) -> ObserveFailure {
+        match self {
+            SeamError::Refused(_) | SeamError::Permanent(_) => {
+                ObserveFailure::Refused(Reason::Channel)
+            }
+            SeamError::Transient(_)
+            | SeamError::RateLimited(_)
+            | SeamError::InFlight(_)
+            | SeamError::Unknown(_)
+            | SeamError::GrantRefused(_) => ObserveFailure::Indeterminate,
+        }
+    }
+
     /// Whether the variant promises that no external effect landed.
     pub fn promises_no_effect(&self) -> bool {
         matches!(

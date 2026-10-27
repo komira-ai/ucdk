@@ -70,6 +70,33 @@ fn table_over_presence_digest_yank() {
 }
 
 #[test]
+fn a_burned_coordinate_is_refused_as_burned_and_is_not_absent() {
+    // A burned number holds no bytes, so no digest of ours can match it. It is refused with its
+    // own reason: not `Put` (the number can never be used), not a yank (nothing was published),
+    // and not the "no digest exposed" refusal.
+    assert_eq!(
+        decide_publish(OURS, &Presence::Burned),
+        Refused(Reason::PublishBurned)
+    );
+    assert_ne!(
+        decide_publish(OURS, &Presence::Burned),
+        decide_publish(OURS, &Presence::Absent)
+    );
+    assert_ne!(
+        decide_publish(OURS, &Presence::Burned),
+        Refused(Reason::PublishYanked)
+    );
+    // The ledger's record changes nothing about it, a confirmed publication included.
+    for record in Stand::ALL {
+        assert_eq!(
+            decide_publish_recorded(OURS, record, &Presence::Burned),
+            Refused(Reason::PublishBurned),
+            "{record:?}"
+        );
+    }
+}
+
+#[test]
 fn the_comparison_is_byte_for_byte() {
     // No case folding and no prefix: a digest that differs in any byte is another digest, for a
     // published coordinate and for a staged one.
@@ -137,6 +164,7 @@ fn the_decision_over_every_record_state_and_report() {
             Presence::Staged(held(digest)),
             Presence::Present(held(digest)),
             Presence::Yanked(held(digest)),
+            Presence::Burned,
         ]
     };
     assert_eq!(Stand::ALL.len(), 4);
