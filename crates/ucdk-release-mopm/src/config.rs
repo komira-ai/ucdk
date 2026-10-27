@@ -195,11 +195,13 @@ pub struct Config {
     /// How long a `commit` call waits for the group to become visible. Zero returns as soon as
     /// the commit is accepted.
     pub poll_deadline: Duration,
-    /// What an `abort` call may spend: the `DELETE` and the status read after it.
+    /// What an `abort` call may spend: the `DELETE` and the status read after it. Positive: a
+    /// zero budget leaves the call no time at all.
     pub abort_timeout: Duration,
-    /// The exchange-to-call gap and one connect timeout.
+    /// The exchange-to-call gap and one connect timeout. Positive.
     pub margin: Duration,
     /// The longest `Retry-After` the publisher turns into a wait; a longer one is a refusal.
+    /// Zero is allowed and refuses every rate limit that asks to wait.
     pub retry_after_ceiling: Duration,
     /// How often the identical create is repeated while the group is still `reserving`.
     pub reserving_repeats: u32,
@@ -252,6 +254,8 @@ impl Config {
             ("poll_interval", self.poll_interval),
             ("upload_budget", self.upload_budget),
             ("commit_request_timeout", self.commit_request_timeout),
+            ("abort_timeout", self.abort_timeout),
+            ("margin", self.margin),
         ];
         if let Some((name, _)) = positive.into_iter().find(|(_, d)| d.is_zero()) {
             return Err(ConfigError::ZeroDuration(name));
