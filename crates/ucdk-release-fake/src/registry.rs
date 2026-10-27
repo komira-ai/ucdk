@@ -320,7 +320,8 @@ impl FakeRegistry {
 
     /// An observe that carries a grant sees the staged state of another writer, with that
     /// writer's digest (and, on a registry that addresses staged state by group, only when it
-    /// is told a set).
+    /// is told a set). A read grant sees another writer's staged state but not its own, as the
+    /// design intends: only the stage or commit grant of the action that staged sees its own.
     pub fn others_staged_visible(&mut self) {
         self.faults.others_staged_visible = true;
     }

@@ -428,7 +428,12 @@ fn is_production_source(path: &str) -> bool {
 /// `#[cfg(test)]` line that gates a module of one (the unit-test module, last in its file),
 /// and comment lines are not production code. A `#[cfg(test)]` on any other item hides
 /// nothing after it.
+///
+/// Its limits: it scans only `crates/*/src` (not `xtask`, `sdk` or any other directory), and it
+/// matches the literal text of the two paths, so a read through a renamed import
+/// (`use std::time::Instant as Tick`) is not seen. It is a guard against the plain mistake, not a proof.
 pub fn check_wall_clock(files: &[(String, String)]) -> Vec<Finding> {
+    // The limits are the ones in the doc comment: `crates/*/src` only, and the literal paths.
     files
         .iter()
         .filter(|(path, _)| is_production_source(path) && path != CLOCK_HOME)

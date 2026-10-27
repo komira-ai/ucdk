@@ -115,6 +115,10 @@ impl ProcessRunner for FakeProcessRunner {
             cwd: spec.cwd.to_owned(),
         });
         let n = self.calls.len();
+        // A call nobody scripted fails the test, whether or not its program is installed.
+        let Some((_, reply)) = self.scripts.iter().find(|(c, _)| c == spec.command) else {
+            panic!("a call nobody scripted: {:?}", spec.command);
+        };
         if self.unstartable || !self.startable(spec.command) {
             return Err(SeamError::Unknown(
                 "the program cannot be started".to_owned(),
@@ -140,9 +144,6 @@ impl ProcessRunner for FakeProcessRunner {
                 stderr_tail: Vec::new(),
             });
         }
-        let Some((_, reply)) = self.scripts.iter().find(|(c, _)| c == spec.command) else {
-            panic!("a call nobody scripted: {:?}", spec.command);
-        };
         let keep = reply.stdout.len().saturating_sub(spec.stdout_limit);
         Ok(ProcessResult {
             stdout: reply.stdout[keep..].to_vec(),

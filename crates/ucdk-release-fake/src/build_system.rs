@@ -41,6 +41,8 @@ pub struct FakeBuildSystem {
     calls: u32,
     commands: Vec<Command>,
     outputs: BTreeMap<String, Vec<u8>>,
+    /// The paths in the order they were first built.
+    built: Vec<String>,
 }
 
 /// The directory and the file name an output of `label` is made at.
@@ -76,6 +78,7 @@ impl FakeBuildSystem {
             calls: 0,
             commands: Vec::new(),
             outputs: BTreeMap::new(),
+            built: Vec::new(),
         }
     }
 
@@ -96,12 +99,12 @@ impl FakeBuildSystem {
         self.faults.unstartable = true;
     }
 
-    /// The build of `label` lists no output.
+    /// The build of `label` lists no output; the seam refuses it as `Refused(BUILD_OUTPUT)`.
     pub fn no_output(&mut self, label: &str) {
         self.faults.no_output.insert(label.to_owned());
     }
 
-    /// The build of `label` lists two outputs.
+    /// The build of `label` lists two outputs; the seam refuses it as `Refused(BUILD_OUTPUT)`.
     pub fn two_outputs(&mut self, label: &str) {
         self.faults.two_outputs.insert(label.to_owned());
     }
@@ -222,8 +225,12 @@ impl BuildSystem for FakeBuildSystem {
         if self.faults.symlink_in_output.contains(label) {
             return Err(SeamError::Refused(Reason::BuildOutput));
         }
+        // The earliest built, not the smallest path.
         if self.faults.mutate_earlier_output
-            && let Some(first) = self.outputs.values_mut().next()
+            && let Some(first) = self
+                .built
+                .first()
+                .and_then(|path| self.outputs.get_mut(path))
         {
             first.extend_from_slice(b"mutated");
         }
@@ -242,18 +249,19 @@ impl BuildSystem for FakeBuildSystem {
                 shape,
             }
         };
-        let mut listed = Vec::new();
-        if !self.faults.no_output.contains(label) {
-            listed.push(located(""));
+        // The seam refuses a listing that is not exactly one output.
+        if self.faults.no_output.contains(label) || self.faults.two_outputs.contains(label) {
+            return Err(SeamError::Refused(Reason::BuildOutput));
         }
-        if self.faults.two_outputs.contains(label) {
-            listed.push(located("-2"));
+        let out = located("");
+        if self
+            .outputs
+            .insert(out.path.clone(), render(label, &command))
+            .is_none()
+        {
+            self.built.push(out.path.clone());
         }
-        for out in &listed {
-            self.outputs
-                .insert(out.path.clone(), render(label, &command));
-        }
-        Ok(listed)
+        Ok(vec![out])
     }
 
     fn test(

@@ -240,33 +240,61 @@ fn a_build_that_fails_dies_or_cannot_start() {
     assert_eq!(fake.commands().len(), 4);
 }
 
+/// Renamed from `the_listing_shows_none_two_or_a_wrong_shape_of_output`: the seam refuses a
+/// listing of none or of two outputs, so the test now expects the refusal. A shape the artifact
+/// does not want is not the seam's to refuse (it does not know the type), so a shape is still
+/// reported.
 #[test]
-fn the_listing_shows_none_two_or_a_wrong_shape_of_output() {
+fn the_build_system_refuses_none_or_two_outputs_and_reports_the_shape_of_one() {
     let (system, stamp) = (system(), stamp("1"));
     let (_, mut fake, hb) = fake();
     fake.no_output("//a:none");
     fake.two_outputs("//a:two");
+    fake.no_output("//a:both");
+    fake.two_outputs("//a:both");
     fake.wrong_shape("//a:flipped");
     fake.directory_output("//a:image");
-    fake.directory_output("//a:both");
-    fake.wrong_shape("//a:both");
+    fake.directory_output("//a:twice");
+    fake.wrong_shape("//a:twice");
     let mut listing = |label: &str| {
         let target = target(label, &[]);
         fake.build(&invocation(&system, &target, &stamp, Verb::Build), &hb)
-            .unwrap()
     };
-    assert!(listing("//a:none").is_empty());
-    let two = listing("//a:two");
-    assert_eq!(two.len(), 2);
-    assert_ne!(two[0].path, two[1].path);
-    assert_eq!(listing("//a:flipped")[0].shape, Shape::Directory);
-    assert_eq!(listing("//a:image")[0].shape, Shape::Directory);
-    assert_eq!(listing("//a:plain")[0].shape, Shape::File);
+    for label in ["//a:none", "//a:two", "//a:both"] {
+        assert_eq!(
+            listing(label),
+            Err(SeamError::Refused(Reason::BuildOutput)),
+            "{label}"
+        );
+    }
+    let one = |listed: Vec<Located>| {
+        assert_eq!(listed.len(), 1);
+        listed.into_iter().next().unwrap()
+    };
+    assert_eq!(one(listing("//a:flipped").unwrap()).shape, Shape::Directory);
+    assert_eq!(one(listing("//a:image").unwrap()).shape, Shape::Directory);
+    assert_eq!(one(listing("//a:plain").unwrap()).shape, Shape::File);
     // A directory wrong-shaped twice is the shape it should be.
-    assert_eq!(listing("//a:both")[0].shape, Shape::File);
-    let plain = listing("//a:plain").remove(0);
+    assert_eq!(one(listing("//a:twice").unwrap()).shape, Shape::File);
+    let plain = one(listing("//a:plain").unwrap());
     assert_eq!(plain.label, "//a:plain");
     assert_eq!(plain.path, "/out/a_plain/plain");
+}
+
+#[test]
+fn an_environment_value_changes_the_bytes() {
+    let built = |value: &str| {
+        let (_, mut fake, hb) = fake();
+        let (system, stamp) = (system(), stamp("1.2.3"));
+        let mut target = target(LABEL, &[]);
+        target.env = BTreeMap::from([("MODE".to_owned(), value.to_owned())]);
+        let inv = invocation(&system, &target, &stamp, Verb::Build);
+        let located = fake.build(&inv, &hb).unwrap();
+        copied(&mut fake, &located[0]).remove(0).1
+    };
+    // Only one environment value differs between these builds.
+    assert_eq!(built("release"), built("release"));
+    assert_ne!(built("release"), built("debug"));
 }
 
 #[test]
@@ -330,4 +358,24 @@ fn a_later_build_changes_an_earlier_members_tree() {
     let after = copied(&mut fake, &first).remove(0).1;
     assert_ne!(before, after);
     assert!(after.ends_with(b"mutated"));
+}
+
+#[test]
+fn a_later_build_changes_the_earliest_built_output_not_the_smallest_path() {
+    let (_, mut fake, hb) = fake();
+    fake.mutate_earlier_output();
+    // Built in the order z, a, b: the smallest path is a, the earliest built is z.
+    let z = build_one(&mut fake, &hb, "//a:z");
+    let a = build_one(&mut fake, &hb, "//a:a");
+    let a_before = copied(&mut fake, &a).remove(0).1;
+    let b = build_one(&mut fake, &hb, "//a:b");
+    // The build of a changed z once, and the build of b changed z again; neither touched a.
+    assert!(
+        copied(&mut fake, &z)
+            .remove(0)
+            .1
+            .ends_with(b"mutatedmutated")
+    );
+    assert_eq!(copied(&mut fake, &a).remove(0).1, a_before);
+    assert!(!copied(&mut fake, &b).remove(0).1.ends_with(b"mutated"));
 }

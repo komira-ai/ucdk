@@ -48,8 +48,10 @@ pub trait BuildSystem: Send {
 
     /// Runs the build, then lists its outputs with the build system's own query. A nonzero
     /// exit is `Permanent` with the tail of the output; a binary that cannot start is
-    /// `Unknown`; a symlink in an output is `Refused(BUILD_OUTPUT)`. The engine holds the list
-    /// to exactly one output.
+    /// `Unknown`; a symlink in an output is `Refused(BUILD_OUTPUT)`. A target has exactly one
+    /// output: the seam refuses a listing of none, or of two or more, as
+    /// `Refused(BUILD_OUTPUT)`, so a successful build returns exactly one `Located`. The shape
+    /// the artifact's type wants is the engine's to check against `Located::shape`.
     fn build(
         &mut self,
         inv: &Invocation<'_>,

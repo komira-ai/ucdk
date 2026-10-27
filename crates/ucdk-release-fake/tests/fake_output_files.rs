@@ -96,6 +96,50 @@ fn a_missing_path_and_an_unreadable_file_are_named_errors() {
 }
 
 #[test]
+fn a_missing_path_is_not_listed_by_its_parent_nor_anything_below_it() {
+    let mut files = tree();
+    files.missing("/out/pkg/a.json");
+    files.missing("/out/pkg/a");
+    let listed = files.list("/out/pkg").unwrap();
+    // What stat says is absent is not listed, and neither is anything under an absent directory.
+    assert_eq!(
+        listed,
+        [
+            entry("b.txt", FileKind::File),
+            entry("link", FileKind::Symlink),
+            entry("linked", FileKind::File),
+        ]
+    );
+    for entry in &listed {
+        let path = format!("/out/pkg/{}", entry.rel);
+        assert_eq!(files.stat(&path), Ok(Some(entry.kind)), "{path}");
+    }
+    for gone in ["/out/pkg/a.json", "/out/pkg/a", "/out/pkg/a/z.txt"] {
+        assert_eq!(files.stat(gone), Ok(None), "{gone}");
+    }
+}
+
+#[test]
+fn an_unreadable_path_is_still_listed_by_its_parent() {
+    // The design makes `stat`, `list` and `read` of the path itself fail with `Unknown`. The
+    // listing of its parent does not read the entry, so it still names it, as a directory does.
+    let mut files = tree();
+    files.unreadable("/out/pkg/b.txt");
+    files.unreadable("/out/pkg/a");
+    let listed = files.list("/out/pkg").unwrap();
+    assert!(listed.contains(&entry("b.txt", FileKind::File)));
+    assert!(listed.contains(&entry("a", FileKind::Directory)));
+    assert!(matches!(
+        files.stat("/out/pkg/b.txt"),
+        Err(SeamError::Unknown(_))
+    ));
+    assert!(matches!(
+        files.list("/out/pkg/a"),
+        Err(SeamError::Unknown(_))
+    ));
+}
+
+#[test]
 fn the_tree_it_was_given_is_equal_after_every_call() {
     let mut files = tree();
     let before = files.snapshot();

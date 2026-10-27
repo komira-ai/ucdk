@@ -67,6 +67,13 @@ fn an_unscripted_call_fails_the_test() {
 }
 
 #[test]
+#[should_panic(expected = "a call nobody scripted")]
+fn an_unscripted_call_fails_the_test_even_when_its_program_was_never_registered() {
+    let (_, mut runner, hb) = setup();
+    run(&mut runner, &command("/never/registered", None), &hb, 100).unwrap();
+}
+
+#[test]
 fn a_script_matches_the_whole_argument_vector_and_environment() {
     let (_, mut runner, hb) = setup();
     runner.program("/opt/bin/buck2");
@@ -90,17 +97,21 @@ fn a_bare_name_is_resolved_on_the_scripted_childs_path() {
     // The same name with a PATH that does not hold it, or with none at all, is not startable,
     // wherever the runner's own search would have found it.
     for cmd in [command("buck2", Some("/usr/bin")), command("buck2", None)] {
+        runner.script(cmd.clone(), Exit::Code(0), b"", b"");
         assert!(matches!(
             run(&mut runner, &cmd, &hb, 1),
             Err(SeamError::Unknown(_))
         ));
     }
     // An absolute name nobody installed is unstartable too, and so is an empty vector.
-    assert!(run(&mut runner, &command("/nowhere/buck2", None), &hb, 1).is_err());
+    let nowhere = command("/nowhere/buck2", None);
+    runner.script(nowhere.clone(), Exit::Code(0), b"", b"");
+    assert!(run(&mut runner, &nowhere, &hb, 1).is_err());
     let empty = Command {
         argv: Vec::new(),
         env: Vec::new(),
     };
+    runner.script(empty.clone(), Exit::Code(0), b"", b"");
     assert!(run(&mut runner, &empty, &hb, 1).is_err());
 }
 

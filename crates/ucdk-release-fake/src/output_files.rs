@@ -58,12 +58,14 @@ impl FakeOutputFiles {
 
     // ---- faults ----
 
-    /// `stat` answers `None` at `path`, and `list` and `read` answer `Permanent`.
+    /// `stat` answers `None` at `path`, and `list` and `read` answer `Permanent`. The listing of
+    /// its parent does not name it, and nothing below it exists either.
     pub fn missing(&mut self, path: &str) {
         self.missing.insert(path.to_owned());
     }
 
-    /// A `stat`, `list` or `read` of `path` fails with `Unknown`.
+    /// A `stat`, `list` or `read` of `path` fails with `Unknown`. The listing of its parent
+    /// does not read the entry, so it still names it.
     pub fn unreadable(&mut self, path: &str) {
         self.unreadable.insert(path.to_owned());
     }
@@ -105,8 +107,15 @@ impl FakeOutputFiles {
         Ok(())
     }
 
+    /// The node at `path`, unless the path or a directory above it was made missing.
     fn node(&self, path: &str) -> Option<&Node> {
-        self.tree.get(path).filter(|_| !self.missing.contains(path))
+        let gone = self.missing.iter().any(|m| {
+            path == m
+                || path
+                    .strip_prefix(m.as_str())
+                    .is_some_and(|r| r.starts_with('/'))
+        });
+        self.tree.get(path).filter(|_| !gone)
     }
 }
 
@@ -137,6 +146,10 @@ impl OutputFiles for FakeOutputFiles {
             let Some(rel) = full.strip_prefix(&below) else {
                 break;
             };
+            // What stat says is absent is not listed.
+            if self.node(full).is_none() {
+                continue;
+            }
             // A symlink is an entry and is never descended: what the flat tree holds under one
             // is not listed.
             if linked.iter().any(|link| rel.starts_with(link)) {
