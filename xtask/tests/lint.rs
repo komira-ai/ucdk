@@ -75,6 +75,18 @@ fn wall_clock_is_read_only_in_system_clock() {
         ),
     ]);
     assert!(allowed.is_empty(), "{allowed:?}");
+    // A `#[cfg(test)]` on an item that is not a module hides no production code below it.
+    let gated_item = rules(&[source(
+        "crates/ucdk-release/src/gated.rs",
+        &format!("#[cfg(test)]\nuse std::fmt;\nfn f() {{\n{read}}}\n"),
+    )]);
+    assert_eq!(
+        gated_item,
+        [(
+            "crates/ucdk-release/src/gated.rs:4".to_owned(),
+            "wall-clock"
+        )]
+    );
     // The repository itself holds the rule.
     let tree = read_tree(&xtask::workspace_root()).unwrap();
     assert_eq!(check_wall_clock(&tree), []);

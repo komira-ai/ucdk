@@ -425,15 +425,24 @@ fn is_production_source(path: &str) -> bool {
 /// The wall-clock rule: `SystemTime::now` and `Instant::now` are read in production code only
 /// in [`CLOCK_HOME`], so time reaches every other crate through the `Clock` it is given and a
 /// test moves it by hand. Test code, which is a file outside `src` or what follows a
-/// `#[cfg(test)]` line of one, and comment lines are not production code.
+/// `#[cfg(test)]` line that gates a module of one (the unit-test module, last in its file),
+/// and comment lines are not production code. A `#[cfg(test)]` on any other item hides
+/// nothing after it.
 pub fn check_wall_clock(files: &[(String, String)]) -> Vec<Finding> {
     files
         .iter()
         .filter(|(path, _)| is_production_source(path) && path != CLOCK_HOME)
         .flat_map(|(path, text)| {
-            text.lines()
+            let lines: Vec<&str> = text.lines().collect();
+            let test_module_at = lines.windows(2).position(|w| {
+                w[0].trim() == "#[cfg(test)]"
+                    && (w[1].trim_start().starts_with("mod ")
+                        || w[1].trim_start().starts_with("pub mod "))
+            });
+            lines
+                .into_iter()
                 .enumerate()
-                .take_while(|(_, line)| line.trim() != "#[cfg(test)]")
+                .take(test_module_at.unwrap_or(usize::MAX))
                 .filter(|(_, line)| {
                     !line.trim_start().starts_with("//")
                         && CLOCK_READS.iter().any(|read| line.contains(read))

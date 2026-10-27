@@ -432,6 +432,16 @@ impl FakeRegistry {
         }
     }
 
+    /// Whether `g` is a grant of an action that writes the staged state (the stage or the commit
+    /// scope). A read grant made no staged state and does not see it.
+    fn is_writer_grant(&self, g: &Grant) -> bool {
+        if g.is_none() {
+            return false;
+        }
+        let scope = decode(g.secret()).scope;
+        scope == self.scopes.stage || scope == self.scopes.commit
+    }
+
     fn held_of(&self, stored: &Stored) -> Held {
         Held {
             digest: if self.faults.no_digest_exposed {
@@ -513,14 +523,15 @@ impl Publisher for FakeRegistry {
                 Presence::Present(held)
             });
         }
-        // Staged state is visible only to a grant, and, when it is addressed by group, only to
-        // an observe that is told the set it was staged under.
+        // Staged state is visible only to a stage or commit grant (a read grant made none), and,
+        // when it is addressed by group, only to an observe that is told the set it was staged
+        // under.
         let group_ok = |s: &Staged| !self.group_addressed || (by_group && s.group == group_of(set));
         let other = self.others_staged.get(&key).filter(|_| {
             self.faults.others_staged_visible && !g.is_none() && (!self.group_addressed || by_group)
         });
         Ok(match (self.staged.get(&key), other) {
-            (Some(s), _) if !g.is_none() && group_ok(s) => {
+            (Some(s), _) if self.is_writer_grant(g) && group_ok(s) => {
                 Presence::Staged(self.held_of(&s.stored))
             }
             (None, Some(theirs)) => Presence::Staged(self.held_of(theirs)),

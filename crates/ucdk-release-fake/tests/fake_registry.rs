@@ -197,10 +197,11 @@ fn a_read_grant_observes_and_can_neither_stage_nor_commit() {
     let blobs = set.blobs();
     let items = set.items(&blobs);
     let denied = Some(SeamError::GrantRefused(GrantFault::Denied));
-    assert!(matches!(
+    // Staged state is visible only to a grant of the action that made it, never to a read grant.
+    assert_eq!(
         w.registry.observe(&read, &set.coords[0], &[]),
-        Ok(Presence::Staged(_))
-    ));
+        Ok(Presence::Absent)
+    );
     assert_eq!(w.registry.fetch(&read, &set.coords[0]), Ok(None));
     assert_eq!(w.registry.stage(&read, &items).err(), denied);
     assert_eq!(w.registry.commit(&read, &items).err(), denied);
@@ -208,6 +209,12 @@ fn a_read_grant_observes_and_can_neither_stage_nor_commit() {
     assert_eq!(w.registry.yank(&read, &set.coords[0], "no").err(), denied);
     assert_eq!(w.registry.stage_log().len(), 1);
     assert!(w.registry.commit_log().is_empty());
+    // A committed coordinate is observed by the read grant, with its own digest.
+    assert_eq!(commit(&mut w, &set), Ok(CommitAnswer::Committed));
+    let Ok(Presence::Present(held)) = w.registry.observe(&read, &set.coords[0], &[]) else {
+        panic!("a read grant sees a committed coordinate");
+    };
+    assert_eq!(held.digest, sha(b"a"));
 }
 
 #[test]
