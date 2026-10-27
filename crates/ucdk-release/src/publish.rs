@@ -16,7 +16,7 @@ pub enum Presence {
     Staged(Held),
     /// It is published, with what the registry holds.
     Present(Held),
-    /// It was published and then withdrawn: burned, whatever its bytes. A registry may report a
+    /// It was published and then withdrawn, whatever its bytes. A registry may report a
     /// coordinate withdrawn by someone else.
     Yanked(Held),
     /// The coordinate was claimed and can never be published: the number of a group that failed.

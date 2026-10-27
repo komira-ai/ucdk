@@ -94,8 +94,12 @@ pub trait Publisher: Send {
     /// A point read of `k`. The digest it reports is the one the registry itself verified over
     /// the stored bytes at upload, never one that only the writer declared; a registry that
     /// reports a writer-declared digest is not a conforming home. Observing does not fetch or
-    /// hash the bytes: a validation that must see the bytes (`CHANNEL_READBACK`, a smoke action)
-    /// fetches them and hashes them itself. A coordinate whose number a failed group burned
+    /// hash the bytes, and no verdict of "published" rests on the digest it reports alone:
+    /// `CHANNEL_READBACK`, a smoke action and the read-back of a publish `fetch` the bytes and
+    /// hash them themselves (through the read grant for a private channel, as a stranger for a
+    /// public one, and for the read-back of a publish with the grant its observe used), and
+    /// they pass only when the hash of the fetched bytes is the set's digest. A registry that
+    /// echoes the writer's declared digest therefore fails the read-back. A coordinate whose number a failed group burned
     /// reads as `Burned`, never `Absent`. `set` is the declared items of
     /// the action `k` belongs to, `k` among them: a registry that addresses staged state by a
     /// group derived from the whole set finds "staged with our digest" only when told the set.

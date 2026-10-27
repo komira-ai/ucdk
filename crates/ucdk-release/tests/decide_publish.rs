@@ -27,7 +27,7 @@ fn held(digest: &str) -> Held {
 fn table_over_presence_digest_yank() {
     // Every presence (absent, staged, present, yanked) with every digest a registry can report
     // beside ours: the same, another, and none exposed at all. A registry that exposes no digest
-    // is never equal to ours, and a yanked coordinate is burned whatever its bytes.
+    // is never equal to ours, and a yanked coordinate is withdrawn whatever its bytes.
     type Row = (&'static str, fn(Held) -> Presence, [PublishDecision; 3]);
     let rows: [Row; 3] = [
         (

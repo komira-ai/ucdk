@@ -152,6 +152,65 @@ fn a_burned_coordinate_cannot_be_yanked() {
 }
 
 #[test]
+fn a_burned_staged_coordinate_is_dropped_and_cannot_be_committed() {
+    let mut w = World::new();
+    let set = Set::of(&["a", "b"]);
+    let (blobs, g) = (set.blobs(), w.grant(GrantPhase::Stage, &set.coords));
+    let items = set.items(&blobs);
+    assert_eq!(w.registry.stage(&g, &items), Ok(StageAnswer::Staged));
+    w.registry.burn(&set.coords[0]);
+    assert!(!w.registry.is_staged(&set.coords[0]));
+    assert!(w.registry.is_staged(&set.coords[1]));
+    assert_eq!(
+        w.registry.observe(&g, &set.coords[0], &items),
+        Ok(Presence::Burned)
+    );
+    let g = w.grant(GrantPhase::Commit, &set.coords);
+    assert_eq!(w.registry.commit(&g, &items), Ok(CommitAnswer::Duplicate));
+    assert_eq!(w.registry.bytes(&set.coords[1]), None);
+}
+
+#[test]
+fn a_duplicate_over_a_burned_coordinate_observes_burned_and_is_refused_not_retried() {
+    // The answer is `Duplicate`, the observe that follows says `Burned`, and the decision is
+    // the refusal `PUBLISH_BURNED`: at the stage, and at the read-back of a coordinate that was
+    // committed and then burned (burned wins over committed).
+    let mut w = World::new();
+    let set = Set::of(&["a", "b"]);
+    let (blobs, stage) = (set.blobs(), w.grant(GrantPhase::Stage, &set.coords));
+    let items = set.items(&blobs);
+    w.registry.burn(&set.coords[0]);
+    assert_eq!(w.registry.stage(&stage, &items), Ok(StageAnswer::Duplicate));
+    let seen = w
+        .registry
+        .observe(&stage, &set.coords[0], &items)
+        .expect("an observe");
+    assert_eq!(
+        decide_publish(OURS, &seen),
+        PublishDecision::Refused(Reason::PublishBurned)
+    );
+
+    let mut w = World::new();
+    let stage = w.grant(GrantPhase::Stage, &set.coords);
+    assert_eq!(w.registry.stage(&stage, &items), Ok(StageAnswer::Staged));
+    let commit = w.grant(GrantPhase::Commit, &set.coords);
+    assert_eq!(
+        w.registry.commit(&commit, &items),
+        Ok(CommitAnswer::Committed)
+    );
+    w.registry.burn(&set.coords[1]);
+    let seen = w
+        .registry
+        .observe(&commit, &set.coords[1], &items)
+        .expect("an observe");
+    assert_eq!(seen, Presence::Burned);
+    assert_eq!(
+        decide_publish(OURS, &seen),
+        PublishDecision::Refused(Reason::PublishBurned)
+    );
+}
+
+#[test]
 fn the_fake_yanks_one_coordinate_whatever_its_shape() {
     let clock = ManualClock::at(1);
     let shapes = [

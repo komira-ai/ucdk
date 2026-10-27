@@ -28,7 +28,7 @@ mod store;
 mod time;
 
 pub use build::{BuildSystem, Command, Invocation, Located, Shape, TestOutcome, Verb};
-pub use error::{Backoff, ObserveFailure, SeamError};
+pub use error::{Backoff, ObserveFailure, ObserveWhen, SeamError};
 pub use files::{DirEntry, FileKind, OutputFiles, check_path, entry_path, valid_rel};
 pub use grant::{Grant, GrantRequest, GrantSource};
 pub use process::{Exit, ProcessResult, ProcessRunner, ProcessSpec};

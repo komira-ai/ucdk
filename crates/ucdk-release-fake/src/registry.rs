@@ -275,9 +275,15 @@ impl FakeRegistry {
 
     /// `coordinate` is burned: a failed group claimed its number and it can never be published.
     /// An observe answers `Burned`, a `stage` or a `commit` over it answers `Duplicate`, `fetch`
-    /// finds nothing and `newest` and `list` do not return it.
+    /// finds nothing, `newest` and `list` do not return it and `yank` is refused (`Permanent`).
+    /// Burned wins over everything the registry held there: a committed or staged coordinate of
+    /// that name is dropped, so it is no longer readable, listable or yankable.
     pub fn burn(&mut self, coordinate: &Coordinate) {
-        self.burned.insert(coordinate_key(coordinate));
+        let key = coordinate_key(coordinate);
+        self.committed.remove(&key);
+        self.staged.remove(&key);
+        self.others_staged.remove(&key);
+        self.burned.insert(key);
     }
 
     /// Another writer commits the first coordinate of the next commit call with `bytes`, just

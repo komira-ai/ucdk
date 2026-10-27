@@ -42,16 +42,38 @@ pub enum ObserveFailure {
     Indeterminate,
 }
 
+/// Where in an action a failed `observe` ran. It decides what the failure says about the action,
+/// because an observe that fails after an effect may have landed cannot say that nothing happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObserveWhen {
+    /// The preflight observe, before any registry write: nothing of the action has landed.
+    Preflight,
+    /// An observe after an effect that may have landed (the observe that follows a `Duplicate`,
+    /// the observe that follows a commit answer, the read-back poll). Its failure concerns the
+    /// effect, which is unknown.
+    AfterEffect,
+}
+
 impl SeamError {
-    /// What a failed `observe` is. An observe that answers `Refused` or `Permanent` says that
-    /// nothing happened and that the same call fails again (a coordinate the channel cannot
-    /// hold, a set that does not contain it), so it is not a retry class: the action is
-    /// `REFUSED` with `CHANNEL`. Every other failure leaves the registry unread, and the action
-    /// is `INDETERMINATE`.
-    pub fn observe_failure(&self) -> ObserveFailure {
+    /// What a failed `observe` makes of the action, given when it ran.
+    ///
+    /// `Preflight`, where nothing was written: `Refused(r)` says nothing happened and is the
+    /// action's refusal with that same reason `r`; `Permanent` says nothing happened and the same
+    /// call fails again (a coordinate the channel cannot hold, a set that does not contain it),
+    /// so it is `REFUSED` with `CHANNEL`; `GrantRefused(Denied)` is `REFUSED` with `CREDENTIAL`.
+    /// Every other failure leaves the registry unread and the action `INDETERMINATE`.
+    ///
+    /// `AfterEffect`: every failure is `INDETERMINATE`, whatever it promises. A refusal of the
+    /// observe says nothing of the effect before it, and that effect is unknown.
+    pub fn observe_failure(&self, when: ObserveWhen) -> ObserveFailure {
+        if when == ObserveWhen::AfterEffect {
+            return ObserveFailure::Indeterminate;
+        }
         match self {
-            SeamError::Refused(_) | SeamError::Permanent(_) => {
-                ObserveFailure::Refused(Reason::Channel)
+            SeamError::Refused(reason) => ObserveFailure::Refused(*reason),
+            SeamError::Permanent(_) => ObserveFailure::Refused(Reason::Channel),
+            SeamError::GrantRefused(GrantFault::Denied) => {
+                ObserveFailure::Refused(Reason::Credential)
             }
             SeamError::Transient(_)
             | SeamError::RateLimited(_)
