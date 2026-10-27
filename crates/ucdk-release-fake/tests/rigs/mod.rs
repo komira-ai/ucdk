@@ -8,10 +8,12 @@
 use ucdk_release_seams::kit::{Report, Scenario};
 
 pub mod build_system;
+pub mod grant_source;
 pub mod hostile;
 pub mod loose;
 pub mod output_files;
 pub mod process_runner;
+pub mod secret;
 pub mod store;
 
 /// The names of the scenarios of a kit, in its order.

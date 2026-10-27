@@ -6,6 +6,7 @@
 mod rigs;
 
 use rigs::build_system::{FakeBuildRig, Flaw as Build};
+use rigs::grant_source::{FakeGrantRig, Flaw as Grants};
 use rigs::hostile::{HostileRig, Wrong};
 use rigs::loose::{LooseRig, ShallowRig};
 use rigs::output_files::{FakeFilesRig, Flaw as Files};
@@ -14,9 +15,74 @@ use rigs::store::{FakeStoreRig, Flaw as Store};
 use rigs::{each_fails_alone, further_stubs_fail_exactly, names};
 use ucdk_release_proto::v1::BuildSystemKind;
 use ucdk_release_seams::kit::{
-    build_system_scenarios, output_files_scenarios, process_runner_scenarios, run_build_system_kit,
-    run_output_files_kit, run_process_runner_kit, run_store_kit, store_scenarios,
+    build_system_scenarios, grant_source_scenarios, output_files_scenarios,
+    process_runner_scenarios, run_build_system_kit, run_grant_source_kit, run_output_files_kit,
+    run_process_runner_kit, run_store_kit, store_scenarios,
 };
+
+/// A scenario that catches a stub only because an earlier scenario moved the clock has not caught
+/// it: run alone, on a rig of its own, as the kit's own test of the fake runs it, each scenario
+/// must fail every stub that the whole kit fails it for.
+#[test]
+fn each_grant_source_scenario_fails_its_stubs_when_run_alone() {
+    let scenarios = grant_source_scenarios::<FakeGrantRig>();
+    let mut wrong = Vec::new();
+    for flaw in Grants::ALL {
+        let in_the_kit = run_grant_source_kit(&FakeGrantRig::flawed(flaw)).failed();
+        let alone: Vec<&str> = scenarios
+            .iter()
+            .filter(|s| s.run_on(&FakeGrantRig::flawed(flaw)).is_err())
+            .map(|s| s.name)
+            .collect();
+        if alone != in_the_kit {
+            wrong.push(format!(
+                "{flaw:?}: in the kit {in_the_kit:?}, alone {alone:?}"
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+#[test]
+fn each_further_grant_source_stub_fails_the_scenarios_that_hold_it() {
+    further_grant_source();
+}
+
+fn further_grant_source() {
+    const COVERS: &str = "a_grant_covers_exactly_the_coordinates_asked";
+    const DIFFERING: &str = "a_differing_claim_is_refused_before_any_exchange";
+    const EXCEPTIONAL: &str = "an_exceptional_run_presents_the_exceptional_subject";
+    const LIMIT: &str = "more_coordinates_than_the_limit_are_refused_before_the_exchange";
+    const READ: &str =
+        "a_read_grant_carries_the_read_scope_and_covers_exactly_the_coordinates_asked";
+    const EXPIRY: &str = "an_expiry_is_reported_as_the_issuer_stated_it";
+    further_stubs_fail_exactly(
+        "grant source",
+        &names(&grant_source_scenarios::<FakeGrantRig>()),
+        &[
+            (Grants::CommitGrantHasTheStageScope, &[COVERS]),
+            (Grants::CommitGrantDropsACoordinate, &[COVERS]),
+            (Grants::SkipsClaimsOutsideStage, &[DIFFERING, EXCEPTIONAL]),
+            (Grants::ClaimsMatchedBySubstring, &[DIFFERING]),
+            (Grants::NoPinnedClaimIsIssued, &[DIFFERING]),
+            (Grants::ExceptionalIgnoresEnvironment, &[DIFFERING]),
+            (Grants::ExceptionalIgnoresAudienceAndPinned, &[DIFFERING]),
+            (Grants::LimitIsCheckedForStageOnly, &[LIMIT]),
+            (Grants::IgnoresTheDeclaredScopesAndLocation, &[COVERS, READ]),
+            (Grants::ClaimsMatchedIgnoringCase, &[DIFFERING]),
+            (Grants::NormalizesCoordinateFields, &[COVERS, READ]),
+            (Grants::ExceptionalFallsBackWhenUndeclared, &[EXCEPTIONAL]),
+            (Grants::PinnedOnlyFirstCompared, &[DIFFERING]),
+            (Grants::PinnedSubset, &[DIFFERING]),
+            (Grants::EqualScopesCommitDenied, &[COVERS]),
+            (Grants::StickyExceptional, &[EXCEPTIONAL]),
+            (Grants::ScopeStickyToFirstRequest, &[COVERS]),
+            (Grants::StickyRepository, &[COVERS]),
+            (Grants::ExpiryRoundedToSecond, &[EXPIRY]),
+        ],
+        |flaw| run_grant_source_kit(&FakeGrantRig::flawed(flaw)),
+    );
+}
 
 #[test]
 fn each_further_output_files_stub_fails_the_scenarios_that_hold_it() {
@@ -486,8 +552,67 @@ fn further_output_files() {
 fn each_scenario_fails_on_its_nonconforming_stub() {
     output_files();
     store();
+    grant_source();
     process_runner();
     build_system();
+}
+
+fn grant_source() {
+    each_fails_alone(
+        "grant source",
+        &names(&grant_source_scenarios::<FakeGrantRig>()),
+        &[
+            (
+                "an_anonymous_identity_needs_no_exchange",
+                Grants::AnonymousGetsAGrant,
+            ),
+            (
+                "a_grant_covers_exactly_the_coordinates_asked",
+                Grants::DropsTheLastCoordinate,
+            ),
+            (
+                "a_differing_claim_is_refused_before_any_exchange",
+                Grants::IgnoresPinnedClaims,
+            ),
+            (
+                "an_exceptional_run_presents_the_exceptional_subject",
+                Grants::IgnoresExceptional,
+            ),
+            (
+                "a_used_identity_token_is_refused_the_second_time",
+                Grants::UsedIsDenied,
+            ),
+            (
+                "an_exchange_after_expiry_gives_a_new_grant",
+                Grants::ReissuesTheExpiredGrant,
+            ),
+            (
+                "a_missing_scope_is_denied",
+                Grants::CommitWithoutScopeIsIssued,
+            ),
+            (
+                "a_read_grant_carries_the_read_scope_and_covers_exactly_the_coordinates_asked",
+                Grants::ReadIsIssuedAsStage,
+            ),
+            (
+                "an_unreachable_issuer_is_unreachable_and_spends_nothing",
+                Grants::UnreachableSpendsTheToken,
+            ),
+            (
+                "an_expiry_is_reported_as_the_issuer_stated_it",
+                Grants::CorrectsTheSkew,
+            ),
+            (
+                "more_coordinates_than_the_limit_are_refused_before_the_exchange",
+                Grants::AllowsOneOverTheLimit,
+            ),
+            (
+                "a_grant_is_never_printed_cloned_or_logged",
+                Grants::LogsTheSecret,
+            ),
+        ],
+        |flaw| run_grant_source_kit(&FakeGrantRig::flawed(flaw)),
+    );
 }
 
 fn output_files() {
