@@ -11,9 +11,10 @@ use ucdk_release_proto::v1::{Coordinate, Stamped};
 use super::publisher_grants::{self as grants, Spoiled, denied, is_denied, seen};
 use super::publisher_rig::{
     A_DAY_MS, Arrangement, ChannelShape, Placement, PublisherRig, Set, built, commit, fetched,
-    first_phase, held_by_another, observed, present_held, publish, sha, siblings_beside, stage,
-    staged_held, staging_publisher, staging_shape, stranger,
+    first_phase, held_by_another, looked, observed, observed_alone, phases_of, present_held,
+    publish, sha, siblings_beside, stage, staged_held, staging_publisher, staging_shape, stranger,
 };
+use super::publisher_visible as visible;
 use super::{must, must_err, same};
 use crate::{CommitAnswer, Grant, ListScope, Publisher, SeamError, StageAnswer};
 
@@ -492,15 +493,18 @@ pub(super) fn observe_returns_the_stamp_it_was_given<R: PublisherRig>(
         );
     }
     commit(rig, &mut p, &set);
-    let present = present_held(stranger(&mut p, &set.coords[0]));
+    let present = present_held(looked(rig, shape, &mut p, &set.coords[0]));
     same(
         (present.stamp, present.exceptional),
         (set.held.stamp.clone(), true),
-        "the stamp and the exceptional mark of a committed coordinate",
+        &format!("the stamp and the exceptional mark of a committed coordinate ({shape:?})"),
     );
 }
 
-/// A grant that observes a coordinate another writer committed sees it as `Present`.
+/// A grant of any phase of the channel, a read grant included, that observes a coordinate another
+/// writer committed sees it as `Present`, told no set, and told the declared set on a channel that
+/// is not addressed by group (a channel addressed by group is told the set by the scenario about
+/// a coordinate committed in another group). A channel that does not stage has no stage grant.
 pub(super) fn a_granted_observe_sees_a_coordinate_committed_by_another_writer<R: PublisherRig>(
     rig: &R,
     shape: &ChannelShape,
@@ -508,18 +512,39 @@ pub(super) fn a_granted_observe_sees_a_coordinate_committed_by_another_writer<R:
     let mut p = built(rig, shape);
     let set = Set::of(rig, &["a"]);
     rig.arrange(&mut p, &held_by_another(rig, &set.coords[0]));
-    let phase = first_phase(&p);
-    present_held(observed(rig, &mut p, phase, &set, 0));
+    for phase in phases_of(shape) {
+        same(
+            matches!(
+                observed_alone(rig, &mut p, phase, &set, 0),
+                Presence::Present(_)
+            ),
+            true,
+            &format!(
+                "a coordinate another writer committed, observed with a {phase:?} grant ({shape:?})"
+            ),
+        );
+        if !shape.group_addressed {
+            same(
+                matches!(observed(rig, &mut p, phase, &set, 0), Presence::Present(_)),
+                true,
+                &format!(
+                    "a coordinate another writer committed, observed with a {phase:?} grant told the set ({shape:?})"
+                ),
+            );
+        }
+    }
 }
 
 /// A commit that loses a race to another writer's commit of the version answers `Duplicate` and
-/// leaves the bytes that won.
+/// leaves the bytes that won, on every channel that stages: the bytes a read grant fetches are the
+/// winner's, and the coordinate is `Present`.
 pub(super) fn commit_is_atomic_when_the_coordinate_appears_between_observe_and_commit<
     R: PublisherRig,
 >(
     rig: &R,
+    shape: &ChannelShape,
 ) {
-    let mut p = staging_publisher(rig);
+    let mut p = built(rig, shape);
     let set = Set::of(rig, &["a"]);
     let theirs = rig.payload(&set.coords[0], 1).bytes;
     stage(rig, &mut p, &set);
@@ -530,13 +555,14 @@ pub(super) fn commit_is_atomic_when_the_coordinate_appears_between_observe_and_c
     same(
         must(p.commit(&grant, &items), "commit"),
         CommitAnswer::Duplicate,
-        "a commit that lost the race",
+        &format!("a commit that lost the race ({shape:?})"),
     );
     same(
         fetched(rig, &mut p, &set.coords[0]),
         Some(theirs),
-        "the bytes after the race",
+        &format!("the bytes after the race ({shape:?})"),
     );
+    present_held(looked(rig, shape, &mut p, &set.coords[0]));
 }
 
 /// A commit that fails after it landed is not `Permanent`: it may have landed, and an observe
@@ -562,10 +588,14 @@ pub(super) fn transient_after_commit_is_observed_before_retry<R: PublisherRig>(r
 }
 
 /// A stage over a coordinate another writer holds or has staged is `Duplicate` and leaves what
-/// is there: the committed bytes stay, and the staged state of another writer is no more visible
-/// to a grant that did not make it, a stage grant or a read grant, than before.
-pub(super) fn duplicate_over_other_bytes_leaves_the_old_bytes<R: PublisherRig>(rig: &R) {
-    let mut p = staging_publisher(rig);
+/// is there, on every channel that stages: the committed bytes stay, and the staged state of
+/// another writer is no more visible to a grant that did not make it, of any phase, than before
+/// (`visible::another_writers_staged_state_is_seen_by_no_grant`).
+pub(super) fn duplicate_over_other_bytes_leaves_the_old_bytes<R: PublisherRig>(
+    rig: &R,
+    shape: &ChannelShape,
+) {
+    let mut p = built(rig, shape);
     let (a, b) = (Set::of(rig, &["a"]), Set::of(rig, &["b"]));
     rig.arrange(&mut p, &held_by_another(rig, &a.coords[0]));
     rig.arrange(
@@ -588,25 +618,7 @@ pub(super) fn duplicate_over_other_bytes_leaves_the_old_bytes<R: PublisherRig>(r
     same(
         fetched(rig, &mut p, &a.coords[0]),
         Some(rig.payload(&a.coords[0], 1).bytes),
-        "the committed bytes after it",
+        &format!("the committed bytes after it ({shape:?})"),
     );
-    same(
-        observed(rig, &mut p, GrantPhase::Stage, &b, 0),
-        Presence::Absent,
-        "another writer's staged state seen by a grant that did not make it",
-    );
-    let read = rig.grant(&p, GrantPhase::Read, &b.coords);
-    same(
-        must(
-            p.observe(&read, &b.coords[0], &[]),
-            "an observe with a read grant",
-        ),
-        Presence::Absent,
-        "another writer's staged state seen by a read grant",
-    );
-    same(
-        fetched(rig, &mut p, &b.coords[0]),
-        None,
-        "a coordinate only staged by another writer",
-    );
+    visible::another_writers_staged_state_is_seen_by_no_grant(rig, shape, &mut p, &b);
 }

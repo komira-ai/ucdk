@@ -7,6 +7,15 @@
 //! that needs a channel the rig did not declare is skipped, with the reason, and a skip is never a
 //! pass. A declaration is held both ways, because a rig that states a thing about itself could
 //! otherwise hide a defect: the channel it builds for a shape must say what the shape says.
+//!
+//! A scenario about a promise a channel makes by what it can do, and not by who may read it, runs
+//! on every declared shape that can do it: a lifecycle scenario (a race, a duplicate, a set, an
+//! abort, a yank, `newest`, a stamp, a read-back) on each shape that stages or that commits, public
+//! or private, addressed by coordinate or by group. The gate of such a scenario is the capability
+//! (`stages`, `commit_unit`, `yank_unit`, `private`, `group_addressed`), and never that the shape
+//! is plain. A reader of a private channel holds a read grant where a reader of a public one is a
+//! stranger (`looked`), and staged state of a channel addressed by group is observed told the set
+//! it was staged in.
 
 use sha2::{Digest as _, Sha256};
 use ucdk_core::Hash256;
@@ -44,6 +53,15 @@ impl ChannelShape {
     pub const fn without_staging() -> Self {
         Self {
             stages: false,
+            ..Self::staging()
+        }
+    }
+
+    /// A public channel that stages and addresses staged state by the group of the declared set:
+    /// reads need no grant, and an observe of staged state is told the set.
+    pub const fn public_grouped() -> Self {
+        Self {
+            group_addressed: true,
             ..Self::staging()
         }
     }
@@ -357,6 +375,53 @@ pub(super) fn first_phase<P: Publisher>(p: &P) -> GrantPhase {
     }
 }
 
+/// The declared shapes that stage, of any address and any privacy.
+pub(super) fn staging_shapes<R: PublisherRig>(rig: &R) -> Vec<ChannelShape> {
+    rig.shapes().into_iter().filter(|s| s.stages).collect()
+}
+
+/// The declared shapes that do not stage, public or private.
+pub(super) fn unstaged_shapes<R: PublisherRig>(rig: &R) -> Vec<ChannelShape> {
+    rig.shapes().into_iter().filter(|s| !s.stages).collect()
+}
+
+/// Runs `scenario` once on each declared shape, a fresh channel each, whatever the shape stages,
+/// addresses or hides: a promise a scenario holds of every channel is held of each of them.
+pub(super) fn on_each_shape<R: PublisherRig>(rig: &R, scenario: fn(&R, &ChannelShape)) {
+    on_each_of(rig, &rig.shapes(), "a channel to run on", scenario);
+}
+
+/// Runs `scenario` once on each declared shape that stages.
+pub(super) fn on_each_staging_shape<R: PublisherRig>(rig: &R, scenario: fn(&R, &ChannelShape)) {
+    on_each_of(
+        rig,
+        &staging_shapes(rig),
+        "a channel that stages to run on",
+        scenario,
+    );
+}
+
+/// Runs `scenario` once on each declared shape that does not stage.
+pub(super) fn on_each_unstaged_shape<R: PublisherRig>(rig: &R, scenario: fn(&R, &ChannelShape)) {
+    on_each_of(
+        rig,
+        &unstaged_shapes(rig),
+        "a channel that does not stage to run on",
+        scenario,
+    );
+}
+
+/// The phases of the grants an action of a channel of `shape` holds, each of which may observe:
+/// the read grant, the stage grant of a channel that stages, and the commit grant.
+pub(super) fn phases_of(shape: &ChannelShape) -> Vec<GrantPhase> {
+    let mut all = vec![GrantPhase::Read];
+    if shape.stages {
+        all.push(GrantPhase::Stage);
+    }
+    all.push(GrantPhase::Commit);
+    all
+}
+
 /// A fresh channel of `shape`, held to what the shape says.
 pub(super) fn built<R: PublisherRig>(rig: &R, shape: &ChannelShape) -> R::Publisher {
     let p = rig.publisher(shape);
@@ -420,6 +485,21 @@ pub(super) fn needs_a_set_commit<R: PublisherRig>(rig: &R) -> Option<&'static st
         .iter()
         .any(|s| built(rig, s).commit_unit() == CommitUnit::Set))
     .then_some("the rig declares no public channel that commits a set at once")
+}
+
+/// The gate of a scenario about staged state that holds on a channel of any shape that stages,
+/// public or private, addressed by coordinate or by group.
+pub(super) fn needs_a_staging_channel<R: PublisherRig>(rig: &R) -> Option<&'static str> {
+    staging_shapes(rig)
+        .is_empty()
+        .then_some("the rig declares no channel that stages")
+}
+
+/// The gate of a scenario about a channel whose commit carries the bytes, public or private.
+pub(super) fn needs_an_unstaged_channel<R: PublisherRig>(rig: &R) -> Option<&'static str> {
+    unstaged_shapes(rig)
+        .is_empty()
+        .then_some("the rig declares no channel that does not stage")
 }
 
 /// The gate of a scenario about grants that holds on a channel of any shape.
@@ -670,6 +750,46 @@ pub(super) fn observed_alone<R: PublisherRig>(
 /// The bytes a stranger fetches for `k`, as the read-back of a publish on a public channel does.
 pub(super) fn fetched_by_a_stranger<P: Publisher>(p: &mut P, k: &Coordinate) -> Option<Vec<u8>> {
     must(p.fetch(&Grant::none(), k), "a fetch by a stranger")
+}
+
+/// What a reader sees of `k` on a channel of `shape`: a stranger on a public channel, which needs
+/// no grant, and the holder of a read grant on a private one, which turns a stranger away.
+pub(super) fn looked<R: PublisherRig>(
+    rig: &R,
+    shape: &ChannelShape,
+    p: &mut R::Publisher,
+    k: &Coordinate,
+) -> Presence {
+    if shape.private {
+        let grant = rig.grant(p, GrantPhase::Read, std::slice::from_ref(k));
+        must(p.observe(&grant, k, &[]), "an observe with a read grant")
+    } else {
+        stranger(p, k)
+    }
+}
+
+/// The bytes a reader fetches for `k` on a channel of `shape`, as the read-back of a publish
+/// does: as a stranger on a public channel, and with a read grant on a private one.
+pub(super) fn fetched_by_a_reader<R: PublisherRig>(
+    rig: &R,
+    shape: &ChannelShape,
+    p: &mut R::Publisher,
+    k: &Coordinate,
+) -> Option<Vec<u8>> {
+    if shape.private {
+        fetched(rig, p, k)
+    } else {
+        fetched_by_a_stranger(p, k)
+    }
+}
+
+/// The set of `sets` that holds `k`, and the position of `k` in it: the set `k` was staged in,
+/// which a channel addressed by group finds staged state by.
+pub(super) fn holder_of<'a>(sets: &'a [Set], k: &Coordinate) -> (&'a Set, usize) {
+    let found = sets
+        .iter()
+        .find_map(|set| set.coords.iter().position(|c| c == k).map(|at| (set, at)));
+    must_some(found, "the set the coordinate was staged in")
 }
 
 /// The bytes a read grant fetches for `k`.

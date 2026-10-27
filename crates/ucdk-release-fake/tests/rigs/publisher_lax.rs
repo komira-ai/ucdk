@@ -9,7 +9,7 @@ use ucdk_release::publish::{Held, Presence};
 use ucdk_release_fake::coordinate_key;
 use ucdk_release_proto::v1::Coordinate;
 use ucdk_release_seams::kit::LOCATION;
-use ucdk_release_seams::{Grant, Publisher, SeamError, StageItem};
+use ucdk_release_seams::{Grant, ListScope, Listed, Publisher, SeamError, StageItem};
 
 use super::publisher_more::{Field, More, Wrapped, differs_only_in, is_writer};
 use super::secret::texts;
@@ -106,9 +106,64 @@ pub enum Kind {
     NonStaging,
 }
 
+/// The phase of the grant a stub answers in a way the conforming fake does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Holder {
+    Stage,
+    Commit,
+    Read,
+}
+
+impl Holder {
+    pub const ALL: [Self; 3] = [Self::Stage, Self::Commit, Self::Read];
+
+    /// The phase of `g`, when it is a grant.
+    fn of(g: &Grant) -> Option<Self> {
+        match texts(g.secret()).first().map(String::as_str) {
+            Some("stage") => Some(Self::Stage),
+            Some("commit") => Some(Self::Commit),
+            Some("read") => Some(Self::Read),
+            _ => None,
+        }
+    }
+}
+
+/// How a reader asks for what another writer staged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Seen {
+    /// An `observe` told the declared set.
+    ObserveTold,
+    /// An `observe` told no set.
+    ObserveAlone,
+    Fetch,
+    Newest,
+    List,
+}
+
+impl Seen {
+    pub const ALL: [Self; 5] = [
+        Self::ObserveTold,
+        Self::ObserveAlone,
+        Self::Fetch,
+        Self::Newest,
+        Self::List,
+    ];
+}
+
 /// A stub that is lax in one way on one kind of channel, and is the conforming fake otherwise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lax {
+    /// On a channel of the kind, a read that is asked in the way, with a grant of the phase,
+    /// shows the staged state of another writer.
+    OthersStagedSeen(Kind, Seen, Holder),
+    /// On a channel of the kind, an observe with a grant of the phase, told the declared set or
+    /// not, answers `Absent` for a coordinate another writer committed.
+    OthersCommittedBlind(Kind, Holder, bool),
+    /// A fetch with a read grant of a coordinate that is held finds nothing.
+    FetchFindsNothing,
+    /// A fetch with a read grant of a coordinate that is held answers the bytes of another
+    /// coordinate that is held.
+    FetchAnswersAnother,
     /// A stage, a commit or an abort whose grant names some of the coordinates of the call and
     /// not all of them is taken for one that names them all.
     PartialCoverage(Kind, Verb),
@@ -161,6 +216,38 @@ pub fn strangers_let_in() -> Vec<More> {
         More::Lax(Lax::StrangerSeesOthers(Kind::Grouped)),
         More::Lax(Lax::StrangerSeesOthers(Kind::NonStaging)),
     ]
+}
+
+/// Every stub that shows the staged state of another writer, to a reader of each phase that asks
+/// in each way, on each kind of channel that stages.
+pub fn others_staged_seen() -> Vec<More> {
+    let mut all = Vec::new();
+    for kind in [Kind::Public, Kind::Private, Kind::Grouped] {
+        for seen in Seen::ALL {
+            for holder in Holder::ALL {
+                all.push(More::Lax(Lax::OthersStagedSeen(kind, seen, holder)));
+            }
+        }
+    }
+    all
+}
+
+/// Every stub that answers `Absent` to an observe of a coordinate another writer committed, with a
+/// grant of each phase the channel has, told the set and not, on each kind of channel.
+pub fn others_committed_blind() -> Vec<More> {
+    let mut all = Vec::new();
+    for kind in [Kind::Public, Kind::Private, Kind::Grouped, Kind::NonStaging] {
+        for holder in Holder::ALL {
+            // A channel that does not stage has no stage grant.
+            if kind == Kind::NonStaging && holder == Holder::Stage {
+                continue;
+            }
+            for told in [false, true] {
+                all.push(More::Lax(Lax::OthersCommittedBlind(kind, holder, told)));
+            }
+        }
+    }
+    all
 }
 
 /// Every stub that takes a grant naming a coordinate that differs in one field.
@@ -358,19 +445,57 @@ impl Wrapped {
                     && is_writer(g)
                     && self.defect(g, verb, coordinates) == Some(defect)
             }
-            Lax::StrangerSeesStaged(_) | Lax::StrangerSeesOthers(_) => false,
+            Lax::StrangerSeesStaged(_)
+            | Lax::StrangerSeesOthers(_)
+            | Lax::OthersStagedSeen(..)
+            | Lax::OthersCommittedBlind(..)
+            | Lax::FetchFindsNothing
+            | Lax::FetchAnswersAnother => false,
         }
     }
 
-    /// What an observe by `g` of `k` answers when `result` is what the conforming fake answered:
-    /// a stub that lets a stranger in answers it as a grant would.
-    pub(super) fn let_a_stranger_in(
+    /// Whether the stub is of `kind`, shows the staged state of another writer to a read asked
+    /// in the way `seen`, to a grant `g` of the phase it names, and `k` is staged by another.
+    fn shows_others_staged(&self, seen: Seen, g: &Grant, k: Option<&Coordinate>) -> bool {
+        match self.flaw() {
+            Some(More::Lax(Lax::OthersStagedSeen(kind, s, holder))) => {
+                s == seen
+                    && self.on(kind)
+                    && Holder::of(g) == Some(holder)
+                    && k.is_none_or(|k| self.staged_by_others.iter().any(|(c, _)| c == k))
+            }
+            _ => false,
+        }
+    }
+
+    /// What an observe by `g` of `k` told `set` answers when `result` is what the conforming fake
+    /// answered: a stub that lets a stranger in answers it as a grant would, one that shows the
+    /// staged state of another writer shows it, and one that is blind to what another writer
+    /// committed does not see it.
+    pub(super) fn lax_observe(
         &mut self,
         g: &Grant,
         k: &Coordinate,
         set: &[StageItem<'_>],
         result: Result<Presence, SeamError>,
     ) -> Result<Presence, SeamError> {
+        let seen = if set.is_empty() {
+            Seen::ObserveAlone
+        } else {
+            Seen::ObserveTold
+        };
+        if matches!(result, Ok(Presence::Absent)) && self.shows_others_staged(seen, g, Some(k)) {
+            return Ok(Presence::Staged(Held::default()));
+        }
+        if let (Some(More::Lax(Lax::OthersCommittedBlind(kind, holder, told))), Ok(_)) =
+            (self.flaw(), &result)
+            && self.on(kind)
+            && Holder::of(g) == Some(holder)
+            && told != set.is_empty()
+            && self.others.contains(k)
+        {
+            return Ok(Presence::Absent);
+        }
         if !g.is_none() || !matches!(result, Err(SeamError::GrantRefused(GrantFault::Denied))) {
             return result;
         }
@@ -413,9 +538,75 @@ impl Wrapped {
                     && self.base.inner.is_staged(k)
                     && (told || !self.shape.group_addressed)
             }
-            Some(More::ReadSeesOthersStaged) => self.staged_by_others.contains(k),
+            Some(More::ReadSeesOthersStaged) => self.staged_by_others.iter().any(|(c, _)| c == k),
             _ => false,
         }
+    }
+
+    /// What a fetch by `g` of `k` answers when `result` is what the conforming fake answered: a
+    /// stub that is wrong about a read grant's fetch of what is held answers it wrongly, and one
+    /// that shows the staged state of another writer answers its bytes.
+    pub(super) fn lax_fetch(
+        &mut self,
+        g: &Grant,
+        k: &Coordinate,
+        result: Result<Option<Vec<u8>>, SeamError>,
+    ) -> Result<Option<Vec<u8>>, SeamError> {
+        let read = Holder::of(g) == Some(Holder::Read);
+        match (self.flaw(), result) {
+            (Some(More::Lax(Lax::FetchFindsNothing)), Ok(Some(_))) if read => Ok(None),
+            (Some(More::Lax(Lax::FetchAnswersAnother)), Ok(Some(held))) if read => {
+                let other = self
+                    .committed
+                    .iter()
+                    .find(|c| *c != k)
+                    .and_then(|c| self.base.inner.bytes(c));
+                Ok(Some(other.map_or(held, <[u8]>::to_vec)))
+            }
+            (_, Ok(None)) if self.shows_others_staged(Seen::Fetch, g, Some(k)) => {
+                let theirs = self.staged_by_others.iter().find(|(c, _)| c == k);
+                Ok(theirs.map(|(_, bytes)| bytes.clone()))
+            }
+            (_, result) => result,
+        }
+    }
+
+    /// What a `newest` by `g` answers when `found` is what the conforming fake answered.
+    pub(super) fn lax_newest(
+        &mut self,
+        g: &Grant,
+        ch: &str,
+        name: &str,
+        mut found: Vec<(Coordinate, Held)>,
+    ) -> Vec<(Coordinate, Held)> {
+        if self.shows_others_staged(Seen::Newest, g, None) {
+            for (c, _) in &self.staged_by_others {
+                if c.channel == ch && c.name == name {
+                    found.push((c.clone(), Held::default()));
+                }
+            }
+        }
+        found
+    }
+
+    /// What a `list` by `g` of `scope` answers when `listed` is what the conforming fake answered.
+    pub(super) fn lax_list(
+        &mut self,
+        g: &Grant,
+        scope: &ListScope,
+        mut listed: Vec<Listed>,
+    ) -> Vec<Listed> {
+        if self.shows_others_staged(Seen::List, g, None) {
+            for (c, _) in &self.staged_by_others {
+                if c.channel == scope.channel && c.name.starts_with(&scope.prefix) {
+                    listed.push(Listed {
+                        coordinate: c.clone(),
+                        held: Held::default(),
+                    });
+                }
+            }
+        }
+        listed
     }
 
     /// The grant a lax stub takes `g` for, when it takes it for another: the refusal of `result`

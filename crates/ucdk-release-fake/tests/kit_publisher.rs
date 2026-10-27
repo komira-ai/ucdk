@@ -17,6 +17,7 @@ kit_tests!(
         FakePublisherRig::sealing(),
         FakePublisherRig::sealing().with_shapes(vec![ChannelShape::without_staging()]),
         FakePublisherRig::narrow(),
+        FakePublisherRig::narrow_yanking_a_version(),
         FakePublisherRig::per_coordinate(),
         FakePublisherRig::yanking_a_version(),
         FakePublisherRig::unconditional(),

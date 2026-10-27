@@ -14,6 +14,7 @@ use ucdk_release_seams::{
 };
 
 use super::publisher::{FakePublisherRig, Flawed};
+use super::publisher_flaw::Behind;
 use super::publisher_grant::issue;
 use super::publisher_lax::{Defect, Kind, Lax, Pair, Verb};
 use super::secret::texts;
@@ -173,8 +174,8 @@ enum Siblings {
 pub struct MoreRig {
     base: FakePublisherRig,
     flaw: More,
-    /// The stub is behind the channels that do not stage only.
-    only_unstaged: bool,
+    /// The stub is behind the channels of this kind only, when the rig says.
+    behind: Option<Behind>,
     siblings: Siblings,
 }
 
@@ -206,16 +207,16 @@ impl MoreRig {
         Self {
             base,
             flaw,
-            only_unstaged: false,
+            behind: None,
             siblings: Siblings::Base,
         }
     }
 
-    /// The stub of `flaw` around the rig `base`, behind the channels that do not stage only: the
+    /// The stub of `flaw` around the rig `base`, behind the channels of one kind only: the
     /// channels of the other shapes are the conforming fake.
-    pub fn flawed_only_unstaged(base: FakePublisherRig, flaw: More) -> Self {
+    pub fn flawed_behind(base: FakePublisherRig, flaw: More, behind: Behind) -> Self {
         Self {
-            only_unstaged: true,
+            behind: Some(behind),
             ..Self::flawed_on(base, flaw)
         }
     }
@@ -249,11 +250,11 @@ pub struct Wrapped {
     rewritten: Vec<(Coordinate, Option<Stamped>, bool)>,
     /// The coordinates of every call that went through, before the call that is running.
     known: Vec<Coordinate>,
-    committed: Vec<Coordinate>,
+    pub(super) committed: Vec<Coordinate>,
     pub(super) staged: Vec<(Coordinate, Vec<u8>)>,
     aborted: Vec<Coordinate>,
-    /// Coordinates another writer staged.
-    pub(super) staged_by_others: Vec<Coordinate>,
+    /// Coordinates another writer staged, with the bytes it staged.
+    pub(super) staged_by_others: Vec<(Coordinate, Vec<u8>)>,
 }
 
 impl PublisherRig for MoreRig {
@@ -267,7 +268,7 @@ impl PublisherRig for MoreRig {
         Wrapped {
             base: self.base.publisher(shape),
             flaw: self.flaw,
-            active: !(self.only_unstaged && shape.stages),
+            active: self.behind.is_none_or(|behind| behind.holds(shape)),
             shape: *shape,
             declared: Vec::new(),
             sets: Vec::new(),
@@ -296,8 +297,8 @@ impl PublisherRig for MoreRig {
             Arrangement::LoseStagedState => p.vanished = true,
             Arrangement::CommitVisibleAfter(_) => p.becoming = true,
             Arrangement::HeldByAnother { coordinate, .. } => p.others.push(coordinate.clone()),
-            Arrangement::StagedByAnother { coordinate, .. } => {
-                p.staged_by_others.push(coordinate.clone());
+            Arrangement::StagedByAnother { coordinate, bytes } => {
+                p.staged_by_others.push((coordinate.clone(), bytes.clone()));
             }
             _ => {}
         }
@@ -587,7 +588,7 @@ impl Publisher for Wrapped {
         {
             result = Ok(Presence::Staged(Held::default()));
         }
-        self.let_a_stranger_in(g, k, set, result)
+        self.lax_observe(g, k, set, result)
     }
 
     fn stage(&mut self, g: &Grant, items: &[StageItem<'_>]) -> Result<StageAnswer, SeamError> {
@@ -928,7 +929,7 @@ impl Publisher for Wrapped {
         {
             result = Ok(Some(bytes.clone()));
         }
-        result
+        self.lax_fetch(g, k, result)
     }
 
     fn newest(
@@ -956,7 +957,7 @@ impl Publisher for Wrapped {
                 }
             }
         }
-        Ok(found)
+        Ok(self.lax_newest(g, ch, name, found))
     }
 
     fn list(&mut self, g: &Grant, scope: &ListScope) -> Result<Vec<Listed>, SeamError> {
@@ -982,6 +983,6 @@ impl Publisher for Wrapped {
                 }
             }
         }
-        Ok(listed)
+        Ok(self.lax_list(g, scope, listed))
     }
 }

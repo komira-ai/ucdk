@@ -9,7 +9,7 @@ use ucdk_release::publish::{Held, Presence};
 use ucdk_release_proto::v1::{Coordinate, Reason, Stamped};
 
 use super::publisher_rig::{
-    Arrangement, ChannelShape, PublisherRig, Set, built, fetched, fetched_by_a_stranger,
+    Arrangement, ChannelShape, PublisherRig, Set, built, fetched, fetched_by_a_reader, looked,
     needs_a_plain_channel, observed, plain_shapes, present_held, publish, sha, siblings_beside,
     stage, staged_held, staging_publisher, stranger,
 };
@@ -381,11 +381,17 @@ pub(super) fn a_burned_coordinate_is_neither_absent_nor_present_nor_committable<
     );
 }
 
-/// Whether the read-back of `k` on a public channel passes: the bytes are fetched as a stranger
-/// (`Grant::none()`) and hashed by the reader, and what they hash to is the digest the action
-/// expects. The scenarios of this part run on public channels only.
-fn read_back_passes<P: Publisher>(p: &mut P, k: &Coordinate, expected: &str) -> bool {
-    fetched_by_a_stranger(p, k).is_some_and(|bytes| sha(&bytes) == expected)
+/// Whether the read-back of `k` passes: the bytes are fetched as a reader of the channel (a
+/// stranger of a public one, the holder of a read grant of a private one) and hashed, and what they
+/// hash to is the digest the action expects.
+fn read_back_passes<R: PublisherRig>(
+    rig: &R,
+    shape: &ChannelShape,
+    p: &mut R::Publisher,
+    k: &Coordinate,
+    expected: &str,
+) -> bool {
+    fetched_by_a_reader(rig, shape, p, k).is_some_and(|bytes| sha(&bytes) == expected)
 }
 
 /// A registry reports, from `observe`, the digest it verified over the bytes it stored, and not
@@ -417,28 +423,34 @@ pub(super) fn a_registry_that_echoes_the_declared_digest_fails_readback<R: Publi
     }
     super::publisher_rig::commit(rig, &mut p, &set);
     for (at, k) in set.coords.iter().enumerate() {
-        let held = present_held(stranger(&mut p, k));
+        let held = present_held(looked(rig, shape, &mut p, k));
         same(
             held.digest,
             set.digest(at),
-            "the digest a committed coordinate is observed with, from the bytes that were sent",
+            &format!(
+                "the digest the member {at} of a committed set is observed with, from the bytes that were sent ({shape:?})"
+            ),
         );
         same(
-            read_back_passes(&mut p, k, &set.digest(at)),
+            read_back_passes(rig, shape, &mut p, k, &set.digest(at)),
             true,
-            "the read-back against the digest of the bytes that were sent",
+            &format!(
+                "the read-back of the member {at} against the digest of the bytes that were sent ({shape:?})"
+            ),
         );
         same(
-            read_back_passes(&mut p, k, &declared),
+            read_back_passes(rig, shape, &mut p, k, &declared),
             false,
-            "the read-back against a digest that was only declared",
+            &format!(
+                "the read-back of the member {at} against a digest that was only declared ({shape:?})"
+            ),
         );
     }
     let a = &set.coords[0];
     let grant = rig.grant(&p, GrantPhase::Commit, std::slice::from_ref(a));
     must(p.yank(&grant, a, "a reason"), "yank");
     same(
-        stranger(&mut p, a),
+        looked(rig, shape, &mut p, a),
         Presence::Yanked(Held {
             digest: set.digest(0),
             ..set.held.clone()

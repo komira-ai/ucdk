@@ -28,6 +28,8 @@ pub struct Flawed {
     pub(super) known: Vec<(Coordinate, Vec<u8>)>,
     /// The digest each coordinate was declared with, when it was declared one.
     declared: Vec<(Coordinate, String)>,
+    /// Every coordinate that was in a call at a place after the first.
+    later: Vec<Coordinate>,
     banned: Vec<Coordinate>,
     pub(super) flaw: Option<Flaw>,
     pub(super) shape: ChannelShape,
@@ -65,6 +67,7 @@ impl Flawed {
             clock,
             known: Vec::new(),
             declared: Vec::new(),
+            later: Vec::new(),
             banned,
             flaw,
             shape,
@@ -167,7 +170,10 @@ impl Flawed {
     }
 
     fn remember(&mut self, items: &[StageItem<'_>]) {
-        for item in items {
+        for (at, item) in items.iter().enumerate() {
+            if at > 0 {
+                self.later.push(item.coordinate.clone());
+            }
             self.known
                 .push((item.coordinate.clone(), item.file.bytes.to_vec()));
             if !item.held.digest.is_empty() {
@@ -228,6 +234,16 @@ impl Flawed {
                 && c.r#type == k.r#type
                 && c.name == k.name
                 && c.version == k.version
+        })
+    }
+
+    /// The held coordinates that agree with `k` in channel, type and name, of any version.
+    fn held_of_the_name(&self, k: &Coordinate) -> Vec<Coordinate> {
+        self.known_where(|me, c| {
+            me.inner.bytes(c).is_some()
+                && c.channel == k.channel
+                && c.r#type == k.r#type
+                && c.name == k.name
         })
     }
 }
@@ -341,7 +357,10 @@ impl Publisher for Flawed {
                 ),
                 Ok(Presence::Absent),
             ) => match self.sibling(k) {
-                Some(sibling) => self.inner.observe(&Grant::none(), &sibling, &[]),
+                Some(sibling) => {
+                    let read = self.internal(GrantPhase::Read, std::slice::from_ref(&sibling));
+                    self.inner.observe(&read, &sibling, &[])
+                }
                 None => Ok(Presence::Absent),
             },
             (Some(Flaw::AbsentIsAnError), Ok(Presence::Absent)) if first && !granted => {
@@ -379,6 +398,33 @@ impl Publisher for Flawed {
             (Some(Flaw::TheStampIsDropped), Ok(Presence::Present(held))) => {
                 Ok(Presence::Present(Held {
                     stamp: None,
+                    ..held
+                }))
+            }
+            (Some(Flaw::TheMarkIsDropped), Ok(Presence::Present(held))) => {
+                Ok(Presence::Present(Held {
+                    exceptional: false,
+                    ..held
+                }))
+            }
+            (Some(Flaw::LaterMembersHaveAWrongDigest), Ok(Presence::Present(held)))
+                if self.later.contains(k) =>
+            {
+                Ok(Presence::Present(digest_of(held, "bad")))
+            }
+            (Some(Flaw::LaterMembersLoseTheirStamp), Ok(Presence::Present(held)))
+                if self.later.contains(k) =>
+            {
+                Ok(Presence::Present(Held {
+                    stamp: None,
+                    ..held
+                }))
+            }
+            (Some(Flaw::LaterMembersLoseTheirMark), Ok(Presence::Present(held)))
+                if self.later.contains(k) =>
+            {
+                Ok(Presence::Present(Held {
+                    exceptional: false,
                     ..held
                 }))
             }
@@ -639,7 +685,12 @@ impl Publisher for Flawed {
             if !self.is(Flaw::VersionYankIgnoresTheGrant) && !self.is_good_for(g, "commit", &held) {
                 return Err(SeamError::GrantRefused(GrantFault::Denied));
             }
-            for sibling in held {
+            let yanked = if self.is(Flaw::VersionYankReachesEveryVersion) {
+                self.held_of_the_name(k)
+            } else {
+                held
+            };
+            for sibling in yanked {
                 let grant = self.internal(GrantPhase::Commit, std::slice::from_ref(&sibling));
                 self.inner.yank(&grant, &sibling, reason)?;
             }
@@ -689,7 +740,8 @@ impl Publisher for Flawed {
             )
             && let Some(sibling) = self.sibling(k)
         {
-            return self.inner.fetch(&Grant::none(), &sibling);
+            let read = self.internal(GrantPhase::Read, std::slice::from_ref(&sibling));
+            return self.inner.fetch(&read, &sibling);
         }
         Ok(found)
     }
@@ -718,6 +770,9 @@ impl Publisher for Flawed {
             g
         };
         let mut found = self.inner.newest(g, ch, name)?;
+        if self.is(Flaw::NewestIsEmpty) {
+            found.clear();
+        }
         if self.is(Flaw::NewestDropsYanked) {
             found.retain(|(coordinate, _)| !self.inner.is_yanked(coordinate));
         }
@@ -774,6 +829,9 @@ impl Publisher for Flawed {
             g
         };
         let mut listed = self.inner.list(g, scope)?;
+        if self.is(Flaw::ListIsEmpty) {
+            listed.clear();
+        }
         if self.is(Flaw::ListIncludesStaged) {
             listed.extend(self.staged_listed(&scope.channel, &scope.prefix));
         }

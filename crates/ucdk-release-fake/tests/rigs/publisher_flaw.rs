@@ -1,6 +1,61 @@
 // SPDX-License-Identifier: Apache-2.0
 //! What a stub of the publisher gets wrong: one promise of a registry, broken.
 
+use ucdk_release_seams::kit::ChannelShape;
+
+/// The channels a stub is behind: the channels of every other shape are the conforming fake, so
+/// that a scenario that runs on one kind of channel only is held to fail the stub there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Behind {
+    /// The channels that do not stage, public or private.
+    Unstaged,
+    /// A public channel addressed by group.
+    PublicGrouped,
+    /// A private channel addressed by group.
+    PrivateGrouped,
+    /// A private channel that stages and is addressed by coordinate.
+    PrivatePlain,
+    /// A private channel that does not stage.
+    PrivateUnstaged,
+}
+
+impl Behind {
+    /// Every kind of channel that is not the public one addressed by coordinate.
+    pub const ALL: [Self; 5] = [
+        Self::Unstaged,
+        Self::PublicGrouped,
+        Self::PrivateGrouped,
+        Self::PrivatePlain,
+        Self::PrivateUnstaged,
+    ];
+
+    /// The kinds of channel that stage.
+    pub const STAGING: [Self; 3] = [
+        Self::PublicGrouped,
+        Self::PrivateGrouped,
+        Self::PrivatePlain,
+    ];
+
+    /// The kinds of channel that are private or addressed by group, which stage or do not.
+    pub const NOT_PUBLIC_PLAIN: [Self; 4] = [
+        Self::PublicGrouped,
+        Self::PrivateGrouped,
+        Self::PrivatePlain,
+        Self::PrivateUnstaged,
+    ];
+
+    /// Whether a channel of `shape` is of this kind.
+    pub fn holds(self, shape: &ChannelShape) -> bool {
+        match self {
+            Self::Unstaged => !shape.stages,
+            Self::PublicGrouped => !shape.private && shape.group_addressed,
+            Self::PrivateGrouped => shape.private && shape.group_addressed,
+            Self::PrivatePlain => shape.private && shape.stages && !shape.group_addressed,
+            Self::PrivateUnstaged => shape.private && !shape.stages,
+        }
+    }
+}
+
 /// A wrong declaration of a rig: it says of the coordinates, bytes and siblings it supplies a
 /// thing that is not true, and the registry behind it is the conforming fake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,4 +276,21 @@ pub enum Flaw {
     /// A stage or a commit takes a grant for every coordinate of the call when it names the
     /// last of them.
     OnlyTheLastCoordinateIsCovered,
+    /// `newest` answers nothing, whatever the channel holds.
+    NewestIsEmpty,
+    /// `list` answers nothing, whatever the channel holds.
+    ListIsEmpty,
+    /// An observe answers each committed coordinate as not exceptional.
+    TheMarkIsDropped,
+    /// An observe of a committed coordinate that was not the first of its call answers a wrong
+    /// digest.
+    LaterMembersHaveAWrongDigest,
+    /// An observe of a committed coordinate that was not the first of its call answers no stamp.
+    LaterMembersLoseTheirStamp,
+    /// An observe of a committed coordinate that was not the first of its call answers it as not
+    /// exceptional.
+    LaterMembersLoseTheirMark,
+    /// A channel that yanks a version says so and yanks the platforms of every version of the
+    /// name when the grant covers the version it names.
+    VersionYankReachesEveryVersion,
 }

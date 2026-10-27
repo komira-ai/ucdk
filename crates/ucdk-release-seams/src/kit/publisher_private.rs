@@ -10,7 +10,7 @@ use ucdk_release::publish::Presence;
 use super::publisher_grants::{denied, is_denied};
 use super::publisher_rig::{
     A_DAY_MS, Arrangement, ChannelShape, PublisherRig, ReadStep, Set, built, held_by_another,
-    observed, present_held, publish, stage, staged_held,
+    observed, phases_of, present_held, publish, stage, staged_held,
 };
 use super::{must, must_err, same};
 use crate::{Grant, ListScope, Publisher, SeamError};
@@ -36,7 +36,8 @@ pub(super) fn a_private_observe_reads_the_group_then_the_index<R: PublisherRig>(
 }
 
 /// A coordinate another writer committed, in a group this caller does not know, is read through
-/// the index: it is `Present`, never `Absent`.
+/// the index: it is `Present`, never `Absent`, to an observe told the declared set with a grant of
+/// any phase, a read grant included.
 pub(super) fn a_coordinate_committed_in_another_group_reads_as_present_never_absent<
     R: PublisherRig,
 >(
@@ -46,7 +47,15 @@ pub(super) fn a_coordinate_committed_in_another_group_reads_as_present_never_abs
     let mut p = built(rig, shape);
     let set = Set::of(rig, &["a"]);
     rig.arrange(&mut p, &held_by_another(rig, &set.coords[0]));
-    present_held(observed(rig, &mut p, GrantPhase::Stage, &set, 0));
+    for phase in phases_of(shape) {
+        same(
+            matches!(observed(rig, &mut p, phase, &set, 0), Presence::Present(_)),
+            true,
+            &format!(
+                "a coordinate another writer committed, observed with a {phase:?} grant told the declared set ({shape:?})"
+            ),
+        );
+    }
 }
 
 /// A read that fails fails the observe: it is not taken for an absent group or an absent index

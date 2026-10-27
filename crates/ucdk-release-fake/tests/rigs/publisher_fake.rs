@@ -15,7 +15,7 @@ use ucdk_release_seams::kit::{
 use ucdk_release_seams::{Grant, Publisher};
 
 use super::publisher::Flawed;
-use super::publisher_flaw::{Flaw, Hook};
+use super::publisher_flaw::{Behind, Flaw, Hook};
 use super::publisher_grant::issue;
 
 /// The platform of the coordinate the conforming rig's channel cannot hold.
@@ -26,8 +26,8 @@ const FOREIGN_PLATFORM: &str = "plan9-mips";
 pub struct FakePublisherRig {
     clock: ManualClock,
     flaw: Option<Flaw>,
-    /// The stub is behind the channels that do not stage only.
-    flaw_only_unstaged: bool,
+    /// The stub is behind the channels of this kind only, when the rig says.
+    behind: Option<Behind>,
     hook: Option<Hook>,
     shapes: Vec<ChannelShape>,
     /// The rig says a version is sealed by its first group.
@@ -49,11 +49,12 @@ impl FakePublisherRig {
         Self {
             clock: ManualClock::at(1_000_000),
             flaw: None,
-            flaw_only_unstaged: false,
+            behind: None,
             hook: None,
             shapes: vec![
                 ChannelShape::staging(),
                 ChannelShape::without_staging(),
+                ChannelShape::public_grouped(),
                 ChannelShape::private_grouped(),
                 ChannelShape {
                     group_addressed: false,
@@ -94,7 +95,9 @@ impl FakePublisherRig {
         let version_yank = self.version_yank
             || matches!(
                 flaw,
-                Flaw::VersionYankIsPerCoordinate | Flaw::VersionYankIgnoresTheGrant
+                Flaw::VersionYankIsPerCoordinate
+                    | Flaw::VersionYankIgnoresTheGrant
+                    | Flaw::VersionYankReachesEveryVersion
             );
         Self {
             flaw: Some(flaw),
@@ -103,12 +106,12 @@ impl FakePublisherRig {
         }
     }
 
-    /// The same rig with the stub of `flaw` behind the channels that do not stage only: the
-    /// channels of the other shapes are the conforming fake.
+    /// The same rig with the stub of `flaw` behind the channels of one kind only: the channels of
+    /// the other shapes are the conforming fake.
     #[must_use]
-    pub fn with_flaw_only_unstaged(self, flaw: Flaw) -> Self {
+    pub fn with_flaw_behind(self, flaw: Flaw, behind: Behind) -> Self {
         Self {
-            flaw_only_unstaged: true,
+            behind: Some(behind),
             ..self.with_flaw(flaw)
         }
     }
@@ -202,6 +205,15 @@ impl FakePublisherRig {
         }
     }
 
+    /// A registry with a grammar of its own that yanks every platform of a version at one call,
+    /// as a registry that seals a version by its first group does.
+    pub fn narrow_yanking_a_version() -> Self {
+        Self {
+            version_yank: true,
+            ..Self::narrow()
+        }
+    }
+
     pub(super) fn issue(
         &self,
         repository: &Repository,
@@ -241,7 +253,7 @@ impl PublisherRig for FakePublisherRig {
     fn publisher(&self, shape: &ChannelShape) -> Flawed {
         let flaw = self
             .flaw
-            .filter(|_| !(self.flaw_only_unstaged && shape.stages));
+            .filter(|_| self.behind.is_none_or(|behind| behind.holds(shape)));
         let mut registry = FakeRegistry::new(&self.clock, LOCATION);
         if !shape.stages {
             registry = registry.without_staging();

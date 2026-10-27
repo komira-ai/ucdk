@@ -19,11 +19,13 @@ use super::publisher_more as more;
 use super::publisher_private as private;
 use super::publisher_rig::{
     Arrangement, ChannelShape, PublisherRig, Set, built, commit, fetched, grouped_shapes,
-    held_by_another, is_yanked, needs_a_channel, needs_a_conditional_commit,
+    held_by_another, is_yanked, looked, needs_a_channel, needs_a_conditional_commit,
     needs_a_grouped_channel, needs_a_plain_channel, needs_a_private_channel,
-    needs_a_public_channel, needs_a_set_commit, needs_no_staging, needs_staging, observed,
-    observed_alone, on_each_of, on_each_plain_shape, plain_shapes, present_held, private_shapes,
-    public_shapes, publish, stage, staged_held, staging_publisher, stranger, unstaged_publisher,
+    needs_a_public_channel, needs_a_set_commit, needs_a_staging_channel, needs_an_unstaged_channel,
+    needs_no_staging, needs_staging, observed, observed_alone, on_each_of, on_each_plain_shape,
+    on_each_shape, on_each_staging_shape, on_each_unstaged_shape, plain_shapes, present_held,
+    private_shapes, public_shapes, publish, stage, staged_held, staging_publisher, stranger,
+    unstaged_publisher,
 };
 use super::publisher_shapes as shapes;
 use super::{Report, Scenario, must, must_err, must_some, run_scenarios, same};
@@ -59,13 +61,13 @@ pub fn publisher_scenarios<R: PublisherRig>() -> Vec<Scenario<R>> {
         Scenario::new(
             "commit_makes_the_staged_coordinates_readable_with_the_same_digest",
             |rig| {
-                on_each_plain_shape(
+                on_each_shape(
                     rig,
                     commit_makes_the_staged_coordinates_readable_with_the_same_digest::<R>,
                 );
             },
         )
-        .gated(needs_a_plain_channel::<R>),
+        .gated(needs_a_channel::<R>),
         Scenario::new(
             "stage_of_present_same_is_duplicate_and_changes_nothing",
             stage_of_present_same_is_duplicate_and_changes_nothing::<R>,
@@ -78,13 +80,18 @@ pub fn publisher_scenarios<R: PublisherRig>() -> Vec<Scenario<R>> {
         .gated(needs_a_conditional_commit::<R>),
         Scenario::new(
             "abort_gives_staged_state_back_and_never_touches_a_committed_coordinate",
-            abort_gives_staged_state_back_and_never_touches_a_committed_coordinate::<R>,
+            |rig| {
+                on_each_staging_shape(
+                    rig,
+                    abort_gives_staged_state_back_and_never_touches_a_committed_coordinate::<R>,
+                );
+            },
         )
-        .gated(needs_staging::<R>),
+        .gated(needs_a_staging_channel::<R>),
         Scenario::new("a_set_commit_makes_every_coordinate_readable_or_none", |rig| {
-            on_each_plain_shape(rig, a_set_commit_makes_every_coordinate_readable_or_none::<R>);
+            on_each_shape(rig, a_set_commit_makes_every_coordinate_readable_or_none::<R>);
         })
-        .gated(needs_a_plain_channel::<R>),
+        .gated(needs_a_channel::<R>),
         Scenario::new(
             "a_channel_that_does_not_stage_commits_with_the_bytes",
             a_channel_that_does_not_stage_commits_with_the_bytes::<R>,
@@ -95,21 +102,21 @@ pub fn publisher_scenarios<R: PublisherRig>() -> Vec<Scenario<R>> {
         })
         .gated(needs_a_plain_channel::<R>),
         Scenario::new("yank_keeps_bytes_fetchable", |rig| {
-            on_each_plain_shape(rig, yank_keeps_bytes_fetchable::<R>);
+            on_each_shape(rig, yank_keeps_bytes_fetchable::<R>);
         })
-        .gated(needs_a_plain_channel::<R>),
+        .gated(needs_a_channel::<R>),
         Scenario::new("yanked_coordinate_cannot_be_committed_again", |rig| {
-            on_each_plain_shape(rig, yanked_coordinate_cannot_be_committed_again::<R>);
+            on_each_shape(rig, yanked_coordinate_cannot_be_committed_again::<R>);
         })
-        .gated(needs_a_plain_channel::<R>),
+        .gated(needs_a_channel::<R>),
         Scenario::new("lost_answer_is_resolvable_by_observe", |rig| {
             on_each_plain_shape(rig, lost_answer_is_resolvable_by_observe::<R>);
         })
         .gated(needs_a_plain_channel::<R>),
         Scenario::new("list_may_lag_but_observe_is_exact", |rig| {
-            on_each_plain_shape(rig, list_may_lag_but_observe_is_exact::<R>);
+            on_each_shape(rig, list_may_lag_but_observe_is_exact::<R>);
         })
-        .gated(needs_a_plain_channel::<R>),
+        .gated(needs_a_channel::<R>),
         Scenario::new("public_read_needs_no_grant", |rig| {
             on_each_of(
                 rig,
@@ -135,23 +142,23 @@ pub fn publisher_scenarios<R: PublisherRig>() -> Vec<Scenario<R>> {
         )
         .gated(needs_a_channel::<R>),
         Scenario::new("newest_lists_every_held_coordinate_of_the_name", |rig| {
-            on_each_plain_shape(rig, access::newest_lists_every_held_coordinate_of_the_name::<R>);
+            on_each_shape(rig, access::newest_lists_every_held_coordinate_of_the_name::<R>);
         })
-        .gated(needs_a_plain_channel::<R>),
+        .gated(needs_a_channel::<R>),
         Scenario::new("observe_returns_the_stamp_it_was_given", |rig| {
-            on_each_plain_shape(rig, access::observe_returns_the_stamp_it_was_given::<R>);
+            on_each_shape(rig, access::observe_returns_the_stamp_it_was_given::<R>);
         })
-        .gated(needs_a_plain_channel::<R>),
+        .gated(needs_a_channel::<R>),
         Scenario::new(
             "a_granted_observe_sees_a_coordinate_committed_by_another_writer",
             |rig| {
-                on_each_plain_shape(
+                on_each_shape(
                     rig,
                     access::a_granted_observe_sees_a_coordinate_committed_by_another_writer::<R>,
                 );
             },
         )
-        .gated(needs_a_plain_channel::<R>),
+        .gated(needs_a_channel::<R>),
         Scenario::new("a_private_observe_reads_the_group_then_the_index", |rig| {
             on_each_of(
                 rig,
@@ -223,19 +230,26 @@ pub fn publisher_scenarios<R: PublisherRig>() -> Vec<Scenario<R>> {
         .gated(needs_a_private_channel::<R>),
         Scenario::new(
             "commit_is_atomic_when_the_coordinate_appears_between_observe_and_commit",
-            access::commit_is_atomic_when_the_coordinate_appears_between_observe_and_commit::<R>,
+            |rig| {
+                on_each_staging_shape(
+                    rig,
+                    access::commit_is_atomic_when_the_coordinate_appears_between_observe_and_commit::<R>,
+                );
+            },
         )
-        .gated(needs_staging::<R>),
+        .gated(needs_a_staging_channel::<R>),
         Scenario::new(
             "transient_after_commit_is_observed_before_retry",
             access::transient_after_commit_is_observed_before_retry::<R>,
         )
         .gated(needs_staging::<R>),
-        Scenario::new(
-            "duplicate_over_other_bytes_leaves_the_old_bytes",
-            access::duplicate_over_other_bytes_leaves_the_old_bytes::<R>,
-        )
-        .gated(needs_staging::<R>),
+        Scenario::new("duplicate_over_other_bytes_leaves_the_old_bytes", |rig| {
+            on_each_staging_shape(
+                rig,
+                access::duplicate_over_other_bytes_leaves_the_old_bytes::<R>,
+            );
+        })
+        .gated(needs_a_staging_channel::<R>),
         Scenario::new(
             "a_second_commit_of_the_same_bytes_is_duplicate",
             a_second_commit_of_the_same_bytes_is_duplicate::<R>,
@@ -267,9 +281,14 @@ pub fn publisher_scenarios<R: PublisherRig>() -> Vec<Scenario<R>> {
         .gated(needs_staging::<R>),
         Scenario::new(
             "a_channel_that_does_not_stage_creates_a_coordinate_once",
-            more::a_channel_that_does_not_stage_creates_a_coordinate_once::<R>,
+            |rig| {
+                on_each_unstaged_shape(
+                    rig,
+                    more::a_channel_that_does_not_stage_creates_a_coordinate_once::<R>,
+                );
+            },
         )
-        .gated(needs_no_staging::<R>),
+        .gated(needs_an_unstaged_channel::<R>),
         Scenario::new(
             "a_commit_of_staged_state_that_vanished_is_not_committed_and_a_restage_works",
             shapes::a_commit_of_staged_state_that_vanished_is_not_committed_and_a_restage_works::<R>,
@@ -318,13 +337,13 @@ pub fn publisher_scenarios<R: PublisherRig>() -> Vec<Scenario<R>> {
         Scenario::new(
             "a_registry_that_echoes_the_declared_digest_fails_readback",
             |rig| {
-                on_each_plain_shape(
+                on_each_shape(
                     rig,
                     shapes::a_registry_that_echoes_the_declared_digest_fails_readback::<R>,
                 );
             },
         )
-        .gated(needs_a_plain_channel::<R>),
+        .gated(needs_a_channel::<R>),
         Scenario::new(
             "the_declarations_of_a_rig_hold_of_what_it_builds",
             shapes::the_declarations_of_a_rig_hold_of_what_it_builds::<R>,
@@ -554,19 +573,27 @@ fn commit_makes_the_staged_coordinates_readable_with_the_same_digest<R: Publishe
     shape: &ChannelShape,
 ) {
     let mut p = built(rig, shape);
-    let set = Set::of(rig, &["a", "b"]);
+    let mut set = Set::of(rig, &["a", "b"]);
+    set.held.exceptional = true;
     publish(rig, &mut p, &set);
     for (at, coord) in set.coords.iter().enumerate() {
-        let held = present_held(stranger(&mut p, coord));
+        let held = present_held(looked(rig, shape, &mut p, coord));
         same(
-            held.digest,
-            set.digest(at),
-            "the digest of a committed coordinate",
+            held,
+            Held {
+                digest: set.digest(at),
+                ..set.held.clone()
+            },
+            &format!(
+                "what the member {at} of a committed set holds: the digest of the bytes sent, the stamp and the mark ({shape:?})"
+            ),
         );
         same(
             fetched(rig, &mut p, coord),
             Some(set.bytes(at).to_vec()),
-            "its bytes",
+            &format!(
+                "the bytes a read grant fetches of the member {at} of a committed set ({shape:?})"
+            ),
         );
     }
 }
@@ -619,8 +646,9 @@ fn commit_over_present_different_leaves_old_bytes<R: PublisherRig>(rig: &R) {
 
 fn abort_gives_staged_state_back_and_never_touches_a_committed_coordinate<R: PublisherRig>(
     rig: &R,
+    shape: &ChannelShape,
 ) {
-    let mut p = staging_publisher(rig);
+    let mut p = built(rig, shape);
     let (a, b, c) = (
         Set::of(rig, &["a"]),
         Set::of(rig, &["b"]),
@@ -638,13 +666,13 @@ fn abort_gives_staged_state_back_and_never_touches_a_committed_coordinate<R: Pub
         "the staged coordinate after the abort",
     );
     staged_held(observed(rig, &mut p, GrantPhase::Stage, &c, 0));
-    present_held(stranger(&mut p, &a.coords[0]));
+    present_held(looked(rig, shape, &mut p, &a.coords[0]));
     same(
         fetched(rig, &mut p, &a.coords[0]),
         Some(a.bytes(0).to_vec()),
         "the committed bytes after it",
     );
-    more::an_abort_reaches_only_the_coordinates_it_names(rig);
+    more::an_abort_reaches_only_the_coordinates_it_names(rig, shape);
 }
 
 /// What one commit call makes readable is what `commit_unit()` says, held both ways: a channel
@@ -660,7 +688,7 @@ fn a_set_commit_makes_every_coordinate_readable_or_none<R: PublisherRig>(
         CommitUnit::Set => {
             publish(rig, &mut p, &set);
             for coord in &set.coords {
-                present_held(stranger(&mut p, coord));
+                present_held(looked(rig, shape, &mut p, coord));
             }
             let mut failing = built(rig, shape);
             rig.arrange(&mut failing, &Arrangement::CommitSetFailsWhole);
@@ -696,7 +724,7 @@ fn a_set_commit_makes_every_coordinate_readable_or_none<R: PublisherRig>(
             }
             commit(rig, &mut p, &set);
             for coord in &set.coords {
-                present_held(stranger(&mut p, coord));
+                present_held(looked(rig, shape, &mut p, coord));
             }
         }
     }
@@ -743,7 +771,7 @@ fn yank_keeps_bytes_fetchable<R: PublisherRig>(rig: &R, shape: &ChannelShape) {
         "the bytes of a yanked coordinate",
     );
     same(
-        is_yanked(&stranger(&mut p, &set.coords[0])),
+        is_yanked(&looked(rig, shape, &mut p, &set.coords[0])),
         true,
         "a yanked coordinate is observed as Yanked",
     );
@@ -773,7 +801,7 @@ fn yanked_coordinate_cannot_be_committed_again<R: PublisherRig>(rig: &R, shape: 
         "a commit over a yanked coordinate",
     );
     same(
-        is_yanked(&stranger(&mut p, &set.coords[0])),
+        is_yanked(&looked(rig, shape, &mut p, &set.coords[0])),
         true,
         "the coordinate after the second commit",
     );
@@ -829,7 +857,7 @@ fn list_may_lag_but_observe_is_exact<R: PublisherRig>(rig: &R, shape: &ChannelSh
     rig.arrange(&mut p, &Arrangement::ListLags);
     let set = Set::of(rig, &["a"]);
     publish(rig, &mut p, &set);
-    present_held(stranger(&mut p, &set.coords[0]));
+    present_held(looked(rig, shape, &mut p, &set.coords[0]));
     let grant = rig.grant(&p, GrantPhase::Read, &set.coords);
     let listed = must(
         p.list(
@@ -846,7 +874,7 @@ fn list_may_lag_but_observe_is_exact<R: PublisherRig>(rig: &R, shape: &ChannelSh
         true,
         "a listing names only what is held",
     );
-    a_listing_names_only_what_is_held_in_its_scope(rig, shape);
+    a_listing_names_what_is_held_in_its_scope(rig, shape);
     an_observe_of_a_coordinate_of_another_writer_is_exact_while_the_listing_lags(rig, shape);
 }
 
@@ -861,16 +889,17 @@ fn an_observe_of_a_coordinate_of_another_writer_is_exact_while_the_listing_lags<
     rig.arrange(&mut p, &Arrangement::ListLags);
     rig.arrange(&mut p, &held_by_another(rig, &set.coords[0]));
     same(
-        present_held(stranger(&mut p, &set.coords[0])).digest,
+        present_held(looked(rig, shape, &mut p, &set.coords[0])).digest,
         set.reseeded(rig, 1).digest(0),
         "the digest of a coordinate another writer committed, while the listing lags",
     );
 }
 
-/// A listing may leave coordinates out, but what it names is held, in the channel and under the
-/// prefix of its scope, and carries what the registry holds beside each. The prefix is a label
-/// the kit gave the rig, so the rig's names must keep it.
-fn a_listing_names_only_what_is_held_in_its_scope<R: PublisherRig>(rig: &R, shape: &ChannelShape) {
+/// A listing that was not arranged to lag names every coordinate held in the channel under the
+/// prefix of its scope, and what it names is held, in that channel and under that prefix, and
+/// carries what the registry holds beside each. The prefix is a label the kit gave the rig, so the
+/// rig's names must keep it.
+fn a_listing_names_what_is_held_in_its_scope<R: PublisherRig>(rig: &R, shape: &ChannelShape) {
     let mut p = built(rig, shape);
     let mut coords = vec![
         rig.coordinate("a"),
@@ -905,6 +934,20 @@ fn a_listing_names_only_what_is_held_in_its_scope<R: PublisherRig>(rig: &R, shap
         };
         let grant = rig.grant(&p, GrantPhase::Read, &set.coords);
         let listed = must(p.list(&grant, &scope), "list");
+        // A listing that was not arranged to lag names every coordinate held in its scope: a
+        // registry whose listing is always empty is not one that lags, and a reader of a private
+        // channel finds what is held as a reader of a public one does.
+        for (at, held) in set.coords.iter().enumerate() {
+            if (held.channel == *channel) & held.name.starts_with(prefix) {
+                same(
+                    listed.iter().any(|l| l.coordinate == *held),
+                    true,
+                    &format!(
+                        "the coordinate {at} held in the channel {channel:?} under the prefix {prefix:?} is in the listing ({shape:?})"
+                    ),
+                );
+            }
+        }
         for entry in listed {
             let c = &entry.coordinate;
             let at = must_some(

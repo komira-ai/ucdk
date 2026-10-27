@@ -47,6 +47,7 @@ mod publisher_more;
 mod publisher_private;
 mod publisher_rig;
 mod publisher_shapes;
+mod publisher_visible;
 mod store;
 
 pub use build_system::{

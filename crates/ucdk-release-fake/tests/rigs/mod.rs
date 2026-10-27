@@ -21,6 +21,7 @@ pub mod publisher_flaw;
 pub mod publisher_grant;
 pub mod publisher_lax;
 pub mod publisher_more;
+pub mod publisher_names;
 pub mod publisher_plain;
 pub mod secret;
 pub mod store;
