@@ -197,6 +197,8 @@ fn lookalikes(declared: &str) -> Vec<(&'static str, String)> {
         ("with a space before it", format!(" {declared}")),
         ("with a space after it", format!("{declared} ")),
         ("with a newline after it", format!("{declared}\n")),
+        ("with a tab before it", format!("\t{declared}")),
+        ("in upper case", declared.to_uppercase()),
         (
             "with a zero-width space inside it",
             format!("{head}\u{200b}{tail}"),

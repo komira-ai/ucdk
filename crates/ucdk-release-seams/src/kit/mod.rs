@@ -34,7 +34,9 @@ use ucdk_release_proto::v1::{ArtifactType, Coordinate};
 use crate::{EntryWriter, Heartbeat, SeamError, Stop, valid_rel};
 
 mod build_system;
+mod grant_bounds;
 mod grant_claims;
+mod grant_exceptional;
 mod grant_secret;
 mod grant_source;
 mod output_files;
@@ -49,9 +51,9 @@ pub use build_system::{
     BUILD_LABEL, BuildSystemRig, BuildWorld, build_system_scenarios, run_build_system_kit,
 };
 pub use grant_source::{
-    COMMIT_SCOPE, GrantContent, GrantSetup, GrantSourceRig, JobClaims, LOCATION, READ_SCOPE,
-    STAGE_SCOPE, exceptional_job, federated_repository, grant_source_scenarios, matching_job,
-    run_grant_source_kit,
+    COMMIT_SCOPE, GrantContent, GrantSetup, GrantSourceRig, IdentityTokens, JobClaims, LOCATION,
+    READ_SCOPE, STAGE_SCOPE, exceptional_job, federated_repository, grant_source_scenarios,
+    matching_job, run_grant_source_kit,
 };
 pub use output_files::{Node, OutputFilesRig, output_files_scenarios, run_output_files_kit};
 pub use process_runner::{Behavior, ProcessRig, process_runner_scenarios, run_process_runner_kit};

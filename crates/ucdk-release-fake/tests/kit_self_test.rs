@@ -58,13 +58,16 @@ fn further_grant_source() {
     const EXPIRY: &str = "an_expiry_is_reported_as_the_issuer_stated_it";
     const ANONYMOUS: &str = "an_anonymous_identity_needs_no_exchange";
     const RENEWAL: &str = "an_exchange_after_expiry_gives_a_new_grant";
+    const USED: &str = "a_used_identity_token_is_refused_the_second_time";
+    const UNREACHABLE: &str = "an_unreachable_issuer_is_unreachable_and_spends_nothing";
+    const NAMING: [&str; 4] = [COVERS, EXCEPTIONAL, READ, LIMIT];
     const LOGGED: &str = "a_grant_is_never_printed_cloned_or_logged";
     further_stubs_fail_exactly(
         "grant source",
         &names(&grant_source_scenarios::<FakeGrantRig>()),
         &[
-            (Grants::CommitGrantHasTheStageScope, &[COVERS]),
-            (Grants::CommitGrantDropsACoordinate, &[COVERS]),
+            (Grants::CommitGrantHasTheStageScope, &[COVERS, EXCEPTIONAL]),
+            (Grants::CommitGrantDropsACoordinate, &[COVERS, EXCEPTIONAL]),
             (Grants::SkipsClaimsOutsideStage, &[DIFFERING, EXCEPTIONAL]),
             (Grants::ClaimsMatchedBySubstring, &[DIFFERING]),
             (Grants::NoPinnedClaimIsIssued, &[DIFFERING]),
@@ -73,10 +76,10 @@ fn further_grant_source() {
                 &[DIFFERING, EXCEPTIONAL],
             ),
             (Grants::ExceptionalIgnoresAudienceAndPinned, &[DIFFERING]),
-            (Grants::LimitIsCheckedForStageOnly, &[LIMIT]),
+            (Grants::LimitIsCheckedForStageOnly, &[EXCEPTIONAL, LIMIT]),
             (Grants::IgnoresTheDeclaredScopesAndLocation, &[COVERS, READ]),
             (Grants::ClaimsMatchedIgnoringCase, &[DIFFERING]),
-            (Grants::NormalizesCoordinateFields, &[COVERS, READ]),
+            (Grants::NormalizesCoordinateFields, &NAMING),
             (Grants::ExceptionalFallsBackWhenUndeclared, &[EXCEPTIONAL]),
             (Grants::PinnedOnlyFirstCompared, &[DIFFERING]),
             (Grants::PinnedSubset, &[DIFFERING]),
@@ -95,7 +98,10 @@ fn further_grant_source() {
             (Grants::ClaimsMatchedAfterFolding, &[DIFFERING]),
             (Grants::ClaimsMatchedAfterTrimming, &[DIFFERING]),
             (Grants::AnonymousStageOrReadGetsAGrant, &[ANONYMOUS]),
-            (Grants::NonStageGrantsNeverExpire, &[RENEWAL, EXPIRY]),
+            (
+                Grants::NonStageGrantsNeverExpire,
+                &[EXCEPTIONAL, RENEWAL, EXPIRY],
+            ),
             (Grants::CumulativeLimit, &[LIMIT]),
             (Grants::EmptyRequestCoversAnything, &[COVERS]),
             (Grants::LogsTheSecretReversed, &[LOGGED]),
@@ -121,6 +127,40 @@ fn further_grant_source() {
             (Grants::LogsThePrefixOfTheSecret, &[LOGGED]),
             (Grants::LogsTheSecretFromTheSecondGrant, &[LOGGED]),
             (Grants::LogsTheSecretAfterARefusal, &[LOGGED]),
+            (Grants::ExceptionalCommitHasTheStageScope, &[EXCEPTIONAL]),
+            (Grants::ExceptionalCoversWiderCoordinates, &[EXCEPTIONAL]),
+            (Grants::ExceptionalGrantNeverExpires, &[EXCEPTIONAL]),
+            (Grants::ExceptionalIgnoresTheLimit, &[EXCEPTIONAL]),
+            (Grants::CoordinatesLowerCased, &NAMING),
+            (Grants::CoordinatesTrimmed, &NAMING),
+            (Grants::CoordinatesCutAtASlash, &NAMING),
+            (Grants::CoordinatesCutAtANewline, &NAMING),
+            (Grants::NamesSplitAtAComma, &NAMING),
+            (Grants::NamesSplitAtANewline, &NAMING),
+            (Grants::ReusesOneIdentityToken, &[USED]),
+            (
+                Grants::ReusesAnUnexpiredGrant,
+                &[DIFFERING, EXCEPTIONAL, USED, RENEWAL],
+            ),
+            (Grants::LimitCountsDistinctNames, &[EXCEPTIONAL, LIMIT]),
+            (
+                Grants::LimitCountsDistinctCoordinates,
+                &[EXCEPTIONAL, LIMIT],
+            ),
+            (Grants::ExceptionalEnvironmentIgnoresCase, &[DIFFERING]),
+            (Grants::ExceptionalAudienceIgnoresCase, &[DIFFERING]),
+            (Grants::ExceptionalPinnedClaimIgnoresCase, &[DIFFERING]),
+            (Grants::UsedIsDeniedForCommit, &[USED]),
+            (Grants::UsedIsDeniedForRead, &[USED]),
+            (Grants::ExpiredIsDenied, &[USED]),
+            (Grants::UnreachableIsDeniedOutsideStage, &[UNREACHABLE]),
+            (Grants::ExpiryFlooredAtASecondAhead, &[EXPIRY]),
+            (Grants::ExpiredGrantReportedLive, &[EXPIRY]),
+            (Grants::LifetimeCappedAtAnHour, &[EXPIRY]),
+            (
+                Grants::EmptyClaimsMatchAnUndeclaredExceptionalPair,
+                &[EXCEPTIONAL],
+            ),
         ],
         |flaw| run_grant_source_kit(&FakeGrantRig::flawed(flaw)),
     );
