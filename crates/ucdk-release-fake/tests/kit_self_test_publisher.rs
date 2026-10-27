@@ -59,6 +59,9 @@ enum Odd {
     SealedIsDuplicateOnOneCall,
     /// A rig that declares no shape of channel.
     NoShapes,
+    /// A sealing rig whose only sibling is a later platform, which the registry cannot take
+    /// beside the base.
+    OnlyAPlatformSibling,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -67,6 +70,8 @@ enum Stub {
     More(More),
     Hook(Hook),
     Odd(Odd),
+    /// The stub behind a rig that names no sibling of a coordinate.
+    Siblingless(More),
 }
 
 fn run_on(base: FakePublisherRig, stub: Stub) -> Report {
@@ -89,6 +94,13 @@ fn run_on(base: FakePublisherRig, stub: Stub) -> Report {
                 .with_flaw(Flaw::SealedVersionIsDuplicate),
         ),
         Stub::Odd(Odd::NoShapes) => run_publisher_kit(&base.with_shapes(Vec::new())),
+        Stub::Odd(Odd::OnlyAPlatformSibling) => run_publisher_kit(
+            &MoreRig::flawed_on(FakePublisherRig::sealing(), More::Conforming)
+                .naming_only_a_platform(),
+        ),
+        Stub::Siblingless(more) => {
+            run_publisher_kit(&MoreRig::flawed_on(base, more).naming_no_sibling())
+        }
     }
 }
 
@@ -202,6 +214,7 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
                 LIST,
                 SECOND_COMMIT,
                 DUPLICATE_SET,
+                NAMED_TWICE,
                 NOT_STAGING,
                 BECOMING,
                 UNREPRESENTABLE,
@@ -352,7 +365,10 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
             Stub::More(More::CommitPublishesOtherStagedBytes),
             &[COMMIT_CARRIES],
         ),
-        (Stub::More(More::DuplicateRestamps), &[SECOND_COMMIT]),
+        (
+            Stub::More(More::DuplicateRestamps),
+            &[SECOND_COMMIT, BECOMING],
+        ),
         (Stub::More(More::AbortDropsUnnamedCommitted), &[ABORT]),
         (
             Stub::More(More::ObserveOfOthersReadsTheLaggingList),
@@ -368,6 +384,40 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
             &[COMMIT_CARRIES],
         ),
         (Stub::More(More::AbortWithdrawsCommittedSibling), &[ABORT]),
+        (Stub::More(More::StagedRaceOverwrites), &[SECOND_COMMIT]),
+        (Stub::More(More::NonStagingDupCommitDeduped), &[NAMED_TWICE]),
+        (Stub::More(More::VanishedCommitIsRateLimited), &[VANISHED]),
+        (
+            Stub::More(More::RetryWhileBecomingReplacesTheStamp),
+            &[BECOMING],
+        ),
+        (
+            Stub::More(More::RetryWhileBecomingReplacesTheMark),
+            &[BECOMING],
+        ),
+        (Stub::More(More::FetchOfAStrangerFindsNothing), &[ECHO]),
+        (Stub::Odd(Odd::OnlyAPlatformSibling), &[DECLARES]),
+        (Stub::Siblingless(More::Conforming), &[DECLARES]),
+        (
+            Stub::Siblingless(More::CommitPublishesSiblingStagedBytes),
+            &[DECLARES],
+        ),
+        (
+            Stub::Siblingless(More::AbortWithdrawsCommittedSibling),
+            &[DECLARES],
+        ),
+        (
+            Stub::Siblingless(More::YankSiblings(Field::Version)),
+            &[DECLARES],
+        ),
+        (
+            Stub::Siblingless(More::StageSiblingTaken(Field::Version)),
+            &[DECLARES],
+        ),
+        (
+            Stub::Siblingless(More::ObserveStagedSibling(Field::Version)),
+            &[DECLARES],
+        ),
     ];
     for field in Field::ALL {
         table.extend([
@@ -425,7 +475,7 @@ fn each_further_publisher_stub_fails_the_scenarios_that_hold_it() {
 
 /// The scenarios that need a channel that stages, and the one that needs a registry that seals a
 /// version, which a rig of one public channel that does not stage lacks.
-const NEEDS_STAGING_OR_SEALING: [&str; 12] = [
+const NEEDS_STAGING_OR_SEALING: [&str; 11] = [
     STAGE_OBSERVE,
     STRANGER_STAGED,
     STAGE_GRANT,
@@ -434,7 +484,6 @@ const NEEDS_STAGING_OR_SEALING: [&str; 12] = [
     ABORT,
     OWN_STAGED,
     COMMIT_CARRIES,
-    NAMED_TWICE,
     WRITER_READS,
     VANISHED,
     SEALED,
@@ -482,6 +531,7 @@ fn the_stub_of_each_scenario_a_rig_of_one_call_runs() -> Vec<(&'static str, Stub
             Stub::Flaw(F::SecondCommitOfTheSameBytesIsCommitted),
         ),
         (DUPLICATE_SET, Stub::More(More::CommitPartial)),
+        (NAMED_TWICE, Stub::More(More::NonStagingDupCommitDeduped)),
         (NOT_STAGING, Stub::More(More::NonStagingRaceOverwrites)),
         (
             BECOMING,

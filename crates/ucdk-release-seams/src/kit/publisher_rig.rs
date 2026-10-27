@@ -176,6 +176,12 @@ pub fn every_field_in_a_set_of_its_own(base: &Coordinate) -> Vec<Sibling> {
 /// grants it accepts, the few changes to its world a scenario needs, and the coordinates and
 /// bytes its grammar accepts. A rig that overrides none of the last hooks says that the literal
 /// coordinates and bytes of the kit are fine.
+///
+/// The `Held` a scenario passes to `stage` and `commit` carries an empty digest, except in the
+/// scenario about a registry that echoes the declared digest. The seam allows that: `stage` and
+/// `commit` carry the `Held` so that a registry can store the stamp and the exceptional mark, and
+/// the digest `observe` reports is the one the registry verified over the bytes it stored, so a
+/// digest the writer declares is no precondition of either call.
 pub trait PublisherRig {
     type Publisher: Publisher;
 
@@ -234,7 +240,10 @@ pub trait PublisherRig {
 
     /// The coordinates of `base`'s name that differ from it in one field, which the channel
     /// holds, each with how it is published. The default is every field, each in a set of its
-    /// own.
+    /// own. A rig names at least one that the scenarios can publish beside the base (a later
+    /// platform of a version the registry seals is not one): the scenarios about siblings are
+    /// parts of scenarios about other things, so a rig that names none fails
+    /// `the_declarations_of_a_rig_hold_of_what_it_builds`.
     fn siblings(&self, base: &Coordinate) -> Vec<Sibling> {
         every_field_in_a_set_of_its_own(base)
     }
@@ -573,6 +582,11 @@ pub(super) fn observed_alone<R: PublisherRig>(
         p.observe(&grant, &set.coords[at], &[]),
         "an observe with a grant and no set",
     )
+}
+
+/// The bytes a stranger fetches for `k`, as the read-back of a publish on a public channel does.
+pub(super) fn fetched_by_a_stranger<P: Publisher>(p: &mut P, k: &Coordinate) -> Option<Vec<u8>> {
+    must(p.fetch(&Grant::none(), k), "a fetch by a stranger")
 }
 
 /// The bytes a read grant fetches for `k`.

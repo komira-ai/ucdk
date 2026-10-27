@@ -6,11 +6,12 @@
 
 use ucdk_release::codec::GrantPhase;
 use ucdk_release::publish::{Held, Presence};
-use ucdk_release_proto::v1::{Coordinate, Reason};
+use ucdk_release_proto::v1::{Coordinate, Reason, Stamped};
 
 use super::publisher_rig::{
-    Arrangement, ChannelShape, PublisherRig, Set, built, fetched, needs_a_plain_channel, observed,
-    plain_shapes, present_held, publish, sha, stage, staged_held, staging_publisher, stranger,
+    Arrangement, ChannelShape, PublisherRig, Set, built, fetched, fetched_by_a_stranger,
+    needs_a_plain_channel, observed, plain_shapes, present_held, publish, sha, siblings_beside,
+    stage, staged_held, staging_publisher, stranger,
 };
 use super::{must, must_err, must_some, same};
 use crate::{
@@ -46,8 +47,9 @@ pub(super) fn needs_a_registry_that_can_burn<R: PublisherRig>(rig: &R) -> Option
 }
 
 /// A coordinate whose staged state vanished is not committed, and nobody holds it: the commit is
-/// an error that promises no effect (`Refused` or `Permanent`), an observe finds `Absent`, and a
-/// new stage of it works. This is the world in which the reservation was lost; it is not the
+/// `Refused` or `Permanent` (an answer that asks to be retried, such as `RateLimited`, would be
+/// retried for ever instead of staged again), an observe finds `Absent`, and a new stage of it
+/// works. This is the world in which the reservation was lost; it is not the
 /// race of another writer, whose commit makes the version taken and answers `Duplicate`.
 pub(super) fn a_commit_of_staged_state_that_vanished_is_not_committed_and_a_restage_works<
     R: PublisherRig,
@@ -66,9 +68,11 @@ pub(super) fn a_commit_of_staged_state_that_vanished_is_not_committed_and_a_rest
         "a commit of staged state that vanished",
     );
     same(
-        refusal.promises_no_effect(),
+        matches!(refusal, SeamError::Refused(_) | SeamError::Permanent(_)),
         true,
-        "a commit of staged state that vanished promises no effect",
+        &format!(
+            "the answer to a commit of staged state that vanished, {refusal:?}, is Refused or Permanent"
+        ),
     );
     same(
         observed(rig, &mut p, GrantPhase::Stage, &set, 0),
@@ -92,27 +96,55 @@ pub(super) fn a_commit_of_staged_state_that_vanished_is_not_committed_and_a_rest
 
 /// A commit that is repeated while the first is becoming readable (its answer was not seen) is
 /// `Committed` or `Duplicate`, whichever the registry says, and never a second write: the
-/// coordinate then reads as `Absent` until it is readable, and as `Present` with the digest of
-/// the bytes that were sent, whose bytes are the first ones.
+/// coordinate then reads as `Absent` until it is readable, and as `Present` with the `Held` of the
+/// first commit (the digest of the bytes that were sent, the stamp and the mark it declared),
+/// whose bytes are the first ones. The repeat is asked three times: as it was, with another
+/// stamp, and with another mark, so that a registry that writes the coordinate again with what
+/// the repeat declares is caught.
 pub(super) fn a_retry_of_a_commit_that_is_becoming_readable_is_committed_or_duplicate_and_never_a_second_write<
     R: PublisherRig,
 >(
     rig: &R,
     shape: &ChannelShape,
 ) {
-    let mut p = built(rig, shape);
     let set = Set::of(rig, &["a"]);
-    stage(rig, &mut p, &set);
+    let mut restamped = set.clone();
+    restamped.held.stamp = Some(Stamped {
+        build_number: 42,
+        source_commit: "def456".to_owned(),
+    });
+    let mut marked = set.clone();
+    marked.held.exceptional = true;
+    for (what, repeat) in [
+        ("as it was", &set),
+        ("with another stamp", &restamped),
+        ("with another mark", &marked),
+    ] {
+        a_retry_is_not_a_second_write(rig, shape, what, &set, repeat);
+    }
+}
+
+/// One repeat of the commit of `set`, `what` it declares, on a channel of its own, so that a
+/// later repeat does not put back what an earlier one replaced.
+fn a_retry_is_not_a_second_write<R: PublisherRig>(
+    rig: &R,
+    shape: &ChannelShape,
+    what: &str,
+    set: &Set,
+    repeat: &Set,
+) {
+    let mut p = built(rig, shape);
+    stage(rig, &mut p, set);
     rig.arrange(&mut p, &Arrangement::CommitVisibleAfter(LAG));
-    super::publisher_rig::commit(rig, &mut p, &set);
-    let blobs = set.blobs();
-    let items = set.items(&blobs);
-    let grant = rig.grant(&p, GrantPhase::Commit, &set.coords);
+    super::publisher_rig::commit(rig, &mut p, set);
+    let blobs = repeat.blobs();
+    let items = repeat.items(&blobs);
+    let grant = rig.grant(&p, GrantPhase::Commit, &repeat.coords);
     let retry = must(p.commit(&grant, &items), "a retry of a commit");
     same(
         matches!(retry, CommitAnswer::Committed | CommitAnswer::Duplicate),
         true,
-        "the answer to a retry of a commit that is becoming readable",
+        &format!("the answer to a retry {what} of a commit that is becoming readable"),
     );
     let mut seen = None;
     for _ in 0..=LAG + 1 {
@@ -133,14 +165,17 @@ pub(super) fn a_retry_of_a_commit_that_is_becoming_readable_is_committed_or_dupl
         "the coordinate, readable after the observes it needed",
     );
     same(
-        held.digest,
-        set.digest(0),
-        "the digest of a coordinate that became readable",
+        held,
+        Held {
+            digest: set.digest(0),
+            ..set.held.clone()
+        },
+        &format!("what a coordinate holds after a retry {what}: what the first commit declared"),
     );
     same(
         fetched(rig, &mut p, &set.coords[0]),
         Some(set.bytes(0).to_vec()),
-        "the bytes after a retry of a commit",
+        &format!("the bytes after a retry {what} of a commit"),
     );
 }
 
@@ -346,15 +381,11 @@ pub(super) fn a_burned_coordinate_is_neither_absent_nor_present_nor_committable<
     );
 }
 
-/// Whether the read-back of `k` passes: the bytes are fetched as a stranger and hashed by the
-/// reader, and what they hash to is the digest the action expects.
-fn read_back_passes<R: PublisherRig>(
-    rig: &R,
-    p: &mut R::Publisher,
-    k: &Coordinate,
-    expected: &str,
-) -> bool {
-    fetched(rig, p, k).is_some_and(|bytes| sha(&bytes) == expected)
+/// Whether the read-back of `k` on a public channel passes: the bytes are fetched as a stranger
+/// (`Grant::none()`) and hashed by the reader, and what they hash to is the digest the action
+/// expects. The scenarios of this part run on public channels only.
+fn read_back_passes<P: Publisher>(p: &mut P, k: &Coordinate, expected: &str) -> bool {
+    fetched_by_a_stranger(p, k).is_some_and(|bytes| sha(&bytes) == expected)
 }
 
 /// A registry reports, from `observe`, the digest it verified over the bytes it stored, and not
@@ -393,12 +424,12 @@ pub(super) fn a_registry_that_echoes_the_declared_digest_fails_readback<R: Publi
             "the digest a committed coordinate is observed with, from the bytes that were sent",
         );
         same(
-            read_back_passes(rig, &mut p, k, &set.digest(at)),
+            read_back_passes(&mut p, k, &set.digest(at)),
             true,
             "the read-back against the digest of the bytes that were sent",
         );
         same(
-            read_back_passes(rig, &mut p, k, &declared),
+            read_back_passes(&mut p, k, &declared),
             false,
             "the read-back against a digest that was only declared",
         );
@@ -447,7 +478,19 @@ pub(super) fn the_declarations_of_a_rig_hold_of_what_it_builds<R: PublisherRig>(
     }
     coordinates_keep_their_labels(rig);
     members_depend_on_their_seed(rig);
+    siblings_are_named(rig);
     siblings_differ_in_their_field(rig);
+}
+
+/// The rig names a sibling the scenarios can publish beside the base: the checks about siblings
+/// are parts of scenarios about other things, and run over what the rig names, so a rig that
+/// names none would pass them without being asked.
+fn siblings_are_named<R: PublisherRig>(rig: &R) {
+    same(
+        siblings_beside(rig, &rig.coordinate("a")).is_empty(),
+        false,
+        "the siblings the rig names that the scenarios publish beside the base",
+    );
 }
 
 /// A coordinate is distinct for each label, and its name starts with the label, because the

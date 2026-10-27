@@ -745,19 +745,16 @@ impl Publisher for Flawed {
                 Ok(Presence::Absent)
             }
             (Some(Flaw::BurnedReadsAsAbsent), Ok(Presence::Burned)) => Ok(Presence::Absent),
-            (
-                Some(Flaw::EchoesTheDeclaredDigest),
-                Ok(Presence::Present(held) | Presence::Staged(held)),
-            ) => {
+            (Some(Flaw::EchoesTheDeclaredDigest), Ok(found)) => {
                 let declared = self.declared.iter().rev().find(|(c, _)| c == k);
-                let held = match declared {
+                let echo = |held: Held| match declared {
                     Some((_, digest)) => digest_of(held, digest),
                     None => held,
                 };
-                Ok(if staged {
-                    Presence::Staged(held)
-                } else {
-                    Presence::Present(held)
+                Ok(match found {
+                    Presence::Present(held) => Presence::Present(echo(held)),
+                    Presence::Staged(held) => Presence::Staged(echo(held)),
+                    other => other,
                 })
             }
             (_, result) => result,

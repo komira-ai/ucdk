@@ -16,7 +16,7 @@ pure = true
 [dependencies]
 sha2.workspace = true
 ucdk-core = { path = "../ucdk-core" }
-ucdk-release ={ path = "../ucdk-release" }
+ucdk-release = { path = "../ucdk-release" }
 ucdk-release-proto = { path = "../ucdk-release-proto" }
 
 [lints]

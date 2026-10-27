@@ -124,11 +124,10 @@ pub fn publisher_scenarios<R: PublisherRig>() -> Vec<Scenario<R>> {
             more::a_duplicate_answer_leaves_every_coordinate_of_the_set_as_it_was::<R>,
         )
         .gated(needs_a_set_commit::<R>),
-        Scenario::new(
-            "a_set_that_names_a_coordinate_twice_is_refused",
-            more::a_set_that_names_a_coordinate_twice_is_refused::<R>,
-        )
-        .gated(needs_staging::<R>),
+        Scenario::new("a_set_that_names_a_coordinate_twice_is_refused", |rig| {
+            on_each_plain_shape(rig, more::a_set_that_names_a_coordinate_twice_is_refused::<R>);
+        })
+        .gated(needs_a_plain_channel::<R>),
         Scenario::new(
             "a_stage_or_commit_grant_reads_no_staged_state_but_through_observe",
             more::a_stage_or_commit_grant_reads_no_staged_state_but_through_observe::<R>,
@@ -202,7 +201,8 @@ pub fn publisher_scenarios<R: PublisherRig>() -> Vec<Scenario<R>> {
 }
 
 /// A coordinate is created once: a commit of the bytes it already holds is `Duplicate`, on a
-/// channel that stages and on one that does not, and the coordinate is as it was.
+/// channel that stages and on one that does not, and the coordinate is as it was. A commit of
+/// staged state that lost a race is `Duplicate` too.
 fn a_second_commit_of_the_same_bytes_is_duplicate<R: PublisherRig>(rig: &R) {
     for shape in plain_shapes(rig) {
         let mut p = built(rig, &shape);
@@ -240,7 +240,41 @@ fn a_second_commit_of_the_same_bytes_is_duplicate<R: PublisherRig>(rig: &R) {
             Some(set.bytes(0).to_vec()),
             "the bytes after the second commit",
         );
+        if shape.stages {
+            a_commit_that_lost_a_race_leaves_the_bytes_that_won(rig, &shape);
+        }
     }
+}
+
+/// On a channel that stages, a commit of staged state that lost a race is `Duplicate` and leaves
+/// the bytes that won: having staged a coordinate is no licence to replace one that another
+/// writer committed before the commit landed.
+fn a_commit_that_lost_a_race_leaves_the_bytes_that_won<R: PublisherRig>(
+    rig: &R,
+    shape: &ChannelShape,
+) {
+    let mut p = built(rig, shape);
+    let set = Set::of(rig, &["a"]);
+    stage(rig, &mut p, &set);
+    let theirs = set.reseeded(rig, 1);
+    rig.arrange(
+        &mut p,
+        &Arrangement::RaceNextCommit(theirs.bytes(0).to_vec()),
+    );
+    let blobs = set.blobs();
+    let items = set.items(&blobs);
+    let grant = rig.grant(&p, GrantPhase::Commit, &set.coords);
+    same(
+        must(p.commit(&grant, &items), "a commit that lost a race"),
+        CommitAnswer::Duplicate,
+        &format!("the answer to a commit of staged state that lost a race ({shape:?})"),
+    );
+    same(
+        fetched(rig, &mut p, &set.coords[0]),
+        Some(theirs.bytes(0).to_vec()),
+        "the bytes after a race on a channel that stages",
+    );
+    present_held(stranger(&mut p, &set.coords[0]));
 }
 
 /// A stage over a coordinate the caller itself has staged is `Duplicate` too, with the same
