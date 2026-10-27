@@ -63,6 +63,21 @@ fn a_gated_scenario_the_rig_lacks_is_skipped_with_the_reason_and_is_not_run() {
     );
 }
 
+fn a_gate_that_panics(_: &()) -> Option<&'static str> {
+    panic!("a rig that cannot build the channel the gate asked for");
+}
+
+#[test]
+fn a_gate_that_panics_is_a_failed_scenario_and_not_a_crash_of_the_kit() {
+    let kit = vec![
+        Scenario::new("gated", passes).gated(a_gate_that_panics),
+        Scenario::new("after", passes),
+    ];
+    let report = run_scenarios(&(), &kit);
+    assert_eq!(report.failed(), vec!["gated"]);
+    assert_eq!(report.passed(), vec!["after"]);
+}
+
 #[test]
 fn a_skip_is_never_counted_as_a_pass_and_never_as_a_failure() {
     let report = run_scenarios(&(), &gated_kit());
