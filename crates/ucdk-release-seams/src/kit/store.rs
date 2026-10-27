@@ -42,6 +42,25 @@ fn key_on(platform: &str, revision: &str, member: &str) -> StoreKey {
     )
 }
 
+/// Payloads that a store gets wrong when it treats bytes as text or sizes a buffer: one that ends
+/// in a line feed, in a carriage return and a line feed, or in a NUL; one that starts with a
+/// UTF-8 byte order mark; one of zero bytes alone; one of exactly 4096 bytes and one of 8192; and
+/// one just past 1 MiB. Each name is a path of its own.
+fn edge_payloads() -> Vec<(&'static str, Vec<u8>)> {
+    // Never zero, and different at every few positions, so that a lost byte shows.
+    let patterned = |len: usize| -> Vec<u8> { (0..len).map(|n| (n % 251) as u8 + 1).collect() };
+    vec![
+        ("edge_ends_in_lf", b"text\n".to_vec()),
+        ("edge_ends_in_crlf", b"text\r\n".to_vec()),
+        ("edge_ends_in_nul", b"text\0".to_vec()),
+        ("edge_starts_with_bom", b"\xef\xbb\xbftext".to_vec()),
+        ("edge_all_zero", vec![0; 64]),
+        ("edge_4096_bytes", patterned(4096)),
+        ("edge_8192_bytes", patterned(8192)),
+        ("edge_just_over_1_mib", patterned((1 << 20) + 10)),
+    ]
+}
+
 pub fn run_store_kit<R: StoreRig>(rig: &R) -> Report {
     run_scenarios(rig, &store_scenarios())
 }
@@ -90,11 +109,14 @@ fn an_entry_reads_back_what_was_written<R: StoreRig>(rig: &R) {
     // and an empty file are entries like any other, and so are paths as deep as an OCI layout's
     // blobs and deeper. A path holds what its last write gave it, and nothing of an earlier one:
     // however much longer it was, when the last is empty, when the last is the same as the one
-    // before it or the same as an earlier one that another write replaced, and on a third or
-    // later write, at the top level and at depth two and four.
+    // before it or the same as an earlier one that another write replaced, on a third or later
+    // write, and when it has the length of the first but other bytes, at the top level and at
+    // depth two and four. Payloads that look like text, or like a size, come back as they went
+    // in (`edge_payloads`).
     let binary: &[u8] = &[0xff, 0xfe, 0x00, 0x80, 0xc3, 0x28];
     let big: Vec<u8> = (0..=255u8).cycle().take(100_000).collect();
     let long: &[u8] = b"the first, longer bytes";
+    let edges = edge_payloads();
     let mut rewrites: Vec<(String, Vec<&[u8]>)> = Vec::new();
     for dir in ["", "dir/", "a/b/c/"] {
         for (name, writes) in [
@@ -111,6 +133,7 @@ fn an_entry_reads_back_what_was_written<R: StoreRig>(rig: &R) {
                 vec![b"same".as_slice(), b"same".as_slice()],
             ),
             ("empty_twice", vec![b"".as_slice(), b"".as_slice()]),
+            ("same_length", vec![b"aaa".as_slice(), b"bbb".as_slice()]),
         ] {
             rewrites.push((format!("{dir}{name}"), writes));
         }
@@ -132,6 +155,9 @@ fn an_entry_reads_back_what_was_written<R: StoreRig>(rig: &R) {
         );
         must(writer.put_file("binary", binary), "put_file of bytes");
         must(writer.put_file("big", &big), "put_file of a large file");
+        for (rel, bytes) in &edges {
+            must(writer.put_file(rel, bytes), &format!("put_file of {rel}"));
+        }
         must(writer.put_file("empty", b""), "put_file of an empty file");
         must(
             writer.put_file("dir/empty", b""),
@@ -155,6 +181,11 @@ fn an_entry_reads_back_what_was_written<R: StoreRig>(rig: &R) {
     ]
     .map(|(rel, bytes)| (rel.to_owned(), bytes.to_vec()))
     .to_vec();
+    held.extend(
+        edges
+            .iter()
+            .map(|(rel, bytes)| ((*rel).to_owned(), bytes.clone())),
+    );
     held.extend(rewrites.iter().map(|(rel, writes)| {
         (
             rel.clone(),
@@ -162,9 +193,16 @@ fn an_entry_reads_back_what_was_written<R: StoreRig>(rig: &R) {
         )
     }));
     for (rel, want) in &held {
+        let got = must(store.get(&k, rel), "get");
+        // Compared whole, but told by length: a payload past a megabyte is not printed.
         same(
-            must(store.get(&k, rel), "get"),
-            Some(want.clone()),
+            got.as_ref().map(Vec::len),
+            Some(want.len()),
+            &format!("the length of {rel}, the last that was written to it"),
+        );
+        same(
+            got.as_ref() == Some(want),
+            true,
             &format!("the bytes of {rel}, the last that was written to it"),
         );
     }
@@ -702,6 +740,65 @@ fn discard_removes_every_path_of_an_entry<R: StoreRig>(rig: &R) {
         must(store.files(&never[0]), "files"),
         Vec::new(),
         "the files of an entry begun after a discard that came before any begin",
+    );
+    // The set document of a scope and its members are three entries, and a discard of one is a
+    // discard of that one: the set key leaves its members, and a member leaves the set document
+    // and the other member.
+    let set_key = must(
+        StoreKey::set(&scope("build", "g5")),
+        "the key of a set document",
+    );
+    let members = [key("build", "g5", "tool"), key("build", "g5", "other")];
+    let entries = [&set_key, &members[0], &members[1]];
+    // Each entry holds one file with a name of its own, so that a store that answers for the
+    // wrong entry is told by the bytes and not by the name.
+    let own = |entry: &StoreKey| format!("{}.bin", entry.as_str().rsplit('/').next().unwrap_or(""));
+    let hold = |store: &mut R::Store, entry: &StoreKey| {
+        must(
+            must(store.begin(entry), "begin")
+                .put_file(&own(entry), format!("bytes of {entry}").as_bytes()),
+            "put_file",
+        );
+    };
+    let holds = |store: &mut R::Store, entry: &StoreKey, what: &str| {
+        same(
+            must(store.get(entry, &own(entry)), "get"),
+            Some(format!("bytes of {entry}").into_bytes()),
+            what,
+        );
+    };
+    for entry in entries {
+        hold(&mut store, entry);
+    }
+    must(store.discard(&set_key), "discard of a set document");
+    same(
+        must(store.get(&set_key, &own(&set_key)), "get"),
+        None,
+        "the set document after its discard",
+    );
+    for member in &members {
+        holds(
+            &mut store,
+            member,
+            "a member after the discard of the set document of its scope",
+        );
+    }
+    hold(&mut store, &set_key);
+    must(store.discard(&members[0]), "discard of a member");
+    same(
+        must(store.get(&members[0], &own(&members[0])), "get"),
+        None,
+        "a member after its discard",
+    );
+    holds(
+        &mut store,
+        &set_key,
+        "the set document after the discard of a member of its scope",
+    );
+    holds(
+        &mut store,
+        &members[1],
+        "a member after the discard of another member of its scope",
     );
 }
 

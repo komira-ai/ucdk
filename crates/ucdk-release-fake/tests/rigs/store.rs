@@ -141,6 +141,84 @@ pub enum Flaw {
     FilesNaturalSort,
     /// `files` sorts by UTF-16 code unit, so a character above U+FFFF comes before U+FF5E.
     FilesUtf16Sort,
+    /// A writer drops one trailing line feed.
+    StripsATrailingNewline,
+    /// A writer turns every carriage return and line feed into a line feed.
+    CrlfBecomesLf,
+    /// A writer drops the NULs at the end of a file.
+    StripsTrailingNuls,
+    /// A writer drops a UTF-8 byte order mark at the start of a file.
+    StripsTheBom,
+    /// A writer stores a file of zero bytes alone as an empty one.
+    AllZeroStoredEmpty,
+    /// A writer drops the last byte of a file whose length is a multiple of 4096.
+    LosesTheLastByteAtA4kMultiple,
+    /// A writer keeps no more than the first 1 MiB of a file.
+    TruncatesAt1MiB,
+    /// A second write of one path with the length of the first and other bytes is ignored.
+    EqualLengthRewriteIgnored,
+    /// `discard` of the key of a set document discards the members of its scope too.
+    DiscardSetKeyTakesTheMembers,
+    /// `discard` of a member discards the set document of its scope too.
+    DiscardMemberTakesSetDocument,
+}
+
+/// The bytes a stub that changes what is written keeps of `bytes`.
+fn altered(flaw: Flaw, bytes: &[u8]) -> Vec<u8> {
+    match flaw {
+        Flaw::StripsATrailingNewline => bytes.strip_suffix(b"\n").unwrap_or(bytes).to_vec(),
+        Flaw::CrlfBecomesLf => {
+            let mut out = Vec::with_capacity(bytes.len());
+            for (at, byte) in bytes.iter().enumerate() {
+                if !(*byte == b'\r' && bytes.get(at + 1) == Some(&b'\n')) {
+                    out.push(*byte);
+                }
+            }
+            out
+        }
+        Flaw::StripsTrailingNuls => {
+            let end = bytes.iter().rposition(|b| *b != 0).map_or(0, |at| at + 1);
+            bytes[..end].to_vec()
+        }
+        Flaw::StripsTheBom => bytes
+            .strip_prefix(b"\xef\xbb\xbf".as_slice())
+            .unwrap_or(bytes)
+            .to_vec(),
+        Flaw::AllZeroStoredEmpty if bytes.iter().all(|b| *b == 0) => Vec::new(),
+        Flaw::LosesTheLastByteAtA4kMultiple
+            if !bytes.is_empty() && bytes.len().is_multiple_of(4096) =>
+        {
+            bytes[..bytes.len() - 1].to_vec()
+        }
+        Flaw::TruncatesAt1MiB => bytes[..bytes.len().min(1 << 20)].to_vec(),
+        _ => bytes.to_vec(),
+    }
+}
+
+/// The scope a key belongs to: the key of a member without its member, and the key of a set
+/// document without its `set`.
+fn scope_of(key: &StoreKey) -> &str {
+    let text = key.as_str();
+    match text.split_once("/m/") {
+        Some((scope, _)) => scope,
+        None => text.strip_suffix("/set").unwrap_or(text),
+    }
+}
+
+fn is_member(key: &StoreKey) -> bool {
+    key.as_str().contains("/m/")
+}
+
+/// A writer that stores what `altered` makes of each file.
+struct Altering<'a> {
+    inner: Box<dyn EntryWriter + 'a>,
+    flaw: Flaw,
+}
+
+impl EntryWriter for Altering<'_> {
+    fn put_file(&mut self, rel: &str, bytes: &[u8]) -> Result<(), SeamError> {
+        self.inner.put_file(rel, &altered(self.flaw, bytes))
+    }
 }
 
 fn deep(rel: &str) -> bool {
@@ -232,6 +310,9 @@ impl EntryWriter for Shaping<'_> {
             }
             Some(Flaw::NestedEmptyRewriteIgnored) => {
                 bytes.is_empty() && rel.contains('/') && held.is_some()
+            }
+            Some(Flaw::EqualLengthRewriteIgnored) => {
+                held.is_some_and(|old| old.len() == bytes.len())
             }
             _ => false,
         };
@@ -440,6 +521,7 @@ impl ArtifactStore for Flawed {
                     | Flaw::NestedRewriteKeepsTheOldTail
                     | Flaw::EmptyThenNonEmptyIgnored
                     | Flaw::NestedEmptyRewriteIgnored
+                    | Flaw::EqualLengthRewriteIgnored
                     | Flaw::WriterPoisonedAfterRefusal
                     | Flaw::TrailingSpaceTrimmed
                     | Flaw::UnicodeFolded
@@ -454,6 +536,23 @@ impl ArtifactStore for Flawed {
         }
         if self.flaw == Some(Flaw::PathsAreCaseFolded) {
             return Ok(Box::new(Folding(writer)));
+        }
+        if let Some(flaw) = self.flaw
+            && matches!(
+                flaw,
+                Flaw::StripsATrailingNewline
+                    | Flaw::CrlfBecomesLf
+                    | Flaw::StripsTrailingNuls
+                    | Flaw::StripsTheBom
+                    | Flaw::AllZeroStoredEmpty
+                    | Flaw::LosesTheLastByteAtA4kMultiple
+                    | Flaw::TruncatesAt1MiB
+            )
+        {
+            return Ok(Box::new(Altering {
+                inner: writer,
+                flaw,
+            }));
         }
         let drops: Option<fn(&str, &[u8]) -> bool> = match self.flaw {
             Some(Flaw::WriterAcceptsATrailingSlash) => Some(|rel, _| rel.ends_with('/')),
@@ -639,6 +738,20 @@ impl ArtifactStore for Flawed {
                 }
             }
             return Ok(());
+        }
+        if self.flaw == Some(Flaw::DiscardSetKeyTakesTheMembers) && !is_member(key) {
+            for other in self.inner.keys()? {
+                if is_member(&other) && scope_of(&other) == scope_of(key) {
+                    self.inner.discard(&other)?;
+                }
+            }
+        }
+        if self.flaw == Some(Flaw::DiscardMemberTakesSetDocument) && is_member(key) {
+            for other in self.inner.keys()? {
+                if !is_member(&other) && scope_of(&other) == scope_of(key) {
+                    self.inner.discard(&other)?;
+                }
+            }
         }
         if self.flaw == Some(Flaw::DiscardWipesEveryEntry) {
             for each in self.inner.keys()? {
