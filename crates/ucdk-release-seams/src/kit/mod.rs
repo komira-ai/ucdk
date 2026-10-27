@@ -11,22 +11,27 @@
 //! so a kit reports every scenario that failed, not only the first. The kits read no clock and
 //! wait for nothing: time moves only when a scenario asks its rig to move it.
 //!
-//! - [`run_output_files_kit`], [`run_process_runner_kit`] and [`run_store_kit`] run a whole kit
-//!   and return its [`Report`]; the kits of the other seams join them in the parts that follow.
-//! - [`output_files_scenarios`], [`process_runner_scenarios`] and [`store_scenarios`] give the
-//!   scenarios one by one, for a test per scenario.
+//! - [`run_build_system_kit`], [`run_output_files_kit`], [`run_process_runner_kit`] and
+//!   [`run_store_kit`] run a whole kit and return its [`Report`]; the kits of the other seams
+//!   join them in the parts that follow.
+//! - [`build_system_scenarios`], [`output_files_scenarios`], [`process_runner_scenarios`] and
+//!   [`store_scenarios`] give the scenarios one by one, for a test per scenario.
 
 use std::any::Any;
 use std::fmt::Debug;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::{Heartbeat, SeamError, Stop};
+use crate::{EntryWriter, Heartbeat, SeamError, Stop, valid_rel};
 
+mod build_system;
 mod output_files;
 mod process_runner;
 mod store;
 
+pub use build_system::{
+    BUILD_LABEL, BuildSystemRig, BuildWorld, build_system_scenarios, run_build_system_kit,
+};
 pub use output_files::{Node, OutputFilesRig, output_files_scenarios, run_output_files_kit};
 pub use process_runner::{Behavior, ProcessRig, process_runner_scenarios, run_process_runner_kit};
 pub use store::{StoreRig, run_store_kit, store_scenarios};
@@ -209,6 +214,26 @@ impl Heartbeat for Beats<'_> {
             Err(Stop)
         } else {
             Ok(())
+        }
+    }
+}
+
+/// An entry writer that keeps every call it was given, valid or not, and refuses a path that is
+/// not a relative path of an entry, as a store does.
+#[derive(Debug, Default)]
+pub(crate) struct Recorder {
+    pub(crate) calls: Vec<(String, Vec<u8>)>,
+}
+
+impl EntryWriter for Recorder {
+    fn put_file(&mut self, rel: &str, bytes: &[u8]) -> Result<(), SeamError> {
+        self.calls.push((rel.to_owned(), bytes.to_vec()));
+        if valid_rel(rel) {
+            Ok(())
+        } else {
+            Err(SeamError::Refused(
+                ucdk_release_proto::v1::Reason::SetMember,
+            ))
         }
     }
 }

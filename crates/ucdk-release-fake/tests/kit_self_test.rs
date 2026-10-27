@@ -5,15 +5,17 @@
 
 mod rigs;
 
+use rigs::build_system::{FakeBuildRig, Flaw as Build};
 use rigs::hostile::{HostileRig, Wrong};
 use rigs::loose::{LooseRig, ShallowRig};
 use rigs::output_files::{FakeFilesRig, Flaw as Files};
 use rigs::process_runner::{FakeProcessRig, Flaw as Process};
 use rigs::store::{FakeStoreRig, Flaw as Store};
 use rigs::{each_fails_alone, further_stubs_fail_exactly, names};
+use ucdk_release_proto::v1::BuildSystemKind;
 use ucdk_release_seams::kit::{
-    output_files_scenarios, process_runner_scenarios, run_output_files_kit, run_process_runner_kit,
-    run_store_kit, store_scenarios,
+    build_system_scenarios, output_files_scenarios, process_runner_scenarios, run_build_system_kit,
+    run_output_files_kit, run_process_runner_kit, run_store_kit, store_scenarios,
 };
 
 #[test]
@@ -29,6 +31,70 @@ fn each_further_store_stub_fails_the_scenarios_that_hold_it() {
 #[test]
 fn each_further_process_runner_stub_fails_the_scenarios_that_hold_it() {
     further_process_runner();
+}
+
+#[test]
+fn each_further_build_system_stub_fails_the_scenarios_that_hold_it() {
+    further_build_system();
+}
+
+fn further_build_system() {
+    const SAME_BYTES: &str = "same_command_same_bytes";
+    const COPY_OUT: &str = "copy_out_writes_only_into_the_entry_it_is_given";
+    const FLAGS: &str = "base_flags_come_before_target_flags_in_order";
+    const REPLACES: &str = "a_target_environment_value_replaces_the_base_value_of_the_same_key";
+    const INHERITS: &str = "nothing_is_inherited_from_the_process_environment";
+    const PLACEHOLDERS: &str = "placeholders_are_substituted_in_flag_and_environment_values";
+    const STAMP: &str = "the_stamp_reaches_a_build_only_through_placeholders";
+    const ONE_OUTPUT: &str = "a_build_lists_exactly_one_output";
+    const SYMLINK: &str = "a_symlink_in_an_output_is_refused";
+    const RUN_SPECIFIC: &str = "nothing_run_specific_in_the_bytes";
+    let scenarios = names(&build_system_scenarios::<FakeBuildRig>());
+    for kind in [BuildSystemKind::Buck2, BuildSystemKind::Bazel] {
+        further_stubs_fail_exactly(
+            "build system",
+            &scenarios,
+            &[
+                (Build::CopyOutWritesGarbage, &[SAME_BYTES]),
+                (Build::CopyOutWritesAnEmptyFile, &[SAME_BYTES]),
+                (Build::CopyOutWritesAnExtraFile, &[COPY_OUT]),
+                (Build::TestVerbTargetFlagsFirst, &[FLAGS]),
+                (Build::TestVerbBaseEnvironmentWins, &[REPLACES]),
+                (Build::TestVerbInheritsTheEnvironment, &[INHERITS]),
+                (
+                    Build::TestVerbDropsTheEnvironment,
+                    &[REPLACES, INHERITS, PLACEHOLDERS],
+                ),
+                (
+                    Build::BaseFlagsRepeatedAfterTheOwnedFlag,
+                    &[FLAGS, "ucdk_owned_flags_come_after_the_authors"],
+                ),
+                (
+                    Build::DirectoryIsListedAsAFile,
+                    &[SAME_BYTES, ONE_OUTPUT, COPY_OUT],
+                ),
+                (
+                    Build::DirectoryOutputIsRefused,
+                    &[SAME_BYTES, ONE_OUTPUT, RUN_SPECIFIC, COPY_OUT],
+                ),
+                (Build::NestedSymlinkIsAccepted, &[SYMLINK]),
+                (Build::CopyOutOfADirectoryEscapes, &[COPY_OUT]),
+                (Build::CopyOutOfADirectoryWritesGarbage, &[SAME_BYTES]),
+                (Build::CopyOutOfADirectoryCarriesTheClock, &[RUN_SPECIFIC]),
+            ],
+            |flaw| run_build_system_kit(&FakeBuildRig::flawed(kind, flaw)),
+        );
+    }
+    // Only Bazel has the two verbs that locate an output.
+    further_stubs_fail_exactly(
+        "build system (Bazel verbs)",
+        &scenarios,
+        &[
+            (Build::QueryVerbInheritsTheEnvironment, &[INHERITS]),
+            (Build::InfoVerbLeaksTheStamp, &[STAMP]),
+        ],
+        |flaw| run_build_system_kit(&FakeBuildRig::flawed(BuildSystemKind::Bazel, flaw)),
+    );
 }
 
 fn further_process_runner() {
@@ -381,6 +447,7 @@ fn each_scenario_fails_on_its_nonconforming_stub() {
     output_files();
     store();
     process_runner();
+    build_system();
 }
 
 fn output_files() {
@@ -484,6 +551,79 @@ fn process_runner() {
         ],
         |flaw| run_process_runner_kit(&FakeProcessRig::flawed(flaw)),
     );
+}
+
+fn build_system() {
+    for kind in [BuildSystemKind::Buck2, BuildSystemKind::Bazel] {
+        each_fails_alone(
+            "build system",
+            &names(&build_system_scenarios::<FakeBuildRig>()),
+            &[
+                ("same_command_same_bytes", Build::CallCounterInTheBytes),
+                (
+                    "base_flags_come_before_target_flags_in_order",
+                    Build::TargetFlagsFirst,
+                ),
+                (
+                    "a_target_environment_value_replaces_the_base_value_of_the_same_key",
+                    Build::BaseEnvironmentWins,
+                ),
+                (
+                    "nothing_is_inherited_from_the_process_environment",
+                    Build::InheritsTheEnvironment,
+                ),
+                (
+                    "placeholders_are_substituted_in_flag_and_environment_values",
+                    Build::LeavesTheRevisionPlaceholder,
+                ),
+                (
+                    "the_stamp_reaches_a_build_only_through_placeholders",
+                    Build::StampLeaksIntoTheCommand,
+                ),
+                (
+                    "ucdk_owned_flags_come_after_the_authors",
+                    Build::OwnedFlagFirst,
+                ),
+                (
+                    "a_build_lists_exactly_one_output",
+                    Build::ListsTheOutputTwice,
+                ),
+                ("no_output_is_build_output", Build::NoOutputIsAnEmptyListing),
+                (
+                    "two_outputs_are_build_output",
+                    Build::TwoOutputsAnswersTheFirst,
+                ),
+                (
+                    "a_symlink_in_an_output_is_refused",
+                    Build::SymlinkIsAccepted,
+                ),
+                (
+                    "a_failed_build_is_permanent_with_the_tail_of_its_output",
+                    Build::FailureHasNoTail,
+                ),
+                ("unstartable_is_not_failed", Build::UnstartableIsPermanent),
+                ("nothing_run_specific_in_the_bytes", Build::ClockInTheBytes),
+                (
+                    "copy_out_writes_only_into_the_entry_it_is_given",
+                    Build::CopyOutEscapes,
+                ),
+                (
+                    "a_test_target_that_runs_nothing_is_not_a_pass",
+                    Build::NothingRanPasses,
+                ),
+                ("a_failing_test_target_is_not_a_pass", Build::FailureIsAPass),
+                (
+                    "a_test_report_that_cannot_be_read_is_not_a_pass",
+                    Build::UnparseableReportPasses,
+                ),
+                (
+                    "the_build_system_beats_on_progress_and_stops_when_told",
+                    Build::StopIsSwallowed,
+                ),
+            ],
+            |flaw| run_build_system_kit(&FakeBuildRig::flawed(kind, flaw)),
+        );
+    }
 }
 
 fn store() {

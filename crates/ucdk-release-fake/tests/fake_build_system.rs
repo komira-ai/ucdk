@@ -224,6 +224,18 @@ fn a_test_passes_only_when_it_ran_something_and_did_not_fail() {
 }
 
 #[test]
+fn a_failed_invocation_carries_the_tail_it_printed() {
+    let (system, target, stamp) = (system(), target(LABEL, &[]), stamp("1"));
+    let (_, mut fake, hb) = fake();
+    fake.fail_at_call(1);
+    fake.failure_tail("error: boom");
+    let failure = fake.build(&invocation(&system, &target, &stamp, Verb::Build), &hb);
+    assert!(
+        matches!(failure, Err(SeamError::Permanent(why)) if why.contains(LABEL) && why.ends_with("error: boom"))
+    );
+}
+
+#[test]
 fn a_build_that_fails_dies_or_cannot_start() {
     let (system, target, stamp) = (system(), target(LABEL, &[]), stamp("1"));
     let (_, mut fake, hb) = fake();

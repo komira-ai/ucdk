@@ -17,6 +17,7 @@ use ucdk_release_seams::{
 #[derive(Default)]
 struct Faults {
     fail_at_call: Option<u32>,
+    failure_tail: String,
     die_at_call: Option<u32>,
     unstartable: bool,
     no_output: BTreeSet<String>,
@@ -90,6 +91,12 @@ impl FakeBuildSystem {
     /// The `n`th invocation (1 is the first, builds and tests together) exits nonzero.
     pub fn fail_at_call(&mut self, n: u32) {
         self.faults.fail_at_call = Some(n);
+    }
+
+    /// What an invocation that exits nonzero prints last; the `Permanent` answer carries it, as
+    /// the seam promises the tail of the output.
+    pub fn failure_tail(&mut self, tail: &str) {
+        self.faults.failure_tail = tail.to_owned();
     }
 
     /// The `n`th invocation is a build killed under the runner: `Unknown`.
@@ -206,7 +213,8 @@ impl FakeBuildSystem {
         }
         if self.faults.fail_at_call == Some(n) {
             return Err(SeamError::Permanent(format!(
-                "the invocation of {label} exited 1"
+                "the invocation of {label} exited 1, and printed last: {}",
+                self.faults.failure_tail
             )));
         }
         Ok(command)
