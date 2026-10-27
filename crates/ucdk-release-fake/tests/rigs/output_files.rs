@@ -146,6 +146,51 @@ pub enum Flaw {
     /// A `stat`, `list` and `read` that resolve a path whose first part is `..` instead of
     /// refusing it.
     LeadingClimbIsResolved,
+    /// A `list` of a symlink to a directory named with a trailing slash that lists the directory.
+    ListFollowsASlashedLinkToADirectory,
+    /// A `read` of a symlink to a file that answers the file's bytes when the link is not in the
+    /// directory of its target.
+    ReadFollowsALinkInAnotherDirectory,
+    /// A `read` of a symlink to a file that answers the file's bytes when the link is directly
+    /// below the root.
+    ReadFollowsALinkAtTheRoot,
+    /// A `read` of a symlink to a file that answers the file's bytes when the link is three or
+    /// more parts below the root.
+    ReadFollowsADeepLink,
+    /// A `read` of a directory directly below the root that answers an empty file.
+    ReadOfADirectoryAtTheRootIsEmpty,
+    /// A `read` of a directory three or more parts below the root that answers an empty file.
+    ReadOfADeepDirectoryIsEmpty,
+    /// A `read` of a path two or more parts below a regular file that answers that file's bytes.
+    ReadDeepBelowAFileAnswersTheAncestor,
+    /// A `list` of a path two or more parts below a regular file that answers an empty listing.
+    ListDeepBelowAFileIsEmpty,
+    /// A `stat` of a path two or more parts below a regular file that fails with `Unknown`.
+    StatDeepBelowAFileIsAnError,
+    /// A `stat` of a path in a directory that is not there that fails with `Unknown`.
+    StatBelowAMissingDirectoryIsAnError,
+    /// A `list` of a path in a directory that is not there that answers an empty listing.
+    ListBelowAMissingDirectoryIsEmpty,
+    /// A `read` of a path in a directory that is not there that answers an empty file.
+    ReadBelowAMissingDirectoryIsEmpty,
+    /// A `read` of a path that starts with `./` that reads it below the root.
+    ReadAcceptsADotSlashPath,
+    /// A `read` of a path that is the root's path without its first `/` that reads it as absolute.
+    ReadAcceptsARootlessPath,
+    /// A `read` that answers no more than the first 4,194,304 bytes.
+    ReadTruncatesAt4M,
+    /// A `read` that drops the last byte of a file whose length is a multiple of 131,072.
+    ReadDropsTheLastByteAtA128kMultiple,
+    /// A `read` that drops the spaces and tabs at the end of a file.
+    ReadTrimsTrailingBlanks,
+    /// A `read` that answers the bytes it answered before when the file has the same length.
+    CachesReadsByLength,
+}
+
+/// How many parts a path below the root has; 0 for any other.
+fn parts_below_root(path: &str) -> usize {
+    path.strip_prefix(&format!("{ROOT}/"))
+        .map_or(0, |rest| rest.split('/').count())
 }
 
 /// Whether a part of `path` holds two dots without being a `..` part.
@@ -320,6 +365,30 @@ impl Flawed {
         (self.inner.stat(parent) == Ok(Some(FileKind::File))).then(|| parent.to_owned())
     }
 
+    /// The regular file that is two or more parts above `path`, when there is one.
+    fn file_far_above(&mut self, path: &str) -> Option<String> {
+        let mut above = path.rsplit_once('/')?.0;
+        while let Some((higher, _)) = above.rsplit_once('/') {
+            if self.inner.stat(higher) == Ok(Some(FileKind::File)) {
+                return Some(higher.to_owned());
+            }
+            above = higher;
+        }
+        None
+    }
+
+    /// Whether the directory `path` is in is not there.
+    fn directory_above_is_missing(&mut self, path: &str) -> bool {
+        path.rsplit_once('/')
+            .is_some_and(|(parent, _)| self.inner.stat(parent) == Ok(None))
+    }
+
+    /// Whether the directory `path` is in is there.
+    fn directory_above_exists(&mut self, path: &str) -> bool {
+        path.rsplit_once('/')
+            .is_some_and(|(parent, _)| self.inner.stat(parent) == Ok(Some(FileKind::Directory)))
+    }
+
     /// The target of the symlink that `path` names with a slash after it, when it does.
     fn slashed_target(&self, path: &str) -> Option<String> {
         self.target_of(path.strip_suffix('/')?)
@@ -336,6 +405,12 @@ impl OutputFiles for Flawed {
         }
         if self.is(Flaw::LeadingClimbIsResolved) && path.starts_with("/../") {
             return self.inner.stat(&resolved(path));
+        }
+        if (self.is(Flaw::StatDeepBelowAFileIsAnError) && self.file_far_above(path).is_some())
+            || (self.is(Flaw::StatBelowAMissingDirectoryIsAnError)
+                && self.directory_above_is_missing(path))
+        {
+            return Err(SeamError::Unknown(format!("{path} cannot be read")));
         }
         if let Some(link) = path.strip_suffix('/')
             && self.target_of(link).is_some()
@@ -369,9 +444,21 @@ impl OutputFiles for Flawed {
     fn list(&mut self, path: &str) -> Result<Vec<DirEntry>, SeamError> {
         if self.is(Flaw::ListOfMissingIsEmpty)
             && self.inner.stat(path) == Ok(None)
-            && self.file_above(path).is_none()
+            && self.directory_above_exists(path)
         {
             return Ok(Vec::new());
+        }
+        if (self.is(Flaw::ListDeepBelowAFileIsEmpty) && self.file_far_above(path).is_some())
+            || (self.is(Flaw::ListBelowAMissingDirectoryIsEmpty)
+                && self.directory_above_is_missing(path))
+        {
+            return Ok(Vec::new());
+        }
+        if self.is(Flaw::ListFollowsASlashedLinkToADirectory)
+            && let Some(target) = self.slashed_target(path)
+            && self.target_kind(path.trim_end_matches('/')) == Some(FileKind::Directory)
+        {
+            return self.inner.list(&target);
         }
         if let Some(refused) = self.refuses(path) {
             return Err(refused);
@@ -558,6 +645,45 @@ impl OutputFiles for Flawed {
         {
             return self.inner.read(&parent);
         }
+        if self.is(Flaw::ReadDeepBelowAFileAnswersTheAncestor)
+            && let Some(ancestor) = self.file_far_above(path)
+        {
+            return self.inner.read(&ancestor);
+        }
+        if self.is(Flaw::ReadBelowAMissingDirectoryIsEmpty) && self.directory_above_is_missing(path)
+        {
+            return Ok(Vec::new());
+        }
+        if self.is(Flaw::ReadAcceptsADotSlashPath)
+            && let Some(rest) = path.strip_prefix("./")
+        {
+            return self.inner.read(&full(rest));
+        }
+        if self.is(Flaw::ReadAcceptsARootlessPath)
+            && let Some(rest) = path.strip_prefix(ROOT.trim_start_matches('/'))
+            && rest.starts_with('/')
+        {
+            return self.inner.read(&format!("{ROOT}{rest}"));
+        }
+        let parts = parts_below_root(path);
+        let at_a_directory_that_is_wrong = (self.is(Flaw::ReadOfADirectoryAtTheRootIsEmpty)
+            && parts == 1)
+            || (self.is(Flaw::ReadOfADeepDirectoryIsEmpty) && parts >= 3);
+        if at_a_directory_that_is_wrong && self.inner.stat(path) == Ok(Some(FileKind::Directory)) {
+            return Ok(Vec::new());
+        }
+        let link_is_wrong = (self.is(Flaw::ReadFollowsALinkAtTheRoot) && parts == 1)
+            || (self.is(Flaw::ReadFollowsADeepLink) && parts >= 3)
+            || (self.is(Flaw::ReadFollowsALinkInAnotherDirectory)
+                && self.target_of(path).is_some_and(|target| {
+                    target.rsplit_once('/').map(|t| t.0) != path.rsplit_once('/').map(|p| p.0)
+                }));
+        if link_is_wrong
+            && self.target_kind(path) == Some(FileKind::File)
+            && let Some(target) = self.target_of(path)
+        {
+            return self.inner.read(&target);
+        }
         if (self.is(Flaw::ReadFailsOnSpaceInPath) && path.contains(' '))
             || (self.is(Flaw::ReadOfFileWithNewlineNameFails) && path.contains('\n'))
         {
@@ -585,6 +711,15 @@ impl OutputFiles for Flawed {
             && let Some(bytes) = self.cache.get(path)
         {
             return Ok(bytes.clone());
+        }
+        if self.is(Flaw::CachesReadsByLength)
+            && let Some(cached) = self.cache.get(path).cloned()
+            && self
+                .inner
+                .read(path)
+                .is_ok_and(|now| now.len() == cached.len())
+        {
+            return Ok(cached);
         }
         let mut result = self.inner.read(path);
         match self.flaw {
@@ -659,6 +794,17 @@ impl OutputFiles for Flawed {
                 {
                     bytes.pop();
                 }
+                Some(Flaw::ReadTruncatesAt4M) => bytes.truncate(4_194_304),
+                Some(Flaw::ReadDropsTheLastByteAtA128kMultiple)
+                    if !bytes.is_empty() && bytes.len() % 131_072 == 0 =>
+                {
+                    bytes.pop();
+                }
+                Some(Flaw::ReadTrimsTrailingBlanks) => {
+                    while matches!(bytes.last(), Some(b' ' | b'\t')) {
+                        bytes.pop();
+                    }
+                }
                 _ => {}
             }
         }
@@ -674,7 +820,7 @@ impl OutputFiles for Flawed {
             result = Err(SeamError::Permanent(format!("{path} is empty")));
         }
         if let Ok(bytes) = &result {
-            if self.is(Flaw::CachesReads) {
+            if self.is(Flaw::CachesReads) || self.is(Flaw::CachesReadsByLength) {
                 self.cache.insert(path.to_owned(), bytes.clone());
             }
             if self.is(Flaw::ReadTouches) {

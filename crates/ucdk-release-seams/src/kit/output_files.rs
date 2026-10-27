@@ -306,6 +306,16 @@ fn stat_tells_a_file_a_directory_a_symlink_and_nothing_apart<R: OutputFilesRig>(
     same(stat("s/nothing"), None, "nothing");
     // Below a regular file nothing is, and the operating system's answer is no fault.
     same(stat("s/file/child"), None, "a path below a regular file");
+    same(
+        stat("s/file/a/b"),
+        None,
+        "a path two parts below a regular file",
+    );
+    same(
+        stat("s/nodir/x"),
+        None,
+        "a path in a directory that is not there",
+    );
     // Two dots inside a part make no `..` part: a file, a directory and a file in a directory
     // so named are found as any other.
     same(stat("s/a..b"), Some(FileKind::File), "a file named a..b");
@@ -360,12 +370,70 @@ fn listing_a_file_and_reading_a_directory_or_a_symlink_are_refused<R: OutputFile
         ("r/link", Node::Link("r/file")),
         ("r/link_to_dir", Node::Link("r/dir")),
         ("r/dangling", Node::Link("r/nowhere")),
+        // Links to a file that are in another directory than it, directly below the root and
+        // three parts down, and directories directly below the root and three parts down.
+        ("q/lnk", Node::Link("r/file")),
+        ("rootlink", Node::Link("r/file")),
+        ("a/b/deeplink", Node::Link("r/file")),
+        ("rootdir/inside", Node::File(b"z")),
+        ("a/b/deepdir/inside", Node::File(b"z")),
     ]);
     let (file, dir, link) = (at(rig, "r/file"), at(rig, "r/dir"), at(rig, "r/link"));
     let (link_to_dir, slashed) = (at(rig, "r/link_to_dir"), at(rig, "r/link/"));
+    let slashed_dir_link = at(rig, "r/link_to_dir/");
     let dangling = at(rig, "r/dangling");
     let below = at(rig, "r/file/child");
+    // Two or more parts below a regular file, and in a directory that is not there.
+    let far_below = at(rig, "r/file/a/b");
+    let in_missing = at(rig, "r/nodir/x");
+    let extra = [
+        (
+            "read of a symlink in another directory than its target",
+            at(rig, "q/lnk"),
+        ),
+        (
+            "read of a symlink directly below the root",
+            at(rig, "rootlink"),
+        ),
+        (
+            "read of a symlink three parts below the root",
+            at(rig, "a/b/deeplink"),
+        ),
+        (
+            "read of a directory directly below the root",
+            at(rig, "rootdir"),
+        ),
+        (
+            "read of a directory three parts below the root",
+            at(rig, "a/b/deepdir"),
+        ),
+    ];
     let cases = [
+        (
+            "read of a path two parts below a regular file",
+            &far_below,
+            must_err(files.read(&far_below), "read"),
+        ),
+        (
+            "list of a path two parts below a regular file",
+            &far_below,
+            must_err(files.list(&far_below), "list"),
+        ),
+        (
+            "read of a path in a directory that is not there",
+            &in_missing,
+            must_err(files.read(&in_missing), "read"),
+        ),
+        (
+            "list of a path in a directory that is not there",
+            &in_missing,
+            must_err(files.list(&in_missing), "list"),
+        ),
+        (
+            "list of a symlink to a directory named with a trailing slash",
+            &slashed_dir_link,
+            must_err(files.list(&slashed_dir_link), "list"),
+        ),
         (
             "read of a path below a regular file",
             &below,
@@ -416,6 +484,14 @@ fn listing_a_file_and_reading_a_directory_or_a_symlink_are_refused<R: OutputFile
     for (what, path, error) in &cases {
         same(
             permanent_naming(error, path),
+            true,
+            &format!("the {what} is Permanent and names the path"),
+        );
+    }
+    for (what, path) in &extra {
+        let error = must_err(files.read(path), "read");
+        same(
+            permanent_naming(&error, path),
             true,
             &format!("the {what} is Permanent and names the path"),
         );
@@ -473,6 +549,9 @@ fn a_path_that_is_relative_or_climbs_is_refused<R: OutputFilesRig>(rig: &R) {
         // A first part that climbs out of the root.
         format!("/..{}/c/real", rig.root()),
         "/..".to_owned(),
+        // Relative, though it starts with `./` or with the first part of the root.
+        "./c/real".to_owned(),
+        format!("{}/c/real", rig.root().trim_start_matches('/')),
     ];
     for path in &paths {
         let errors = [
@@ -505,6 +584,9 @@ fn an_entry_of_a_listed_directory_is_read_through_its_joined_path<R: OutputFiles
     let sized = |len: usize| -> Vec<u8> { (1..=251u8).cycle().take(len).collect() };
     let (k4096, k4097, k8192) = (sized(4096), sized(4097), sized(8192));
     let (k65536, k65537) = (sized(65_536), sized(65_537));
+    // A multiple of 131,072, and ten bytes past 4 MiB, and bytes that end in blanks.
+    let (m1, m4) = (sized(1_048_576), sized(4_194_314));
+    let blanks: &[u8] = b"x  \t";
     let mut files = rig.reader(&[
         ("e/crlf", Node::File(crlf)),
         ("e/bom", Node::File(bom)),
@@ -515,6 +597,9 @@ fn an_entry_of_a_listed_directory_is_read_through_its_joined_path<R: OutputFiles
         ("e/k8192", Node::File(&k8192)),
         ("e/k65536", Node::File(&k65536)),
         ("e/k65537", Node::File(&k65537)),
+        ("e/m1", Node::File(&m1)),
+        ("e/m4", Node::File(&m4)),
+        ("e/blanks", Node::File(blanks)),
         ("e/sp ace", Node::File(b"S")),
         ("e/\u{e9}.txt", Node::File(b"E")),
         ("e/new\nline", Node::File(b"N")),
@@ -536,7 +621,10 @@ fn an_entry_of_a_listed_directory_is_read_through_its_joined_path<R: OutputFiles
     ]);
     let dir = at(rig, "e");
     let listing = must(files.list(&dir), "list");
-    let wanted: [(&str, &[u8]); 27] = [
+    let wanted: [(&str, &[u8]); 30] = [
+        ("m1", &m1),
+        ("m4", &m4),
+        ("blanks", blanks),
         ("crlf", crlf),
         ("bom", bom),
         ("ends_crlf", ends_crlf),
@@ -589,6 +677,14 @@ fn a_read_returns_the_file_as_it_is_at_the_call<R: OutputFilesRig>(rig: &R) {
         must(files.read(&path), "first read"),
         b"first".to_vec(),
         "the first read",
+    );
+    // A change that keeps the length: a reader that trusts a length to tell a file is the same
+    // answers the old bytes.
+    rig.change(&mut files, "v/f", b"FIRST");
+    same(
+        must(files.read(&path), "read after a change of the same length"),
+        b"FIRST".to_vec(),
+        "the read after a change that keeps the length",
     );
     rig.change(&mut files, "v/f", b"second");
     same(

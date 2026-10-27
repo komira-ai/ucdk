@@ -189,6 +189,7 @@ fn further_output_files() {
     const DESCENDED: &str = "a_listed_symlink_is_never_descended";
     const SORTED: &str = "a_listing_is_sorted_relative_paths";
     const CLIMB: &str = "a_path_that_is_relative_or_climbs_is_refused";
+    const CHANGED: &str = "a_read_returns_the_file_as_it_is_at_the_call";
     const DOTS: &str =
         "a_dot_part_a_repeated_slash_and_a_trailing_slash_name_the_path_they_stand_in";
     further_stubs_fail_exactly(
@@ -244,6 +245,24 @@ fn further_output_files() {
             (Files::StatRefusesDotDotNames, &[STAT]),
             (Files::ListRefusesDotDotNames, &[KINDS]),
             (Files::LeadingClimbIsResolved, &[CLIMB]),
+            (Files::ListFollowsASlashedLinkToADirectory, &[REFUSED]),
+            (Files::ReadFollowsALinkInAnotherDirectory, &[REFUSED]),
+            (Files::ReadFollowsALinkAtTheRoot, &[REFUSED]),
+            (Files::ReadFollowsADeepLink, &[REFUSED]),
+            (Files::ReadOfADirectoryAtTheRootIsEmpty, &[REFUSED]),
+            (Files::ReadOfADeepDirectoryIsEmpty, &[REFUSED]),
+            (Files::ReadDeepBelowAFileAnswersTheAncestor, &[REFUSED]),
+            (Files::ListDeepBelowAFileIsEmpty, &[REFUSED]),
+            (Files::StatDeepBelowAFileIsAnError, &[STAT]),
+            (Files::StatBelowAMissingDirectoryIsAnError, &[STAT]),
+            (Files::ListBelowAMissingDirectoryIsEmpty, &[REFUSED]),
+            (Files::ReadBelowAMissingDirectoryIsEmpty, &[REFUSED]),
+            (Files::ReadAcceptsADotSlashPath, &[CLIMB]),
+            (Files::ReadAcceptsARootlessPath, &[CLIMB]),
+            (Files::ReadTruncatesAt4M, &[READ_THROUGH]),
+            (Files::ReadDropsTheLastByteAtA128kMultiple, &[READ_THROUGH]),
+            (Files::ReadTrimsTrailingBlanks, &[READ_THROUGH]),
+            (Files::CachesReadsByLength, &[CHANGED]),
         ],
         |flaw| run_output_files_kit(&FakeFilesRig::flawed(flaw)),
     );
