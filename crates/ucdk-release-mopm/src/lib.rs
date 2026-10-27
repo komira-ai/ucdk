@@ -6,8 +6,8 @@
 //! answer, each testable without a network. It holds
 //!
 //! - [`Config`]: the caller's settings (no default registry, one trust bundle named by a path,
-//!   no environment variables) and the construction-time check that one call fits under both the
-//!   token's life and the lease;
+//!   no environment variables) and the construction-time check that each call of the staged shape
+//!   (stage, commit, abort) fits under both the token's life and the lease;
 //! - [`Transport`], [`Request`] and [`Response`], the one I/O seam, with [`Secret`] and [`Url`]
 //!   so that a bearer token or a presigned signature cannot be printed;
 //! - [`check_key`], [`check_shape`], [`check_observe`] and [`members`]: the mapping of a ucdk
@@ -28,10 +28,10 @@ mod requests;
 mod transport;
 mod url;
 
-pub use config::{Config, ConfigError, MAX_PAGE, MOPM_TOKEN_TTL, Proxy, Roots, RootsError};
+pub use config::{Call, Config, ConfigError, MAX_PAGE, MOPM_TOKEN_TTL, Proxy, Roots, RootsError};
 pub use errors::{
-    DEFAULT_RETRY_AFTER_SECONDS, Mapped, Op, error_code, map_reply, map_schema_violation,
-    map_transport,
+    ConflictAnswer, ConflictReason, DEFAULT_RETRY_AFTER_SECONDS, Mapped, Op, error_code,
+    error_reason, map_reply, map_schema_violation, map_transport,
 };
 pub use grammar::{
     MAX_FILE_NAME_LENGTH, MAX_REASON_UNITS, MAX_VERSION_LENGTH, build_of_file, safe_file_name,

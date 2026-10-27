@@ -105,8 +105,38 @@ pub enum ConfigError {
     Page(u32),
     /// The lease is not longer than the clock-skew allowance, so no call fits in it.
     LeaseTooShort { lease_ttl: Duration },
-    /// The calls of one commit, with the margin, do not fit under the token and the lease.
-    Budget { needed: Duration, bound: Duration },
+    /// One call, with the margin, does not fit under the token and the lease it runs under.
+    Budget {
+        call: Call,
+        needed: Duration,
+        bound: Duration,
+    },
+}
+
+/// The three calls of the staged shape that spend time. Each is its own seam call, so each runs
+/// under its own grant (a fresh exchange, ten minutes) and its own lease renewal: the bound
+/// applies to one of them at a time, never to their sum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Call {
+    /// The group read, the create and every `PUT` with its retries.
+    Stage,
+    /// The commit request and the wait for visibility.
+    Commit,
+    /// The `DELETE` of an abort and the status read after it.
+    Abort,
+}
+
+impl Call {
+    /// Every call, in the order the engine makes them.
+    pub const ALL: [Call; 3] = [Call::Stage, Call::Commit, Call::Abort];
+
+    fn name(self) -> &'static str {
+        match self {
+            Call::Stage => "stage",
+            Call::Commit => "commit",
+            Call::Abort => "abort",
+        }
+    }
 }
 
 impl fmt::Display for ConfigError {
@@ -121,9 +151,14 @@ impl fmt::Display for ConfigError {
                 lease_ttl.as_secs(),
                 MAX_CLOCK_SKEW.as_secs()
             ),
-            ConfigError::Budget { needed, bound } => write!(
+            ConfigError::Budget {
+                call,
+                needed,
+                bound,
+            } => write!(
                 f,
-                "a call may take {}s with its margin, but the token and the lease allow {}s",
+                "a {} call may take {}s with its margin, but the token and the lease allow {}s",
+                call.name(),
                 needed.as_secs(),
                 bound.as_secs()
             ),
@@ -153,13 +188,15 @@ pub struct Config {
     /// The time-to-live of the engine's lease guard, set by the caller from the value the engine
     /// uses.
     pub lease_ttl: Duration,
-    /// The create request, every `PUT` and every retry of them.
+    /// What a `stage` call may spend: the group read, the create, every `PUT` and every retry
+    /// of them.
     pub upload_budget: Duration,
     pub commit_request_timeout: Duration,
-    /// How long one call waits for the group to become visible. Zero returns as soon as the
-    /// commit is accepted.
+    /// How long a `commit` call waits for the group to become visible. Zero returns as soon as
+    /// the commit is accepted.
     pub poll_deadline: Duration,
-    pub cleanup_timeout: Duration,
+    /// What an `abort` call may spend: the `DELETE` and the status read after it.
+    pub abort_timeout: Duration,
     /// The exchange-to-call gap and one connect timeout.
     pub margin: Duration,
     /// The longest `Retry-After` the publisher turns into a wait; a longer one is a refusal.
@@ -173,17 +210,17 @@ pub struct Config {
 }
 
 impl Config {
-    /// What one commit call may spend: `upload_budget + commit_request_timeout + poll_deadline
-    /// + cleanup_timeout`. Saturating, so an absurd setting fails the check instead of wrapping.
-    pub fn budget(&self) -> Duration {
-        [
-            self.upload_budget,
-            self.commit_request_timeout,
-            self.poll_deadline,
-            self.cleanup_timeout,
-        ]
-        .into_iter()
-        .fold(Duration::ZERO, Duration::saturating_add)
+    /// What one `call` may spend: `upload_budget` for a stage, `commit_request_timeout +
+    /// poll_deadline` for a commit, `abort_timeout` for an abort. Saturating, so an absurd
+    /// setting fails the check instead of wrapping.
+    pub fn budget(&self, call: Call) -> Duration {
+        match call {
+            Call::Stage => self.upload_budget,
+            Call::Commit => self
+                .commit_request_timeout
+                .saturating_add(self.poll_deadline),
+            Call::Abort => self.abort_timeout,
+        }
     }
 
     /// The longest a call may run: the shorter of the token's life and the lease less the
@@ -201,8 +238,10 @@ impl Config {
 
     /// The construction-time check, before anything is sent: the registry has no query, the
     /// timeouts are positive, the page size is one mopm answers, and
-    /// `budget + margin <= min(MOPM_TOKEN_TTL, lease_ttl - skew)`, so no call outlives the
-    /// token or the lease it runs under.
+    /// `budget(call) + margin <= min(MOPM_TOKEN_TTL, lease_ttl - skew)` for each of the stage,
+    /// commit and abort calls, so no call outlives the token or the lease it runs under. The
+    /// calls are separate seam calls with a grant exchange and a lease renewal before each, so
+    /// the bound is per call and their sum is not checked.
     pub fn check(&self) -> Result<(), ConfigError> {
         if self.registry.has_query() {
             return Err(ConfigError::RegistryQuery);
@@ -221,9 +260,15 @@ impl Config {
             return Err(ConfigError::Page(self.newest_page));
         }
         let bound = self.bound()?;
-        let needed = self.budget().saturating_add(self.margin);
-        if needed > bound {
-            return Err(ConfigError::Budget { needed, bound });
+        for call in Call::ALL {
+            let needed = self.budget(call).saturating_add(self.margin);
+            if needed > bound {
+                return Err(ConfigError::Budget {
+                    call,
+                    needed,
+                    bound,
+                });
+            }
         }
         Ok(())
     }

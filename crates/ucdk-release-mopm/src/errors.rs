@@ -55,7 +55,88 @@ pub enum Mapped {
     Duplicate,
     /// 409 `group_commit_refused`: the caller reads the status of the group and decides.
     CommitRefused,
+    /// 409 `group_conflict` on create, with the reason mopm's closed list gives. The class of a
+    /// reason is [`ConflictReason::answer`]; some classes need one more read, so the caller
+    /// finishes them.
+    Conflict(ConflictReason),
     Failed(SeamError),
+}
+
+/// Why mopm refused a create with `group_conflict`: the `error.reason` field, a closed list in
+/// mopm's API description. The message is free text and is never read. A registry that predates
+/// the field, a reason not on the list and a value that is not text are all [`Unlisted`], which a
+/// client must treat as an absent reason.
+///
+/// [`Unlisted`]: ConflictReason::Unlisted
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictReason {
+    /// A live group holds a number of the set: another account's, or one of the caller's own
+    /// that is validating or committed (never superseded).
+    NumberHeld,
+    /// The group failed: its numbers are burned.
+    GroupFailed,
+    /// The caller has the most open groups it may have.
+    OpenCap,
+    /// The create would end more of the caller's own groups than one create may.
+    SupersedeCap,
+    /// A reserved row that is not yet free blocks the number.
+    TakeoverBlocked,
+    /// Another publish took a number while the group was being created; the group was ended.
+    NumberTaken,
+    /// `on_overlap: refuse` met an overlapping open group of the caller's own.
+    OverlapRefused,
+    /// No reason, or one this crate does not know.
+    Unlisted,
+}
+
+/// What a [`ConflictReason`] means to `stage`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConflictAnswer {
+    /// The numbers are held by a group that stands: `Duplicate`.
+    Duplicate,
+    /// `Duplicate` if the version record now shows the coordinate held, else `Transient`: the
+    /// caller reads the record.
+    DuplicateIfHeld,
+    /// An error that settles the call.
+    Fail(SeamError),
+}
+
+impl ConflictReason {
+    /// The reason in `value`, an `error.reason` already read from the body.
+    pub fn parse(value: Option<&str>) -> Self {
+        match value {
+            Some("number_held") => Self::NumberHeld,
+            Some("group_failed") => Self::GroupFailed,
+            Some("open_cap") => Self::OpenCap,
+            Some("supersede_cap") => Self::SupersedeCap,
+            Some("takeover_blocked") => Self::TakeoverBlocked,
+            Some("number_taken") => Self::NumberTaken,
+            Some("overlap_refused") => Self::OverlapRefused,
+            _ => Self::Unlisted,
+        }
+    }
+
+    /// The class of the reason. A caller over its open-group cap is never told `Duplicate`, so
+    /// the engine cannot loop on it; a failed group is `Transient` (the burn is an effect, and
+    /// the engine's observe reads it as burned); an unknown reason is `Unknown`, because nothing
+    /// says what it means.
+    pub fn answer(self) -> ConflictAnswer {
+        let fail = ConflictAnswer::Fail;
+        match self {
+            Self::NumberHeld | Self::OverlapRefused => ConflictAnswer::Duplicate,
+            Self::NumberTaken => ConflictAnswer::DuplicateIfHeld,
+            Self::OpenCap | Self::SupersedeCap => fail(SeamError::Refused(Reason::Channel)),
+            Self::GroupFailed => fail(SeamError::Transient(
+                "mopm answered 409 group_conflict: the numbers are burned".to_owned(),
+            )),
+            Self::TakeoverBlocked => fail(SeamError::Transient(
+                "mopm answered 409 group_conflict: a number is not yet free".to_owned(),
+            )),
+            Self::Unlisted => fail(SeamError::Unknown(
+                "mopm answered 409 group_conflict with no reason this client knows".to_owned(),
+            )),
+        }
+    }
 }
 
 /// The `error.code` of mopm's error body, if the body is JSON and has one.
@@ -63,6 +144,13 @@ pub fn error_code(body: &[u8]) -> Option<String> {
     let value: Value = serde_json::from_slice(body).ok()?;
     let code = value.pointer("/error/code")?.as_str()?;
     Some(code.to_owned())
+}
+
+/// The `error.reason` of mopm's error body, if the body is JSON and has one that is text.
+pub fn error_reason(body: &[u8]) -> Option<String> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    let reason = value.pointer("/error/reason")?.as_str()?;
+    Some(reason.to_owned())
 }
 
 /// The seconds of a `Retry-After` that is a plain number; `None` for a missing header, an
@@ -122,7 +210,9 @@ pub fn map_reply(op: Op, response: &Response, ceiling: Duration) -> Option<Mappe
         }
         (_, _) if status == 401 || status == 403 => denied(),
         (Op::Create, Some("version_exists")) => Mapped::Duplicate,
-        (Op::Create, Some("group_conflict")) => unknown(),
+        (Op::Create, Some("group_conflict")) => Mapped::Conflict(ConflictReason::parse(
+            error_reason(&response.body).as_deref(),
+        )),
         (
             Op::Create,
             Some("invalid_name" | "invalid_version" | "invalid_request" | "upload_invalid"),

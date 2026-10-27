@@ -23,8 +23,8 @@ pub fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
 }
 
-/// The proposed defaults: 180 + 30 + 240 + 15 = 465 seconds of budget, 60 of margin, against a
-/// lease of 600 seconds (a bound of 595).
+/// The proposed defaults: a stage of 300 seconds, a commit of 30 + 420, an abort of 15, each with
+/// 60 of margin, against a lease of 600 seconds (a bound of 595 for each call).
 pub fn config() -> Config {
     Config {
         channel: CHANNEL.to_owned(),
@@ -37,10 +37,10 @@ pub fn config() -> Config {
         retries: 2,
         poll_interval: secs(2),
         lease_ttl: secs(600),
-        upload_budget: secs(180),
+        upload_budget: secs(300),
         commit_request_timeout: secs(30),
-        poll_deadline: secs(240),
-        cleanup_timeout: secs(15),
+        poll_deadline: secs(420),
+        abort_timeout: secs(15),
         margin: secs(60),
         retry_after_ceiling: secs(600),
         reserving_repeats: 3,

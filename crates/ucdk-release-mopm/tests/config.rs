@@ -8,10 +8,12 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::process;
+use std::time::Duration;
 
 use common::{config, secs};
 use ucdk_release_mopm::{
-    Config, ConfigError, MAX_PAGE, MOPM_TOKEN_TTL, Origin, Proxy, Roots, RootsError, Url, UrlError,
+    Call, Config, ConfigError, MAX_PAGE, MOPM_TOKEN_TTL, Origin, Proxy, Roots, RootsError, Url,
+    UrlError,
 };
 
 /// A file in the temporary directory that is removed when dropped.
@@ -36,24 +38,27 @@ const CERT: &str = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----
 #[test]
 fn the_proposed_defaults_fit_with_room_to_spare() {
     let config = config();
-    assert_eq!(config.budget(), secs(465));
+    assert_eq!(config.budget(Call::Stage), secs(300));
+    assert_eq!(config.budget(Call::Commit), secs(450));
+    assert_eq!(config.budget(Call::Abort), secs(15));
     assert_eq!(config.bound(), Ok(secs(595)));
     assert_eq!(config.check(), Ok(()));
 }
 
 #[test]
 fn a_budget_at_the_bound_is_accepted_and_one_second_over_is_not() {
-    // bound = min(600, 600 - 5) = 595; budget + margin = 465 + 60 = 525, so 70 seconds are free.
+    // bound = min(600, 600 - 5) = 595; a commit is 450 + 60 of margin, so 85 seconds are free.
     let mut at_bound = config();
-    at_bound.poll_deadline += secs(70);
-    assert_eq!(at_bound.budget() + at_bound.margin, secs(595));
+    at_bound.poll_deadline += secs(85);
+    assert_eq!(at_bound.budget(Call::Commit) + at_bound.margin, secs(595));
     assert_eq!(at_bound.check(), Ok(()));
 
     let mut over = config();
-    over.poll_deadline += secs(71);
+    over.poll_deadline += secs(86);
     assert_eq!(
         over.check(),
         Err(ConfigError::Budget {
+            call: Call::Commit,
             needed: secs(596),
             bound: secs(595)
         })
@@ -61,20 +66,43 @@ fn a_budget_at_the_bound_is_accepted_and_one_second_over_is_not() {
 }
 
 #[test]
-fn every_term_of_the_budget_counts() {
+fn every_term_of_the_budget_counts_in_the_call_it_belongs_to() {
     type Edit = fn(&mut Config);
-    let edits: [Edit; 5] = [
-        |c| c.upload_budget += secs(71),
-        |c| c.commit_request_timeout += secs(71),
-        |c| c.poll_deadline += secs(71),
-        |c| c.cleanup_timeout += secs(71),
-        |c| c.margin += secs(71),
+    // Each edit takes its call exactly one second over the bound of 595 with the 60 of margin.
+    let edits: [(Call, Edit); 5] = [
+        (Call::Stage, |c| c.upload_budget += secs(236)),
+        (Call::Commit, |c| c.commit_request_timeout += secs(86)),
+        (Call::Commit, |c| c.poll_deadline += secs(86)),
+        (Call::Abort, |c| c.abort_timeout += secs(521)),
+        (Call::Commit, |c| c.margin += secs(86)),
     ];
-    for edit in edits {
+    for (call, edit) in edits {
         let mut config = config();
         edit(&mut config);
-        assert!(matches!(config.check(), Err(ConfigError::Budget { .. })));
+        assert_eq!(
+            config.check(),
+            Err(ConfigError::Budget {
+                call,
+                needed: secs(596),
+                bound: secs(595)
+            })
+        );
     }
+}
+
+#[test]
+fn the_calls_are_bounded_one_at_a_time_and_not_by_their_sum() {
+    // Stage, commit and abort are separate seam calls, each under a fresh grant and a renewed
+    // lease, so a configuration whose three budgets together are far over the bound is fine
+    // when each one fits.
+    let config = config();
+    let sum = Call::ALL
+        .into_iter()
+        .map(|call| config.budget(call))
+        .sum::<Duration>();
+    assert_eq!(sum, secs(765));
+    assert!(sum + config.margin > config.bound().unwrap());
+    assert_eq!(config.check(), Ok(()));
 }
 
 #[test]
@@ -82,13 +110,14 @@ fn the_token_life_bounds_a_call_when_the_lease_is_longer() {
     let mut config = config();
     config.lease_ttl = secs(3600);
     assert_eq!(config.bound(), Ok(MOPM_TOKEN_TTL));
-    config.poll_deadline += secs(75);
-    assert_eq!(config.budget() + config.margin, secs(600));
+    config.poll_deadline += secs(90);
+    assert_eq!(config.budget(Call::Commit) + config.margin, secs(600));
     assert_eq!(config.check(), Ok(()));
     config.poll_deadline += secs(1);
     assert_eq!(
         config.check(),
         Err(ConfigError::Budget {
+            call: Call::Commit,
             needed: secs(601),
             bound: secs(600)
         })
@@ -100,13 +129,19 @@ fn the_lease_less_the_skew_bounds_a_call_when_the_token_is_longer() {
     let mut config = config();
     config.lease_ttl = secs(300);
     assert_eq!(config.bound(), Ok(secs(295)));
-    assert!(matches!(config.check(), Err(ConfigError::Budget { .. })));
-    config.upload_budget = secs(100);
+    assert!(matches!(
+        config.check(),
+        Err(ConfigError::Budget {
+            call: Call::Stage,
+            ..
+        })
+    ));
+    config.upload_budget = secs(215);
     config.poll_deadline = secs(80);
     config.commit_request_timeout = secs(20);
-    config.cleanup_timeout = secs(15);
+    config.abort_timeout = secs(15);
     config.margin = secs(80);
-    assert_eq!(config.budget() + config.margin, secs(295));
+    assert_eq!(config.budget(Call::Stage) + config.margin, secs(295));
     assert_eq!(config.check(), Ok(()));
 }
 
@@ -133,7 +168,7 @@ fn a_lease_not_longer_than_the_skew_leaves_no_room() {
 fn an_absurd_budget_fails_the_check_and_does_not_wrap() {
     let mut config = config();
     config.poll_deadline = std::time::Duration::MAX;
-    config.cleanup_timeout = std::time::Duration::MAX;
+    config.abort_timeout = std::time::Duration::MAX;
     assert!(matches!(config.check(), Err(ConfigError::Budget { .. })));
 }
 
@@ -157,7 +192,7 @@ fn a_zero_duration_that_cannot_be_zero_is_refused_by_name() {
     // These may be zero: a zero poll deadline returns as soon as the commit is accepted.
     let mut config = config();
     config.poll_deadline = secs(0);
-    config.cleanup_timeout = secs(0);
+    config.abort_timeout = secs(0);
     config.margin = secs(0);
     config.retry_after_ceiling = secs(0);
     assert_eq!(config.check(), Ok(()));
@@ -349,6 +384,7 @@ fn every_refusal_says_what_it_is() {
         Box::new(ConfigError::Page(0)),
         Box::new(ConfigError::LeaseTooShort { lease_ttl: secs(3) }),
         Box::new(ConfigError::Budget {
+            call: Call::Stage,
             needed: secs(596),
             bound: secs(595),
         }),
@@ -365,14 +401,23 @@ fn every_refusal_says_what_it_is() {
     for error in errors {
         assert!(!error.to_string().is_empty());
     }
-    assert_eq!(
-        ConfigError::Budget {
-            needed: secs(596),
-            bound: secs(595)
-        }
-        .to_string(),
-        "a call may take 596s with its margin, but the token and the lease allow 595s"
-    );
+    for (call, name) in [
+        (Call::Stage, "stage"),
+        (Call::Commit, "commit"),
+        (Call::Abort, "abort"),
+    ] {
+        assert_eq!(
+            ConfigError::Budget {
+                call,
+                needed: secs(596),
+                bound: secs(595)
+            }
+            .to_string(),
+            format!(
+                "a {name} call may take 596s with its margin, but the token and the lease allow 595s"
+            )
+        );
+    }
     assert_eq!(
         ConfigError::ZeroDuration("poll_interval").to_string(),
         "poll_interval must be more than zero"

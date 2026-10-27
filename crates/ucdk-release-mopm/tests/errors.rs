@@ -9,8 +9,8 @@ use std::time::Duration;
 use common::{error_body, response, secs};
 use ucdk_release::codec::GrantFault;
 use ucdk_release_mopm::{
-    DEFAULT_RETRY_AFTER_SECONDS, Mapped, Op, Response, TransportError, error_code, map_reply,
-    map_schema_violation, map_transport,
+    ConflictAnswer, ConflictReason, DEFAULT_RETRY_AFTER_SECONDS, Mapped, Op, Response,
+    TransportError, error_code, error_reason, map_reply, map_schema_violation, map_transport,
 };
 use ucdk_release_proto::v1::Reason;
 use ucdk_release_seams::{Backoff, SeamError};
@@ -46,6 +46,7 @@ fn kind(mapped: &Mapped) -> &'static str {
         Mapped::Missing => "missing",
         Mapped::Duplicate => "duplicate",
         Mapped::CommitRefused => "commit_refused",
+        Mapped::Conflict(_) => "conflict",
         Mapped::Failed(SeamError::Refused(_)) => "refused",
         Mapped::Failed(SeamError::Permanent(_)) => "permanent",
         Mapped::Failed(SeamError::Transient(_)) => "transient",
@@ -149,7 +150,7 @@ fn create_maps_every_row() {
             (409, "limit_exceeded", "refused"),
             (413, "payload_too_large", "refused"),
             (409, "version_exists", "duplicate"),
-            (409, "group_conflict", "unknown"),
+            (409, "group_conflict", "conflict"),
             (400, "invalid_name", "permanent"),
             (400, "invalid_version", "permanent"),
             (400, "invalid_request", "permanent"),
@@ -163,6 +164,113 @@ fn create_maps_every_row() {
     );
     let bare = map(Op::Create, &response(404, &[], "<html>"));
     assert_eq!(kind(&bare), "permanent");
+}
+
+fn conflict(reason: Option<&str>) -> Response {
+    let reason = reason.map_or(String::new(), |r| format!(r#","reason":{r}"#));
+    response(
+        409,
+        &[],
+        &format!(r#"{{"error":{{"code":"group_conflict","message":"m","hint":"h"{reason}}}}}"#),
+    )
+}
+
+#[test]
+fn a_group_conflict_is_classified_by_its_reason_field_alone() {
+    let listed = [
+        ("number_held", ConflictReason::NumberHeld),
+        ("group_failed", ConflictReason::GroupFailed),
+        ("open_cap", ConflictReason::OpenCap),
+        ("supersede_cap", ConflictReason::SupersedeCap),
+        ("takeover_blocked", ConflictReason::TakeoverBlocked),
+        ("number_taken", ConflictReason::NumberTaken),
+        ("overlap_refused", ConflictReason::OverlapRefused),
+    ];
+    for (text, reason) in listed {
+        let got = map(Op::Create, &conflict(Some(&format!("\"{text}\""))));
+        assert_eq!(got, Mapped::Conflict(reason), "{text}");
+        assert_eq!(ConflictReason::parse(Some(text)), reason);
+    }
+    // A registry that predates the field, a reason not on the list, a value that is not text,
+    // and a reason-like word in the message are all an absent reason.
+    let unlisted = [
+        conflict(None),
+        conflict(Some("\"a_new_reason\"")),
+        conflict(Some("\"NUMBER_HELD\"")),
+        conflict(Some("\"\"")),
+        conflict(Some("5")),
+        conflict(Some("null")),
+        conflict(Some(r#"["number_held"]"#)),
+        response(
+            409,
+            &[],
+            r#"{"error":{"code":"group_conflict","message":"number_held open_cap","hint":"group_failed"}}"#,
+        ),
+    ];
+    for response in &unlisted {
+        assert_eq!(
+            map(Op::Create, response),
+            Mapped::Conflict(ConflictReason::Unlisted),
+            "{response:?}"
+        );
+    }
+    assert_eq!(ConflictReason::parse(None), ConflictReason::Unlisted);
+    // The reason belongs to a conflict on create: on any other code it is not read.
+    let other = response(
+        409,
+        &[],
+        r#"{"error":{"code":"version_exists","reason":"number_held"}}"#,
+    );
+    assert_eq!(map(Op::Create, &other), Mapped::Duplicate);
+}
+
+#[test]
+fn the_reason_is_read_from_the_error_object_only() {
+    let body = br#"{"error":{"code":"group_conflict","reason":"open_cap"}}"#;
+    assert_eq!(error_reason(body).as_deref(), Some("open_cap"));
+    for body in [
+        &b""[..],
+        b"not json",
+        br#"{"reason":"open_cap"}"#,
+        br#"{"error":{"reason":7}}"#,
+        br#"{"error":"open_cap"}"#,
+    ] {
+        assert_eq!(error_reason(body), None, "{body:?}");
+    }
+}
+
+#[test]
+fn each_reason_has_one_class_and_a_cap_is_never_a_duplicate() {
+    let refused = ConflictAnswer::Fail(SeamError::Refused(Reason::Channel));
+    assert_eq!(
+        ConflictReason::NumberHeld.answer(),
+        ConflictAnswer::Duplicate
+    );
+    assert_eq!(
+        ConflictReason::OverlapRefused.answer(),
+        ConflictAnswer::Duplicate
+    );
+    assert_eq!(
+        ConflictReason::NumberTaken.answer(),
+        ConflictAnswer::DuplicateIfHeld
+    );
+    assert_eq!(ConflictReason::OpenCap.answer(), refused);
+    assert_eq!(ConflictReason::SupersedeCap.answer(), refused);
+    // A failed group's burn is an effect: transient, never permanent and never a duplicate.
+    for reason in [ConflictReason::GroupFailed, ConflictReason::TakeoverBlocked] {
+        assert!(
+            matches!(
+                reason.answer(),
+                ConflictAnswer::Fail(SeamError::Transient(_))
+            ),
+            "{reason:?}"
+        );
+    }
+    // Nothing says what an unknown reason means: the engine goes to its read-back.
+    assert!(matches!(
+        ConflictReason::Unlisted.answer(),
+        ConflictAnswer::Fail(SeamError::Unknown(_))
+    ));
 }
 
 #[test]
@@ -328,7 +436,7 @@ fn a_well_formed_answer_that_breaks_the_schema_is_permanent_only_where_nothing_l
 fn nothing_but_the_status_and_the_code_reaches_an_error() {
     let canary = "CANARY-TOKEN-0123";
     let body = format!(
-        r#"{{"error":{{"code":"group_conflict","message":"{canary}","hint":"{canary}"}}}}"#
+        r#"{{"error":{{"code":"group_conflict","message":"{canary}","hint":"{canary}","reason":"{canary}"}}}}"#
     );
     for op in [Op::Read, Op::Create, Op::Commit, Op::Poll, Op::Yank] {
         for status in [400, 401, 404, 409, 500, 503] {
@@ -336,6 +444,10 @@ fn nothing_but_the_status_and_the_code_reaches_an_error() {
             assert!(!format!("{mapped:?}").contains(canary), "{op:?} {status}");
             if let Mapped::Failed(e) = mapped {
                 assert!(!e.to_string().contains(canary));
+            }
+            if let Mapped::Conflict(reason) = mapped {
+                assert_eq!(reason, ConflictReason::Unlisted);
+                assert!(!format!("{:?}", reason.answer()).contains(canary));
             }
         }
     }
