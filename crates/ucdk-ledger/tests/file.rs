@@ -1040,3 +1040,48 @@ fn a_read_only_open_of_a_missing_file_is_an_error_not_an_empty_ledger() {
     }
     assert_eq!(listing(&scratch).len(), 1, "still only the ledger file");
 }
+
+// ---- names that collide with another ledger's siblings ------------------------------------
+
+#[test]
+fn a_ledger_named_like_another_ledgers_temp_or_lock_file_is_refused() {
+    for suffix in [".tmp", ".lock"] {
+        let scratch = Scratch::new(&format!("reserved{}", suffix.replace('.', "_")));
+        let name = scratch.dir().join(format!("x{suffix}"));
+        let err = FileLedger::open(&name).expect_err("a reserved name is refused");
+        assert_eq!(err, OpenError::ReservedName { path: name.clone() });
+        let text = err.to_string();
+        assert!(text.starts_with(&name.display().to_string()), "{text}");
+        assert!(text.contains(".tmp") && text.contains(".lock"), "{text}");
+        assert!(
+            listing(&scratch).is_empty(),
+            "nothing was created for {suffix}"
+        );
+        // A name that merely contains the suffix is an ordinary ledger.
+        let fine = scratch.dir().join(format!("x{suffix}.ucdk"));
+        put(
+            &FileLedger::open(&fine).expect("open"),
+            Change::Put(record("app/run")),
+        );
+    }
+}
+
+#[test]
+fn opening_a_ledger_never_touches_another_ledgers_file() {
+    let scratch = Scratch::new("siblings");
+    let x = scratch.dir().join("x");
+    let at_tmp = scratch.dir().join("x.tmp");
+    put(
+        &FileLedger::open(&x).expect("open x"),
+        Change::Put(record("app/run")),
+    );
+    // A ledger that the file system lets exist at the temporary name of "x" is deleted by
+    // the next open of "x". With the reserved names refused there is none to lose.
+    if let Ok(other) = FileLedger::open(&at_tmp) {
+        put(&other, Change::Put(record("other/run")));
+        drop(FileLedger::open(&x).expect("reopen x"));
+        assert!(at_tmp.exists(), "opening x deleted the ledger at x.tmp");
+    }
+    let reopened = FileLedger::open(&x).expect("reopen x");
+    assert_eq!(reopened.read().expect("read").records.len(), 1);
+}

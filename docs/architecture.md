@@ -438,6 +438,11 @@ same state, and no machine-local file is the source of truth.
   sees the old document or the new one. A crash before the rename leaves the old document and a
   stale `.tmp`, which the next open removes. If a write fails, the handle re-reads the file (it
   may have landed) so the next compare-and-swap is made against what is there.
+- **Reserved names.** A ledger at `<path>` keeps `<path>.tmp` and `<path>.lock` beside it, so
+  `FileLedger::open` refuses a path whose file name ends in `.tmp` or `.lock`
+  (`OpenError::ReservedName`, nothing touched): such a file could be another ledger's temporary
+  or lock file, and the next open of that ledger would delete or lock it. A read-only open
+  touches no sibling and takes any name.
 - **Format.** Line-oriented text: a header `ucdk-ledger <major>.<minor>`, the document version
   (the `Token`), one block per record, and an `end <records> <checksum>` line. Values are
   percent-escaped. The minor only adds tags: a build reads a document of its major and any
