@@ -48,6 +48,28 @@ pub enum Flaw {
     EnvironmentLeaksIntoTheNextRun,
     /// When a bare name is on several directories of the child's `PATH`, the last one wins.
     LastPathEntryWins,
+    /// Every later run starts in the working directory of the first.
+    CwdIsFirstRuns,
+    /// Every later run keeps the standard output limit of the first.
+    LimitIsFirstRuns,
+    /// A bare name that was found nowhere once is found nowhere again, whatever the `PATH`.
+    PathMissCached,
+    /// The tail of the error output is what every run so far wrote.
+    StderrTailAccumulates,
+    /// The child sees the variables an earlier run was given when that run could not be started.
+    EnvLeaksAfterAnUnstartableRun,
+    /// The child sees the variables an earlier run was given when that run was stopped.
+    EnvLeaksAfterAStop,
+    /// A child ended by a signal other than 9 is reported as the exit code 128 plus the signal.
+    SignalOtherThan9IsCode128Plus,
+    /// An exit code above 128 is reported as the signal that many above 128.
+    HighCodeIsASignal,
+    /// A limit of 0 keeps the whole of the output.
+    ZeroLimitMeansUnlimited,
+    /// An environment value is cut at its first `=`.
+    EnvValueWithEqualsTruncated,
+    /// A bare name is unstartable when a directory of the `PATH` does not exist.
+    NonexistentPathEntryIsFatal,
 }
 
 pub struct FakeProcessRig {
@@ -82,6 +104,14 @@ pub struct Scripted {
     stopped: bool,
     /// The environment of the previous run.
     previous_env: Vec<(String, String)>,
+    /// The working directory and the limit of the first run.
+    first: Option<(String, usize)>,
+    /// The bare names that were found nowhere.
+    missed: Vec<String>,
+    /// Every error output so far.
+    stderr_seen: Vec<u8>,
+    /// The environment of the last run that failed in the way the stub leaks after.
+    leftover_env: Vec<(String, String)>,
 }
 
 impl ProcessRig for FakeProcessRig {
@@ -95,6 +125,10 @@ impl ProcessRig for FakeProcessRig {
             alive: Arc::clone(&self.alive),
             stopped: false,
             previous_env: Vec::new(),
+            first: None,
+            missed: Vec::new(),
+            stderr_seen: Vec::new(),
+            leftover_env: Vec::new(),
         }
     }
 
@@ -144,6 +178,16 @@ impl Scripted {
         }
     }
 
+    /// Whether the directory `dir` exists: something was installed below it.
+    fn dir_exists(&self, dir: &str) -> bool {
+        dir == SCRATCH
+            || dir == OWN_PATH
+            || self
+                .programs
+                .keys()
+                .any(|program| program.starts_with(&format!("{dir}/")))
+    }
+
     fn set_alive(&self, names: &[String], alive: bool) {
         let mut set = self.alive.lock().unwrap_or_else(PoisonError::into_inner);
         for name in names {
@@ -189,6 +233,62 @@ impl ProcessRunner for Scripted {
             return Err(SeamError::Refused(Reason::LeaseLost));
         }
         let mut command = spec.command.clone();
+        let first = self
+            .first
+            .get_or_insert_with(|| (spec.cwd.to_owned(), spec.stdout_limit))
+            .clone();
+        let cwd = if self.is(Flaw::CwdIsFirstRuns) {
+            first.0.as_str()
+        } else {
+            spec.cwd
+        };
+        let mut limit = if self.is(Flaw::LimitIsFirstRuns) {
+            first.1
+        } else {
+            spec.stdout_limit
+        };
+        if self.is(Flaw::ZeroLimitMeansUnlimited) && limit == 0 {
+            limit = usize::MAX;
+        }
+        if self.is(Flaw::EnvValueWithEqualsTruncated) {
+            for (_, value) in &mut command.env {
+                if let Some((head, _)) = value.split_once('=') {
+                    *value = head.to_owned();
+                }
+            }
+        }
+        if matches!(
+            self.flaw,
+            Some(Flaw::EnvLeaksAfterAnUnstartableRun | Flaw::EnvLeaksAfterAStop)
+        ) && !self.leftover_env.is_empty()
+        {
+            for (key, value) in std::mem::take(&mut self.leftover_env) {
+                if !command.env.iter().any(|(k, _)| *k == key) {
+                    command.env.push((key, value));
+                }
+            }
+            command.env.sort();
+        }
+        let given_env = command.env.clone();
+        let bare_name = command.argv.first().cloned().unwrap_or_default();
+        if self.is(Flaw::PathMissCached) && self.missed.contains(&bare_name) {
+            return Err(SeamError::Unknown(
+                "the program cannot be started".to_owned(),
+            ));
+        }
+        if self.is(Flaw::NonexistentPathEntryIsFatal)
+            && !bare_name.starts_with('/')
+            && command
+                .env
+                .iter()
+                .filter(|(key, _)| key == "PATH")
+                .flat_map(|(_, path)| path.split(':'))
+                .any(|dir| !self.dir_exists(dir))
+        {
+            return Err(SeamError::Unknown(
+                "the program cannot be started".to_owned(),
+            ));
+        }
         if self.is(Flaw::EnvironmentLeaksIntoTheNextRun) {
             let given = command.env.clone();
             for (key, value) in &self.previous_env {
@@ -218,11 +318,9 @@ impl ProcessRunner for Scripted {
                 code,
             }) => (Exit::Code(*code), stdout.clone(), stderr.clone()),
             Some(Behavior::Killed(signal)) => (Exit::Signal(*signal), Vec::new(), Vec::new()),
-            Some(Behavior::Reports) => (
-                Exit::Code(0),
-                report(&command, spec.cwd, self.flaw),
-                Vec::new(),
-            ),
+            Some(Behavior::Reports) => {
+                (Exit::Code(0), report(&command, cwd, self.flaw), Vec::new())
+            }
             Some(Behavior::Chatters { chunks }) => (
                 Exit::Code(0),
                 b"chunk\n".repeat(*chunks as usize),
@@ -244,10 +342,27 @@ impl ProcessRunner for Scripted {
         self.set_alive(&held, true);
         let mut result = self.inner.run(&ProcessSpec {
             command: &command,
+            cwd,
+            stdout_limit: limit,
             ..*spec
         });
         let stopped = result == Err(SeamError::Refused(Reason::LeaseLost));
         self.stopped |= stopped;
+        let unstartable = matches!(result, Err(SeamError::Unknown(_)));
+        if (self.is(Flaw::EnvLeaksAfterAStop) && stopped)
+            || (self.is(Flaw::EnvLeaksAfterAnUnstartableRun) && unstartable)
+        {
+            self.leftover_env = given_env;
+        }
+        if unstartable && bare {
+            self.missed.push(bare_name);
+        }
+        if let Ok(done) = &mut result
+            && self.is(Flaw::StderrTailAccumulates)
+        {
+            self.stderr_seen.extend_from_slice(&done.stderr_tail);
+            done.stderr_tail.clone_from(&self.stderr_seen);
+        }
         // A child ends when the run does: it was killed on a Stop, or it came to its end. The
         // stub that leaves the group running forgets the grandchild of a stopped child.
         let survivors: Vec<String> = if self.is(Flaw::LeavesTheGroupRunning) && stopped {
@@ -269,6 +384,20 @@ impl ProcessRunner for Scripted {
                     done.exit = Exit::Code(128 + n);
                 }
             }
+            (Some(Flaw::SignalOtherThan9IsCode128Plus), Ok(done)) => {
+                if let Exit::Signal(n) = done.exit
+                    && n != 9
+                {
+                    done.exit = Exit::Code(128 + n);
+                }
+            }
+            (Some(Flaw::HighCodeIsASignal), Ok(done)) => {
+                if let Exit::Code(c) = done.exit
+                    && c > 128
+                {
+                    done.exit = Exit::Signal(c - 128);
+                }
+            }
             (Some(Flaw::UnstartableIsAnExit), Err(SeamError::Unknown(_))) if !bare => {
                 result = Ok(ProcessResult {
                     exit: Exit::Code(127),
@@ -280,7 +409,7 @@ impl ProcessRunner for Scripted {
                 result = Err(SeamError::Permanent(why.clone()));
             }
             (Some(Flaw::KeepsTheHead), Ok(done)) => {
-                done.stdout = stdout[..stdout.len().min(spec.stdout_limit)].to_vec();
+                done.stdout = stdout[..stdout.len().min(limit)].to_vec();
             }
             (Some(Flaw::IgnoresStop), Err(SeamError::Refused(Reason::LeaseLost))) => {
                 result = Ok(ProcessResult {

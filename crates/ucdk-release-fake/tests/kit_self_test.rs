@@ -11,69 +11,14 @@ use rigs::output_files::{FakeFilesRig, Flaw as Files};
 use rigs::process_runner::{FakeProcessRig, Flaw as Process};
 use rigs::publisher::{Bad, Call, FakePublisherRig, Flaw as Registry};
 use rigs::store::{FakeStoreRig, Flaw as Store};
+use rigs::{each_fails_alone, further_stubs_fail_exactly, names};
 use ucdk_release_proto::v1::BuildSystemKind;
 use ucdk_release_seams::kit::{
-    Report, build_system_scenarios, grant_source_scenarios, output_files_scenarios,
+    build_system_scenarios, grant_source_scenarios, output_files_scenarios,
     process_runner_scenarios, publisher_scenarios, run_build_system_kit, run_grant_source_kit,
     run_output_files_kit, run_process_runner_kit, run_publisher_kit, run_store_kit,
     store_scenarios,
 };
-
-/// Holds that the table names every scenario of the kit, in its order, and that each stub fails
-/// its scenario alone.
-fn each_fails_alone<F: Copy>(
-    kit: &str,
-    scenarios: &[&'static str],
-    table: &[(&'static str, F)],
-    run: impl Fn(F) -> Report,
-) {
-    let named: Vec<&str> = table.iter().map(|(name, _)| *name).collect();
-    assert_eq!(
-        named, scenarios,
-        "{kit}: the table has a stub for each scenario, in order"
-    );
-    for (name, flaw) in table {
-        let report = run(*flaw);
-        assert_eq!(
-            report.failed(),
-            vec![*name],
-            "{kit}: the stub for {name} must fail that scenario and no other: {:?}",
-            report.outcomes
-        );
-    }
-}
-
-/// Holds that each further stub fails the scenarios it names, which are in the kit's order, and
-/// no other. These are the wrong implementations that a first version of a scenario let pass.
-fn further_stubs_fail_exactly<F: Copy + std::fmt::Debug>(
-    kit: &str,
-    scenarios: &[&'static str],
-    table: &[(F, &[&'static str])],
-    run: impl Fn(F) -> Report,
-) {
-    let mut wrong = Vec::new();
-    for (flaw, named) in table {
-        let in_order: Vec<&str> = scenarios
-            .iter()
-            .copied()
-            .filter(|s| named.contains(s))
-            .collect();
-        assert_eq!(
-            in_order.as_slice(),
-            *named,
-            "{kit}: {flaw:?} names scenarios the kit has, in the kit's order"
-        );
-        let failed = run(*flaw).failed();
-        if failed != *named {
-            wrong.push(format!("{flaw:?}: failed {failed:?}, named {named:?}"));
-        }
-    }
-    assert!(
-        wrong.is_empty(),
-        "{kit}: each stub must fail exactly the scenarios it names:\n{}",
-        wrong.join("\n")
-    );
-}
 
 #[test]
 fn each_further_output_files_stub_fails_the_scenarios_that_hold_it() {
@@ -130,6 +75,22 @@ fn further_store() {
             (Store::PathsAreCaseFolded, &[LISTED]),
             (Store::GetTakesATrailingSlash, &[ESCAPES]),
             (Store::EmptyEntryIsNoEntry, &[SECOND_BEGIN]),
+            (Store::DeepPathsDropped, &[]),
+            (Store::DeepPathsNotListed, &[]),
+            (Store::DeepPathsGetNone, &[]),
+            (Store::DiscardDeepSurvives, &[]),
+            (Store::PutTruncatesAt64k, &[]),
+            (Store::GetTruncatesAt64k, &[]),
+            (Store::AppendOnRewrite, &[]),
+            (Store::DiscardPrefixSiblings, &[]),
+            (Store::BeginRefusedOnExistingLongerKey, &[]),
+            (Store::KeysOmitsEmptyEntries, &[]),
+            (Store::WriterPoisonedAfterRefusal, &[]),
+            (Store::DotfilesHidden, &[]),
+            (Store::TrailingSpaceTrimmed, &[]),
+            (Store::UnicodeFolded, &[]),
+            (Store::FilesCappedAt100, &[]),
+            (Store::KeysCappedAt100, &[]),
         ],
         |flaw| run_store_kit(&FakeStoreRig::flawed(flaw)),
     );
@@ -142,6 +103,7 @@ fn further_grant_source() {
     const LIMIT: &str = "more_coordinates_than_the_limit_are_refused_before_the_exchange";
     const READ: &str =
         "a_read_grant_carries_the_read_scope_and_covers_exactly_the_coordinates_asked";
+    const EXPIRY: &str = "an_expiry_is_reported_as_the_issuer_stated_it";
     further_stubs_fail_exactly(
         "grant source",
         &names(&grant_source_scenarios::<FakeGrantRig>()),
@@ -156,6 +118,15 @@ fn further_grant_source() {
             (Grants::LimitIsCheckedForStageOnly, &[LIMIT]),
             (Grants::IgnoresTheDeclaredScopesAndLocation, &[COVERS, READ]),
             (Grants::ClaimsMatchedIgnoringCase, &[DIFFERING]),
+            (Grants::NormalizesCoordinateFields, &[]),
+            (Grants::ExceptionalFallsBackWhenUndeclared, &[]),
+            (Grants::PinnedOnlyFirstCompared, &[]),
+            (Grants::PinnedSubset, &[]),
+            (Grants::EqualScopesCommitDenied, &[]),
+            (Grants::StickyExceptional, &[]),
+            (Grants::ScopeStickyToFirstRequest, &[]),
+            (Grants::StickyRepository, &[]),
+            (Grants::ExpiryRoundedToSecond, &[EXPIRY]),
         ],
         |flaw| run_grant_source_kit(&FakeGrantRig::flawed(flaw)),
     );
@@ -186,6 +157,24 @@ fn further_output_files() {
             (Files::StatBelowAFileIsAnError, &[STAT]),
             (Files::ListOfAnEmptyDirectoryIsPermanent, &[KINDS]),
             (Files::ReadTruncatesAt64k, &[READ_THROUGH]),
+            (Files::ReadTruncatesAt128k, &[]),
+            (Files::ReadTruncatesAt1M, &[]),
+            (Files::ListCappedAt256, &[]),
+            (Files::DeepEntriesOmittedBeyond5, &[]),
+            (Files::ReadOfDanglingLinkIsEmpty, &[]),
+            (Files::ReadOfLinkToDirIsEmpty, &[]),
+            (Files::ListOfDanglingLinkIsEmpty, &[]),
+            (Files::ListTrailingSlashFails, &[]),
+            (Files::ListTrailingSlashRelsLeadingSlash, &[]),
+            (Files::RefusesDotPart, &[]),
+            (Files::RefusesDoubleSlash, &[]),
+            (Files::ReadFailsOnSpaceInPath, &[]),
+            (Files::ListOmitsNamesWithSpace, &[]),
+            (Files::ListOmitsNonAscii, &[]),
+            (Files::ListNamesPercentEncoded, &[]),
+            (Files::ReadOfFileWithNewlineNameFails, &[]),
+            (Files::NaturalSort, &[]),
+            (Files::ReadOfEmptyFileInSubdirIsMissing, &[]),
         ],
         |flaw| run_output_files_kit(&FakeFilesRig::flawed(flaw)),
     );
@@ -216,6 +205,17 @@ fn further_process_runner() {
                 Process::LastPathEntryWins,
                 &["a_bare_name_is_resolved_on_the_childs_path_and_never_the_runners"],
             ),
+            (Process::CwdIsFirstRuns, &[]),
+            (Process::LimitIsFirstRuns, &[]),
+            (Process::PathMissCached, &[]),
+            (Process::StderrTailAccumulates, &[]),
+            (Process::EnvLeaksAfterAnUnstartableRun, &[]),
+            (Process::EnvLeaksAfterAStop, &[]),
+            (Process::SignalOtherThan9IsCode128Plus, &[]),
+            (Process::HighCodeIsASignal, &[]),
+            (Process::ZeroLimitMeansUnlimited, &[]),
+            (Process::EnvValueWithEqualsTruncated, &[]),
+            (Process::NonexistentPathEntryIsFatal, &[]),
         ],
         |flaw| run_process_runner_kit(&FakeProcessRig::flawed(flaw)),
     );
@@ -370,10 +370,6 @@ fn further_publisher() {
         ],
         |flaw| run_publisher_kit(&FakePublisherRig::flawed(flaw)),
     );
-}
-
-fn names<R>(scenarios: &[ucdk_release_seams::kit::Scenario<R>]) -> Vec<&'static str> {
-    scenarios.iter().map(|s| s.name).collect()
 }
 
 #[test]

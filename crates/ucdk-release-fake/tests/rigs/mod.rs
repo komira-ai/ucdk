@@ -5,7 +5,7 @@
 
 #![allow(dead_code)]
 
-use ucdk_release_seams::kit::Scenario;
+use ucdk_release_seams::kit::{Report, Scenario};
 
 pub mod build_system;
 pub mod grant_source;
@@ -13,7 +13,69 @@ pub mod output_files;
 pub mod process_runner;
 pub mod publisher;
 pub mod publisher_flaw;
+pub mod publisher_more;
 pub mod store;
+
+/// The names of the scenarios of a kit, in its order.
+pub fn names<R>(scenarios: &[Scenario<R>]) -> Vec<&'static str> {
+    scenarios.iter().map(|s| s.name).collect()
+}
+
+/// Holds that the table names every scenario of the kit, in its order, and that each stub fails
+/// its scenario alone.
+pub fn each_fails_alone<F: Copy>(
+    kit: &str,
+    scenarios: &[&'static str],
+    table: &[(&'static str, F)],
+    run: impl Fn(F) -> Report,
+) {
+    let named: Vec<&str> = table.iter().map(|(name, _)| *name).collect();
+    assert_eq!(
+        named, scenarios,
+        "{kit}: the table has a stub for each scenario, in order"
+    );
+    for (name, flaw) in table {
+        let report = run(*flaw);
+        assert_eq!(
+            report.failed(),
+            vec![*name],
+            "{kit}: the stub for {name} must fail that scenario and no other: {:?}",
+            report.outcomes
+        );
+    }
+}
+
+/// Holds that each further stub fails the scenarios it names, which are in the kit's order, and
+/// no other. These are the wrong implementations that a first version of a scenario let pass.
+pub fn further_stubs_fail_exactly<F: Copy + std::fmt::Debug>(
+    kit: &str,
+    scenarios: &[&'static str],
+    table: &[(F, &[&'static str])],
+    run: impl Fn(F) -> Report,
+) {
+    let mut wrong = Vec::new();
+    for (flaw, named) in table {
+        let in_order: Vec<&str> = scenarios
+            .iter()
+            .copied()
+            .filter(|s| named.contains(s))
+            .collect();
+        assert_eq!(
+            in_order.as_slice(),
+            *named,
+            "{kit}: {flaw:?} names scenarios the kit has, in the kit's order"
+        );
+        let failed = run(*flaw).failed();
+        if failed != *named {
+            wrong.push(format!("{flaw:?}: failed {failed:?}, named {named:?}"));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{kit}: each stub must fail exactly the scenarios it names:\n{}",
+        wrong.join("\n")
+    );
+}
 
 /// Runs the scenario called `name` against `rig`, and fails the test with its reason if it
 /// fails.

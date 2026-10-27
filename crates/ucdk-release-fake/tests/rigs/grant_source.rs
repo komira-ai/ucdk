@@ -11,7 +11,7 @@ use ucdk_release_proto::v1::push_identity::Kind;
 use ucdk_release_proto::v1::{Reason, Repository};
 use ucdk_release_seams::kit::{
     COMMIT_SCOPE, GrantContent, GrantSetup, GrantSourceRig, JobClaims, LOCATION, READ_SCOPE,
-    STAGE_SCOPE,
+    STAGE_SCOPE, coordinate,
 };
 use ucdk_release_seams::{Grant, GrantRequest, GrantSource, SeamError};
 
@@ -62,6 +62,26 @@ pub enum Flaw {
     IgnoresTheDeclaredScopesAndLocation,
     /// The claims of the job are compared without regard to case.
     ClaimsMatchedIgnoringCase,
+    /// Each coordinate of a request is covered with the version, platform, channel and type the
+    /// kits use, whatever the request names.
+    NormalizesCoordinateFields,
+    /// An exceptional request of a declaration that names no exceptional subject and no
+    /// exceptional environment is compared with the ordinary ones.
+    ExceptionalFallsBackWhenUndeclared,
+    /// Of the pinned claims, only the first one declared is compared.
+    PinnedOnlyFirstCompared,
+    /// A job that presents every pinned claim declared and more is admitted.
+    PinnedSubset,
+    /// A commit grant is denied when the declaration has one scope for both phases.
+    EqualScopesCommitDenied,
+    /// Once an exceptional request was granted, every later request of the source is exceptional.
+    StickyExceptional,
+    /// Every grant of a source has the phase of the first request it was asked.
+    ScopeStickyToFirstRequest,
+    /// Every grant of a source is for the repository of the first request it was asked.
+    StickyRepository,
+    /// The expiry of a grant is rounded down to a whole second.
+    ExpiryRoundedToSecond,
 }
 
 pub struct FakeGrantRig {
@@ -95,6 +115,9 @@ pub struct Flawed {
     cached: Option<(Vec<u8>, u64)>,
     unreachable_seen: bool,
     log: Vec<u8>,
+    sticky_exceptional: bool,
+    first_phase: Option<GrantPhase>,
+    first_repository: Option<Repository>,
 }
 
 impl GrantSourceRig for FakeGrantRig {
@@ -125,6 +148,9 @@ impl GrantSourceRig for FakeGrantRig {
             cached: None,
             unreachable_seen: false,
             log: Vec::new(),
+            sticky_exceptional: false,
+            first_phase: None,
+            first_repository: None,
         }
     }
 
@@ -215,6 +241,30 @@ impl Flawed {
         if self.is(Flaw::NoPinnedClaimIsIssued) && job.pinned.is_empty() {
             declared.pinned_claims.clear();
         }
+        if self.is(Flaw::ExceptionalFallsBackWhenUndeclared)
+            && req.exceptional
+            && declared.exceptional_subject.is_empty()
+            && declared.exceptional_environment.is_empty()
+        {
+            declared.exceptional_subject.clone_from(&declared.subject);
+            declared
+                .exceptional_environment
+                .clone_from(&declared.environment);
+        }
+        if self.is(Flaw::PinnedOnlyFirstCompared)
+            && let Some((key, value)) = declared.pinned_claims.iter().next()
+            && job.pinned.get(key) == Some(value)
+        {
+            declared.pinned_claims.clone_from(&job.pinned);
+        }
+        if self.is(Flaw::PinnedSubset)
+            && declared
+                .pinned_claims
+                .iter()
+                .all(|(key, value)| job.pinned.get(key) == Some(value))
+        {
+            declared.pinned_claims.clone_from(&job.pinned);
+        }
         if self.is(Flaw::ClaimsMatchedIgnoringCase) {
             let (subject, environment) = if req.exceptional {
                 (
@@ -266,10 +316,31 @@ impl GrantSource for Flawed {
             return Err(SeamError::Refused(Reason::Credential));
         }
         let mut phase = req.phase;
+        if self.is(Flaw::ScopeStickyToFirstRequest) {
+            phase = *self.first_phase.get_or_insert(req.phase);
+        }
         if self.is(Flaw::ReadIsIssuedAsStage) && phase == GrantPhase::Read {
             phase = GrantPhase::Stage;
         }
-        let mut coordinates = req.coordinates;
+        let normalized: Vec<Coordinate>;
+        let mut coordinates = if self.is(Flaw::NormalizesCoordinateFields) {
+            normalized = req
+                .coordinates
+                .iter()
+                .map(|c| coordinate(&c.name))
+                .collect();
+            normalized.as_slice()
+        } else {
+            req.coordinates
+        };
+        if self.is(Flaw::EqualScopesCommitDenied)
+            && phase == GrantPhase::Commit
+            && let Some(Kind::Federated(declared)) =
+                req.repository.push.as_ref().and_then(|p| p.kind.as_ref())
+            && declared.stage_scope == declared.commit_scope
+        {
+            return Err(SeamError::GrantRefused(GrantFault::Denied));
+        }
         if self.is(Flaw::CommitGrantDropsACoordinate)
             && phase == GrantPhase::Commit
             && coordinates.len() == 2
@@ -287,15 +358,39 @@ impl GrantSource for Flawed {
         {
             coordinates = &coordinates[..self.limit];
         }
-        let repository = self.as_a_lax_issuer_reads(req);
+        let declared_repository;
+        let asked = if self.is(Flaw::StickyRepository) {
+            declared_repository = self
+                .first_repository
+                .get_or_insert_with(|| req.repository.clone())
+                .clone();
+            GrantRequest {
+                repository: &declared_repository,
+                ..*req
+            }
+        } else {
+            GrantRequest { ..*req }
+        };
+        let repository = self.as_a_lax_issuer_reads(&asked);
         let exchanged = self.inner.exchanges().len();
+        let exceptional =
+            (req.exceptional || self.sticky_exceptional) && !self.is(Flaw::IgnoresExceptional);
         let result = self.inner.grant(&GrantRequest {
             repository: &repository,
             phase,
             coordinates,
-            exceptional: req.exceptional && !self.is(Flaw::IgnoresExceptional),
+            exceptional,
         });
+        if self.is(Flaw::StickyExceptional) && req.exceptional && result.is_ok() {
+            self.sticky_exceptional = true;
+        }
         match (self.flaw, result) {
+            (Some(Flaw::ExpiryRoundedToSecond), Ok(grant)) if !grant.is_none() => {
+                Ok(Grant::issued(
+                    grant.secret().to_vec(),
+                    grant.expires_ms().unwrap_or_default() / 1000 * 1000,
+                ))
+            }
             (Some(Flaw::AnonymousGetsAGrant), Ok(grant)) if grant.is_none() => {
                 Ok(Grant::issued(b"x".to_vec(), 1))
             }

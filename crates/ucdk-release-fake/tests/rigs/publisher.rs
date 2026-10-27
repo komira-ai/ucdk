@@ -39,7 +39,7 @@ impl FakePublisherRig {
         }
     }
 
-    fn issue(
+    pub(super) fn issue(
         &self,
         repository: &Repository,
         phase: GrantPhase,
@@ -50,7 +50,7 @@ impl FakePublisherRig {
 }
 
 /// A grant of `phase` for `coordinates` in `repository`, good now.
-fn issue(
+pub(super) fn issue(
     clock: &ManualClock,
     repository: &Repository,
     phase: GrantPhase,
@@ -75,8 +75,8 @@ fn issue(
 }
 
 pub struct Flawed {
-    inner: FakeRegistry,
-    clock: ManualClock,
+    pub(super) inner: FakeRegistry,
+    pub(super) clock: ManualClock,
     /// Every coordinate that was in a `stage` or `commit` call, with its bytes.
     known: Vec<(Coordinate, Vec<u8>)>,
     flaw: Option<Flaw>,
@@ -333,7 +333,7 @@ impl Flawed {
     }
 
     /// What the registry holds for `k`, staged or committed, as it sees it itself.
-    fn held_now(&mut self, k: &Coordinate) -> Option<Held> {
+    pub(super) fn held_now(&mut self, k: &Coordinate) -> Option<Held> {
         let grant = self.internal(GrantPhase::Stage, std::slice::from_ref(k));
         match self.inner.observe(&grant, k, &[]) {
             Ok(Presence::Present(held) | Presence::Yanked(held) | Presence::Staged(held)) => {

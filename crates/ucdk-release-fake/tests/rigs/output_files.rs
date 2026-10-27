@@ -72,6 +72,75 @@ pub enum Flaw {
     ListOfAnEmptyDirectoryIsPermanent,
     /// A `read` that answers no more than the first 65,536 bytes.
     ReadTruncatesAt64k,
+    /// A `read` that answers no more than the first 131,072 bytes.
+    ReadTruncatesAt128k,
+    /// A `read` that answers no more than the first 1,048,576 bytes.
+    ReadTruncatesAt1M,
+    /// A listing of more than 256 entries that leaves out the rest.
+    ListCappedAt256,
+    /// A listing that leaves out every entry more than five parts deep.
+    DeepEntriesOmittedBeyond5,
+    /// A `read` of a symlink with nothing at its target that answers an empty file.
+    ReadOfDanglingLinkIsEmpty,
+    /// A `read` of a symlink to a directory that answers an empty file.
+    ReadOfLinkToDirIsEmpty,
+    /// A `list` of a symlink with nothing at its target that answers an empty listing.
+    ListOfDanglingLinkIsEmpty,
+    /// A `list` of a path with a trailing slash that answers `Permanent`.
+    ListTrailingSlashFails,
+    /// A `list` of a path with a trailing slash that gives each `rel` a leading slash.
+    ListTrailingSlashRelsLeadingSlash,
+    /// A path with a `.` part is `Refused`.
+    RefusesDotPart,
+    /// A path with an empty part (`//`) is `Refused`.
+    RefusesDoubleSlash,
+    /// A `read` of a path with a space in it answers `Permanent`.
+    ReadFailsOnSpaceInPath,
+    /// A listing that leaves out every entry with a space in its name.
+    ListOmitsNamesWithSpace,
+    /// A listing that leaves out every entry with a name that is not ASCII.
+    ListOmitsNonAscii,
+    /// A listing that writes every byte of a name that is not a letter, a digit, `.`, `_` or `-`
+    /// as `%` and two hexadecimal digits.
+    ListNamesPercentEncoded,
+    /// A `read` of a path with a newline in it answers `Permanent`.
+    ReadOfFileWithNewlineNameFails,
+    /// A listing sorted so that runs of digits compare as numbers.
+    NaturalSort,
+    /// A `read` of an empty file at least two directories down answers `Permanent`.
+    ReadOfEmptyFileInSubdirIsMissing,
+}
+
+/// `name` with each run of digits padded, so that a sort by it puts `f2` before `f10`.
+fn natural_key(name: &str) -> String {
+    let mut key = String::new();
+    let mut digits = String::new();
+    for c in name.chars().chain(std::iter::once('\0')) {
+        if c.is_ascii_digit() {
+            digits.push(c);
+            continue;
+        }
+        if !digits.is_empty() {
+            key.push_str(&format!("{digits:0>20}"));
+            digits.clear();
+        }
+        key.push(c);
+    }
+    key
+}
+
+/// `name` with each byte that is not a letter, a digit, `.`, `_`, `-` or `/` as `%` and two
+/// hexadecimal digits.
+fn percent_encoded(name: &str) -> String {
+    let mut out = String::new();
+    for byte in name.bytes() {
+        if byte.is_ascii_alphanumeric() || b"._-/".contains(&byte) {
+            out.push(char::from(byte));
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
 }
 
 pub struct FakeFilesRig {
@@ -177,6 +246,15 @@ impl Flawed {
         self.inner.stat(&target).ok().flatten()
     }
 
+    /// What a stub that refuses `.` parts or empty parts answers a path that has one.
+    fn refuses(&self, path: &str) -> Option<SeamError> {
+        let dot = self.is(Flaw::RefusesDotPart) && path.split('/').any(|part| part == ".");
+        let double = self.is(Flaw::RefusesDoubleSlash) && path.contains("//");
+        (dot || double).then_some(SeamError::Refused(
+            ucdk_release_proto::v1::Reason::BuildOutput,
+        ))
+    }
+
     /// The target of the symlink that `path` names with a slash after it, when it does.
     fn slashed_target(&self, path: &str) -> Option<String> {
         self.target_of(path.strip_suffix('/')?)
@@ -207,6 +285,18 @@ impl OutputFiles for Flawed {
 
     fn list(&mut self, path: &str) -> Result<Vec<DirEntry>, SeamError> {
         if self.is(Flaw::ListOfMissingIsEmpty) && self.inner.stat(path) == Ok(None) {
+            return Ok(Vec::new());
+        }
+        if let Some(refused) = self.refuses(path) {
+            return Err(refused);
+        }
+        if self.is(Flaw::ListTrailingSlashFails) && path.ends_with('/') {
+            return Err(SeamError::Permanent(format!("{path} is not a directory")));
+        }
+        if self.is(Flaw::ListOfDanglingLinkIsEmpty)
+            && self.inner.stat(path) == Ok(Some(FileKind::Symlink))
+            && self.target_kind(path).is_none()
+        {
             return Ok(Vec::new());
         }
         if self.is(Flaw::ListOfSymlinkToDirFollows)
@@ -246,6 +336,31 @@ impl OutputFiles for Flawed {
                 }
             }
             entries = kept;
+        }
+        if self.is(Flaw::ListCappedAt256) {
+            entries.truncate(256);
+        }
+        if self.is(Flaw::DeepEntriesOmittedBeyond5) {
+            entries.retain(|e| e.rel.split('/').count() <= 5);
+        }
+        if self.is(Flaw::ListOmitsNamesWithSpace) {
+            entries.retain(|e| !e.rel.contains(' '));
+        }
+        if self.is(Flaw::ListOmitsNonAscii) {
+            entries.retain(|e| e.rel.is_ascii());
+        }
+        if self.is(Flaw::ListNamesPercentEncoded) {
+            for entry in &mut entries {
+                entry.rel = percent_encoded(&entry.rel);
+            }
+        }
+        if self.is(Flaw::ListTrailingSlashRelsLeadingSlash) && path.ends_with('/') {
+            for entry in &mut entries {
+                entry.rel = format!("/{}", entry.rel);
+            }
+        }
+        if self.is(Flaw::NaturalSort) {
+            entries.sort_by_key(|e| natural_key(&e.rel));
         }
         if self.is(Flaw::WalkOrder) {
             entries.sort_by_key(|e| e.rel.replace('/', "\u{0}"));
@@ -290,6 +405,22 @@ impl OutputFiles for Flawed {
     }
 
     fn read(&mut self, path: &str) -> Result<Vec<u8>, SeamError> {
+        if let Some(refused) = self.refuses(path) {
+            return Err(refused);
+        }
+        if (self.is(Flaw::ReadFailsOnSpaceInPath) && path.contains(' '))
+            || (self.is(Flaw::ReadOfFileWithNewlineNameFails) && path.contains('\n'))
+        {
+            return Err(SeamError::Permanent(format!("{path} cannot be read")));
+        }
+        if self.inner.stat(path) == Ok(Some(FileKind::Symlink)) {
+            let target = self.target_kind(path);
+            if (self.is(Flaw::ReadOfDanglingLinkIsEmpty) && target.is_none())
+                || (self.is(Flaw::ReadOfLinkToDirIsEmpty) && target == Some(FileKind::Directory))
+            {
+                return Ok(Vec::new());
+            }
+        }
         if self.is(Flaw::ReadRefusesDotDotNames) && path.contains("..") {
             return Err(SeamError::Refused(
                 ucdk_release_proto::v1::Reason::BuildOutput,
@@ -354,8 +485,18 @@ impl OutputFiles for Flawed {
                 }
                 Some(Flaw::ReadTruncatesAt4k) => bytes.truncate(4096),
                 Some(Flaw::ReadTruncatesAt64k) => bytes.truncate(65_536),
+                Some(Flaw::ReadTruncatesAt128k) => bytes.truncate(131_072),
+                Some(Flaw::ReadTruncatesAt1M) => bytes.truncate(1_048_576),
                 _ => {}
             }
+        }
+        if self.is(Flaw::ReadOfEmptyFileInSubdirIsMissing)
+            && result.as_ref().is_ok_and(Vec::is_empty)
+            && path
+                .strip_prefix(&format!("{ROOT}/"))
+                .is_some_and(|rest| rest.split('/').count() >= 3)
+        {
+            result = Err(SeamError::Permanent(format!("{path} is empty")));
         }
         if self.is(Flaw::EmptyFileIsMissing) && result.as_ref().is_ok_and(Vec::is_empty) {
             result = Err(SeamError::Permanent(format!("{path} is empty")));
