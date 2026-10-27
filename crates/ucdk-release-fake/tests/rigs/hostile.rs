@@ -81,6 +81,9 @@ pub enum Wrong {
     /// The check of a file against a directory compares names without their trailing spaces and
     /// dots.
     TreeCheckTrimmed,
+    /// The index of the tree is kept by member name alone, shared by every stage, platform,
+    /// revision and generation.
+    TreeIndexByMember,
 }
 
 /// The names of the files and of the directories of the paths an index has seen.
@@ -132,8 +135,18 @@ impl StoreRig for HostileRig {
             ghosts: BTreeMap::new(),
             kept: BTreeMap::new(),
             global: Arc::default(),
+            members: BTreeMap::new(),
         }
     }
+}
+
+/// The member name of a key: its last part.
+fn member(key: &StoreKey) -> String {
+    key.as_str()
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_owned()
 }
 
 pub struct Hostile {
@@ -147,6 +160,8 @@ pub struct Hostile {
     kept: BTreeMap<StoreKey, Arc<Mutex<Tree>>>,
     /// The one index of the store, for the stub that has one.
     global: Arc<Mutex<Tree>>,
+    /// The index of each member name, for the stub that keeps one per name.
+    members: BTreeMap<String, Arc<Mutex<Tree>>>,
 }
 
 /// The key as the stubs that read from the wrong entry compare it.
@@ -258,7 +273,8 @@ impl Writer<'_> {
             | Wrong::GlobalTreeIndex
             | Wrong::TreeCheckCaseFolded
             | Wrong::TreeCheckUnicodeFolded
-            | Wrong::TreeCheckTrimmed => self
+            | Wrong::TreeCheckTrimmed
+            | Wrong::TreeIndexByMember => self
                 .tree
                 .lock()
                 .expect("the index is not poisoned")
@@ -346,6 +362,7 @@ impl ArtifactStore for Hostile {
             Wrong::TreeIndexSurvivesDiscard => {
                 Arc::clone(self.kept.entry(key.clone()).or_default())
             }
+            Wrong::TreeIndexByMember => Arc::clone(self.members.entry(member(key)).or_default()),
             _ => Arc::default(),
         };
         Ok(Box::new(Writer {
@@ -418,6 +435,21 @@ impl ArtifactStore for Hostile {
                 }
             }
             *self.global.lock().expect("the index is not poisoned") = live;
+        }
+        if self.flaw == Wrong::TreeIndexByMember {
+            // The index of the name is what the entries of that name that are left hold.
+            let name = member(key);
+            let mut live = Tree::default();
+            for other in self.inner.keys()? {
+                if member(&other) == name {
+                    for rel in self.inner.files(&other)? {
+                        live.record(&rel);
+                    }
+                }
+            }
+            if let Some(index) = self.members.get(&name) {
+                *index.lock().expect("the index is not poisoned") = live;
+            }
         }
         Ok(())
     }

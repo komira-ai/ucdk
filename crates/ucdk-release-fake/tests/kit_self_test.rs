@@ -6,7 +6,7 @@
 mod rigs;
 
 use rigs::hostile::{HostileRig, Wrong};
-use rigs::loose::LooseRig;
+use rigs::loose::{LooseRig, ShallowRig};
 use rigs::store::{FakeStoreRig, Flaw as Store};
 use rigs::{each_fails_alone, further_stubs_fail_exactly, names};
 use ucdk_release_seams::kit::{run_store_kit, store_scenarios};
@@ -136,6 +136,16 @@ fn a_store_that_lets_a_file_and_a_directory_share_a_name_fails_the_kit() {
 }
 
 #[test]
+fn a_store_that_checks_a_file_against_a_directory_two_parts_deep_fails_the_kit() {
+    // The store is the fake in all else: it refuses a path below a file, and a file where a
+    // directory is, within the first two parts of a path, and takes a clash below them.
+    assert_eq!(
+        run_store_kit(&ShallowRig).failed(),
+        ["paths_that_escape_an_entry_are_refused"]
+    );
+}
+
+#[test]
 fn each_wrong_store_stub_fails_the_scenario_that_holds_it() {
     const READ_BACK: &str = "an_entry_reads_back_what_was_written";
     const ESCAPES: &str = "paths_that_escape_an_entry_are_refused";
@@ -175,6 +185,7 @@ fn each_wrong_store_stub_fails_the_scenario_that_holds_it() {
             (Wrong::TreeCheckCaseFolded, &[ESCAPES]),
             (Wrong::TreeCheckUnicodeFolded, &[ESCAPES]),
             (Wrong::TreeCheckTrimmed, &[ESCAPES]),
+            (Wrong::TreeIndexByMember, &[TWO]),
         ],
         |flaw| run_store_kit(&HostileRig { flaw }),
     );

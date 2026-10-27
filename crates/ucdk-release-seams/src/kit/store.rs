@@ -590,6 +590,38 @@ fn paths_that_escape_an_entry_are_refused<R: StoreRig>(rig: &R) {
         names.sort();
         same(listed, names, &format!("the files of {entry}"));
     }
+    // A clash is a clash however deep: a file three parts deep is no directory, a path below it
+    // is Refused at four parts and at five, and a directory that holds a path four parts deep is
+    // no file at three. Each entry is in a store of its own.
+    for (member, written, refused) in [
+        ("deep_file", "a/b/c", ["a/b/c/d", "a/b/c/d/e"].as_slice()),
+        ("deep_directory", "a/b/c/d", ["a/b/c"].as_slice()),
+    ] {
+        let mut store = rig.store();
+        let entry = key("build", "g1", member);
+        {
+            let mut writer = must(store.begin(&entry), "begin");
+            must(writer.put_file(written, b"held"), "put_file");
+            for bad in refused {
+                let refusal = must_err(writer.put_file(bad, b"x"), &format!("put_file of {bad:?}"));
+                same(
+                    matches!(refusal, SeamError::Refused(_)),
+                    true,
+                    &format!("the path {bad:?}, beside {written:?} as the other kind, is Refused"),
+                );
+            }
+        }
+        same(
+            must(store.files(&entry), "files"),
+            vec![written.to_owned()],
+            &format!("the files of {entry} after a deep clash was refused"),
+        );
+        same(
+            must(store.get(&entry, written), "get"),
+            Some(b"held".to_vec()),
+            &format!("{written} after a deep clash was refused"),
+        );
+    }
     let mut kept = must(store.keys(), "keys");
     kept.sort();
     let mut want = vec![k, beside[0].clone(), beside[1].clone(), clash];
@@ -769,6 +801,41 @@ fn two_entries_do_not_touch_each_other<R: StoreRig>(rig: &R) {
                     "the files of {entry}, beside an entry that holds a name as the other kind"
                 ),
             );
+        }
+    }
+    // The same member name under keys that differ in the stage, the platform, the revision or the
+    // generation alone: the tree of one is not the tree of the other. One entry holds `n/x` and
+    // the other holds `n`, each way round, and every write succeeds. Each pair is in a store of
+    // its own.
+    let base = key("build", "g1", "m");
+    let alike = [
+        key("test", "g1", "m"),
+        key_on("linux-aarch64", "abc", "m"),
+        key_on("linux-x86_64", "def", "m"),
+        key("build", "g2", "m"),
+    ];
+    for other in &alike {
+        for (first, second) in [(&base, other), (other, &base)] {
+            for (first_path, second_path) in [("n/x", "n"), ("n", "n/x")] {
+                let mut pair = rig.store();
+                must(
+                    must(pair.begin(first), "begin").put_file(first_path, first_path.as_bytes()),
+                    "put_file",
+                );
+                must(
+                    must(pair.begin(second), "begin").put_file(second_path, second_path.as_bytes()),
+                    "put_file of a name that an entry of the same member holds as the other kind",
+                );
+                for (entry, path, beside) in
+                    [(first, first_path, second), (second, second_path, first)]
+                {
+                    same(
+                        must(pair.get(entry, path), "get"),
+                        Some(path.as_bytes().to_vec()),
+                        &format!("{path} of {entry}, beside {beside}"),
+                    );
+                }
+            }
         }
     }
     // An entry that was never begun, whose key differs from a populated one in the stage, the
