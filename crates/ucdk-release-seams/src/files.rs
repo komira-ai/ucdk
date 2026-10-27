@@ -23,6 +23,10 @@ pub struct DirEntry {
 
 /// Every `path` is absolute with no `..` part (see [`check_path`]) and otherwise `Refused`. Only
 /// the last component of a path is looked at without following, so a symlink is never followed.
+/// A `.` part and an empty part (a repeated slash, a trailing one) are read as the operating
+/// system reads them and name nothing of their own, so `/d/./x`, `/d//x` and `/d/x` are one path
+/// and `list` of `/d/` lists `/d`; a name may hold any other byte, a space, a newline and
+/// non-ASCII characters included, and is listed and read as it is.
 pub trait OutputFiles: Send {
     /// What is at `path`; `Ok(None)` is "nothing there", the only answer that tells absence
     /// from a failure (`Unknown`).

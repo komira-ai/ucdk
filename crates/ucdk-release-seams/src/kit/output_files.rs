@@ -1,0 +1,514 @@
+// SPDX-License-Identifier: Apache-2.0
+//! The `OutputFiles` kit: fourteen scenarios over the three questions a build system asks of a
+//! tree it did not make (what is at a path, what is below a directory, what a file holds).
+
+use super::{Report, Scenario, must, must_err, must_some, permanent_naming, run_scenarios, same};
+use crate::{FileKind, OutputFiles, SeamError, entry_path};
+
+/// One node of a tree a scenario asks its rig to build.
+#[derive(Debug, Clone, Copy)]
+pub enum Node<'a> {
+    /// A regular file with these bytes.
+    File(&'a [u8]),
+    Directory,
+    /// A symlink to the path below the rig's root that is named, which may hold a file, a
+    /// directory or nothing.
+    Link(&'a str),
+}
+
+/// What an implementation provides so the scenarios can set up a tree and look at it without
+/// the reader's help.
+pub trait OutputFilesRig {
+    type Files: OutputFiles;
+
+    /// The absolute path of the directory every tree is built below, with no trailing `/`.
+    fn root(&self) -> String;
+
+    /// A reader over a tree of exactly `tree`, each path relative to [`Self::root`] with its
+    /// parent directories made, replacing any tree an earlier call made.
+    fn reader(&self, tree: &[(&str, Node<'_>)]) -> Self::Files;
+
+    /// Makes the regular file at `rel` below the root hold `bytes` from now on, behind the
+    /// reader's back.
+    fn change(&self, files: &mut Self::Files, rel: &str, bytes: &[u8]);
+
+    /// The path, kind and byte length of everything in the tree, taken without the reader.
+    fn snapshot(&self, files: &Self::Files) -> Vec<(String, FileKind, usize)>;
+}
+
+fn at<R: OutputFilesRig>(rig: &R, rel: &str) -> String {
+    format!("{}/{rel}", rig.root())
+}
+
+fn is_refused(error: &SeamError) -> bool {
+    matches!(error, SeamError::Refused(_))
+}
+
+pub fn run_output_files_kit<R: OutputFilesRig>(rig: &R) -> Report {
+    run_scenarios(rig, &output_files_scenarios())
+}
+
+pub fn output_files_scenarios<R: OutputFilesRig>() -> Vec<Scenario<R>> {
+    vec![
+        Scenario::new(
+            "a_listing_is_sorted_relative_paths",
+            a_listing_is_sorted_relative_paths::<R>,
+        ),
+        Scenario::new(
+            "a_listing_names_the_kind_of_every_entry",
+            a_listing_names_the_kind_of_every_entry::<R>,
+        ),
+        Scenario::new(
+            "a_listed_symlink_is_never_descended",
+            a_listed_symlink_is_never_descended::<R>,
+        ),
+        Scenario::new(
+            "stat_tells_a_file_a_directory_a_symlink_and_nothing_apart",
+            stat_tells_a_file_a_directory_a_symlink_and_nothing_apart::<R>,
+        ),
+        Scenario::new(
+            "a_missing_path_is_none_from_stat_and_permanent_from_list_and_read",
+            a_missing_path_is_none_from_stat_and_permanent_from_list_and_read::<R>,
+        ),
+        Scenario::new(
+            "listing_a_file_and_reading_a_directory_or_a_symlink_are_refused",
+            listing_a_file_and_reading_a_directory_or_a_symlink_are_refused::<R>,
+        ),
+        Scenario::new(
+            "a_single_file_output_is_read_without_a_rel",
+            a_single_file_output_is_read_without_a_rel::<R>,
+        ),
+        Scenario::new(
+            "a_report_file_is_read_directly",
+            a_report_file_is_read_directly::<R>,
+        ),
+        Scenario::new(
+            "reading_a_directory_is_refused_even_when_it_is_the_located_output",
+            reading_a_directory_is_refused_even_when_it_is_the_located_output::<R>,
+        ),
+        Scenario::new(
+            "a_path_that_is_relative_or_climbs_is_refused",
+            a_path_that_is_relative_or_climbs_is_refused::<R>,
+        ),
+        Scenario::new(
+            "an_entry_of_a_listed_directory_is_read_through_its_joined_path",
+            an_entry_of_a_listed_directory_is_read_through_its_joined_path::<R>,
+        ),
+        Scenario::new(
+            "a_read_returns_the_file_as_it_is_at_the_call",
+            a_read_returns_the_file_as_it_is_at_the_call::<R>,
+        ),
+        Scenario::new("no_call_changes_the_tree", no_call_changes_the_tree::<R>),
+        Scenario::new(
+            "a_dot_part_a_repeated_slash_and_a_trailing_slash_name_the_path_they_stand_in",
+            a_dot_part_a_repeated_slash_and_a_trailing_slash_name_the_path_they_stand_in::<R>,
+        ),
+    ]
+}
+
+/// The operating system reads `/d/./x` and `/d//x` as `/d/x` and `list` of `/d/` as `list` of
+/// `/d`, and the contract refuses only a `..` part: a reader that refuses or fails on any of
+/// them, or lists with a leading slash, is not one.
+fn a_dot_part_a_repeated_slash_and_a_trailing_slash_name_the_path_they_stand_in<
+    R: OutputFilesRig,
+>(
+    rig: &R,
+) {
+    let mut files = rig.reader(&[
+        ("d/x", Node::File(b"X")),
+        ("d/z", Node::File(b"Z")),
+        ("d/sub/y", Node::File(b"Y")),
+    ]);
+    let listed = must(files.list(&at(rig, "d")), "list of the plain path");
+    for suffix in ["/d/", "/d//", "//d", "/./d", "/d/.", "/./d/./"] {
+        let spelled = format!("{}{suffix}", rig.root());
+        same(
+            must(files.list(&spelled), &format!("list of {spelled:?}")),
+            listed.clone(),
+            &format!("the listing of {spelled:?}, which is the listing of the plain path"),
+        );
+        same(
+            must(files.stat(&spelled), &format!("stat of {spelled:?}")),
+            Some(FileKind::Directory),
+            &format!("what is at {spelled:?}"),
+        );
+    }
+    for suffix in ["/d/./x", "/d//x", "/./d/x", "/d/./z", "/d//z"] {
+        let spelled = format!("{}{suffix}", rig.root());
+        let want: &[u8] = if suffix.ends_with('x') { b"X" } else { b"Z" };
+        same(
+            must(files.read(&spelled), &format!("read of {spelled:?}")),
+            want.to_vec(),
+            &format!("the bytes of {spelled:?}"),
+        );
+        same(
+            must(files.stat(&spelled), &format!("stat of {spelled:?}")),
+            Some(FileKind::File),
+            &format!("what is at {spelled:?}"),
+        );
+    }
+}
+
+/// `a.txt` sorts before `a/y` because `.` is below `/`; a walk that lists a directory's
+/// children right after it gets that wrong.
+fn a_listing_is_sorted_relative_paths<R: OutputFilesRig>(rig: &R) {
+    let mut files = rig.reader(&[
+        ("t/b.txt", Node::File(b"1")),
+        ("t/a/z", Node::File(b"2")),
+        ("t/a/y", Node::File(b"3")),
+        ("t/B", Node::File(b"4")),
+        ("t/a.txt", Node::File(b"5")),
+    ]);
+    let listing = must(files.list(&at(rig, "t")), "list");
+    let rels: Vec<&str> = listing.iter().map(|e| e.rel.as_str()).collect();
+    same(
+        rels,
+        vec!["B", "a", "a.txt", "a/y", "a/z", "b.txt"],
+        "the listing, sorted bytewise by rel",
+    );
+    // More entries than a reader might list at most, whose names sort differently as numbers
+    // than as bytes (`f10` is before `f2`).
+    let paths: Vec<String> = (0..600).map(|n| format!("w/f{n}")).collect();
+    let tree: Vec<(&str, Node<'_>)> = paths
+        .iter()
+        .map(|path| (path.as_str(), Node::File(b"x")))
+        .collect();
+    let mut files = rig.reader(&tree);
+    let listing = must(files.list(&at(rig, "w")), "list of a wide directory");
+    let mut want: Vec<String> = (0..600).map(|n| format!("f{n}")).collect();
+    want.sort();
+    same(
+        listing.into_iter().map(|e| e.rel).collect::<Vec<_>>(),
+        want,
+        "the listing of 600 entries, sorted bytewise by rel",
+    );
+}
+
+fn a_listing_names_the_kind_of_every_entry<R: OutputFilesRig>(rig: &R) {
+    let mut files = rig.reader(&[
+        ("k/file", Node::File(b"x")),
+        ("k/dir", Node::Directory),
+        ("k/link", Node::Link("k/file")),
+        ("k/link_to_dir", Node::Link("k/dir")),
+        ("k/dangling", Node::Link("k/nowhere")),
+    ]);
+    let listing = must(files.list(&at(rig, "k")), "list");
+    let kinds: Vec<(&str, FileKind)> = listing.iter().map(|e| (e.rel.as_str(), e.kind)).collect();
+    same(
+        kinds,
+        vec![
+            ("dangling", FileKind::Symlink),
+            ("dir", FileKind::Directory),
+            ("file", FileKind::File),
+            ("link", FileKind::Symlink),
+            ("link_to_dir", FileKind::Symlink),
+        ],
+        "the kind of each entry",
+    );
+    // A directory with nothing in it lists as empty; it is not a fault.
+    same(
+        must(files.list(&at(rig, "k/dir")), "list of an empty directory").is_empty(),
+        true,
+        "the listing of an empty directory is empty",
+    );
+}
+
+fn a_listed_symlink_is_never_descended<R: OutputFilesRig>(rig: &R) {
+    // One link at the top of the listed directory and one below it.
+    let mut files = rig.reader(&[
+        ("d/real/inner", Node::File(b"x")),
+        ("d/link", Node::Link("d/real")),
+        ("d/a/link", Node::Link("d/real")),
+    ]);
+    let listing = must(files.list(&at(rig, "d")), "list");
+    let rels: Vec<&str> = listing.iter().map(|e| e.rel.as_str()).collect();
+    same(
+        rels,
+        vec!["a", "a/link", "link", "real", "real/inner"],
+        "the listing: the real directory through its own name, and nothing below a symlink",
+    );
+}
+
+fn stat_tells_a_file_a_directory_a_symlink_and_nothing_apart<R: OutputFilesRig>(rig: &R) {
+    let mut files = rig.reader(&[
+        ("s/file", Node::File(b"x")),
+        ("s/dir", Node::Directory),
+        ("s/to_file", Node::Link("s/file")),
+        ("s/to_dir", Node::Link("s/dir")),
+        ("s/dangling", Node::Link("s/nowhere")),
+    ]);
+    let mut stat = |rel: &str| must(files.stat(&at(rig, rel)), "stat");
+    same(stat("s/file"), Some(FileKind::File), "a file");
+    same(stat("s/dir"), Some(FileKind::Directory), "a directory");
+    same(
+        stat("s/to_file"),
+        Some(FileKind::Symlink),
+        "a link to a file",
+    );
+    same(
+        stat("s/to_dir"),
+        Some(FileKind::Symlink),
+        "a link to a directory",
+    );
+    same(
+        stat("s/dangling"),
+        Some(FileKind::Symlink),
+        "a dangling link",
+    );
+    same(stat("s/nothing"), None, "nothing");
+    // Below a regular file nothing is, and the operating system's answer is no fault.
+    same(stat("s/file/child"), None, "a path below a regular file");
+    // A trailing slash makes an operating system follow a symlink; the reader must not.
+    for rel in ["s/to_file/", "s/to_dir/"] {
+        let answer = files.stat(&at(rig, rel));
+        same(
+            matches!(answer, Ok(Some(FileKind::File | FileKind::Directory))),
+            false,
+            &format!("stat of the symlink {rel:?} said what it points at: {answer:?}"),
+        );
+    }
+}
+
+fn a_missing_path_is_none_from_stat_and_permanent_from_list_and_read<R: OutputFilesRig>(rig: &R) {
+    let mut files = rig.reader(&[("m/present", Node::File(b"x"))]);
+    let gone = at(rig, "m/nothing");
+    same(
+        must(files.stat(&gone), "stat"),
+        None,
+        "stat of a missing path",
+    );
+    let listed = must_err(files.list(&gone), "list of a missing path");
+    same(
+        permanent_naming(&listed, &gone),
+        true,
+        "list names the path",
+    );
+    let read = must_err(files.read(&gone), "read of a missing path");
+    same(permanent_naming(&read, &gone), true, "read names the path");
+}
+
+fn listing_a_file_and_reading_a_directory_or_a_symlink_are_refused<R: OutputFilesRig>(rig: &R) {
+    let mut files = rig.reader(&[
+        ("r/file", Node::File(b"x")),
+        ("r/dir/inside", Node::File(b"y")),
+        ("r/link", Node::Link("r/file")),
+        ("r/link_to_dir", Node::Link("r/dir")),
+        ("r/dangling", Node::Link("r/nowhere")),
+    ]);
+    let (file, dir, link) = (at(rig, "r/file"), at(rig, "r/dir"), at(rig, "r/link"));
+    let (link_to_dir, slashed) = (at(rig, "r/link_to_dir"), at(rig, "r/link/"));
+    let dangling = at(rig, "r/dangling");
+    let cases = [
+        (
+            "read of a symlink to a directory",
+            &link_to_dir,
+            must_err(files.read(&link_to_dir), "read"),
+        ),
+        (
+            "read of a dangling symlink",
+            &dangling,
+            must_err(files.read(&dangling), "read"),
+        ),
+        (
+            "list of a dangling symlink",
+            &dangling,
+            must_err(files.list(&dangling), "list"),
+        ),
+        ("list of a file", &file, must_err(files.list(&file), "list")),
+        (
+            "list of a symlink to a directory",
+            &link_to_dir,
+            must_err(files.list(&link_to_dir), "list"),
+        ),
+        (
+            "read of a symlink named with a trailing slash",
+            &slashed,
+            must_err(files.read(&slashed), "read"),
+        ),
+        (
+            "read of a directory",
+            &dir,
+            must_err(files.read(&dir), "read"),
+        ),
+        (
+            "read of a symlink",
+            &link,
+            must_err(files.read(&link), "read"),
+        ),
+    ];
+    for (what, path, error) in &cases {
+        same(
+            permanent_naming(error, path),
+            true,
+            &format!("the {what} is Permanent and names the path"),
+        );
+    }
+}
+
+fn a_single_file_output_is_read_without_a_rel<R: OutputFilesRig>(rig: &R) {
+    let mut files = rig.reader(&[("out.bin", Node::File(b"the output"))]);
+    let bytes = must(
+        files.read(&at(rig, "out.bin")),
+        "read of a file never listed",
+    );
+    same(bytes, b"the output".to_vec(), "the bytes of the file");
+}
+
+fn a_report_file_is_read_directly<R: OutputFilesRig>(rig: &R) {
+    let mut files = rig.reader(&[(
+        "scratch/inv-1/events.json-lines",
+        Node::File(b"{\"event\":1}\n"),
+    )]);
+    let path = at(rig, "scratch/inv-1/events.json-lines");
+    let bytes = must(files.read(&path), "read of a report file never listed");
+    same(
+        bytes,
+        b"{\"event\":1}\n".to_vec(),
+        "the bytes of the report",
+    );
+}
+
+fn reading_a_directory_is_refused_even_when_it_is_the_located_output<R: OutputFilesRig>(rig: &R) {
+    let mut files = rig.reader(&[("out/pkg/layout", Node::File(b"x"))]);
+    let located = at(rig, "out/pkg");
+    same(
+        must(files.stat(&located), "stat"),
+        Some(FileKind::Directory),
+        "the located output is a directory",
+    );
+    let error = must_err(files.read(&located), "read of the directory");
+    same(
+        permanent_naming(&error, &located),
+        true,
+        "Permanent naming the path",
+    );
+}
+
+fn a_path_that_is_relative_or_climbs_is_refused<R: OutputFilesRig>(rig: &R) {
+    let mut files = rig.reader(&[("c/real", Node::File(b"secret"))]);
+    let paths = [
+        "relative/path".to_owned(),
+        String::new(),
+        "c/real".to_owned(),
+        at(rig, "c/sub/../real"),
+        at(rig, "../c/real"),
+        at(rig, "c/.."),
+    ];
+    for path in &paths {
+        let errors = [
+            must_err(files.stat(path), "stat"),
+            must_err(files.list(path), "list"),
+            must_err(files.read(path), "read"),
+        ];
+        same(
+            errors.iter().all(is_refused),
+            true,
+            &format!("stat, list and read of {path:?} are Refused"),
+        );
+    }
+}
+
+fn an_entry_of_a_listed_directory_is_read_through_its_joined_path<R: OutputFilesRig>(rig: &R) {
+    // Bytes that are not text, a file past any buffer a reader might size at 4 KiB, 64 KiB,
+    // 128 KiB or a megabyte, an empty file (below the top too), a hidden one, ones three and
+    // seven directories down, names that hold two dots without being a `..` part, and names
+    // with a space, a newline or a character that is not ASCII, in a file or a directory.
+    let binary: &[u8] = &[0xff, 0xfe, 0x00, 0x80, 0xc3, 0x28];
+    let big: Vec<u8> = (0..=255u8).cycle().take(2_100_000).collect();
+    let mut files = rig.reader(&[
+        ("e/sp ace", Node::File(b"S")),
+        ("e/\u{e9}.txt", Node::File(b"E")),
+        ("e/new\nline", Node::File(b"N")),
+        ("e/n/empty", Node::File(b"")),
+        ("e/dir with space/x", Node::File(b"W")),
+        ("e/g/h/i/j/k/l/m", Node::File(b"M")),
+        ("e/a", Node::File(b"A")),
+        ("e/n/b", Node::File(b"B")),
+        ("e/n/c", Node::File(b"C")),
+        ("e/binary", Node::File(binary)),
+        ("e/big", Node::File(&big)),
+        ("e/empty", Node::File(b"")),
+        ("e/.hidden", Node::File(b"H")),
+        ("e/n/.hidden", Node::File(b"I")),
+        ("e/p/q/r/deep", Node::File(b"D")),
+        ("e/a..b", Node::File(b"J")),
+        ("e/..dots", Node::File(b"K")),
+        ("e/n/dots..", Node::File(b"L")),
+    ]);
+    let dir = at(rig, "e");
+    let listing = must(files.list(&dir), "list");
+    let wanted: [(&str, &[u8]); 18] = [
+        ("sp ace", b"S"),
+        ("\u{e9}.txt", b"E"),
+        ("new\nline", b"N"),
+        ("n/empty", b""),
+        ("dir with space/x", b"W"),
+        ("g/h/i/j/k/l/m", b"M"),
+        (".hidden", b"H"),
+        ("..dots", b"K"),
+        ("a", b"A"),
+        ("a..b", b"J"),
+        ("n/dots..", b"L"),
+        ("big", &big),
+        ("binary", binary),
+        ("empty", b""),
+        ("n/.hidden", b"I"),
+        ("n/b", b"B"),
+        ("n/c", b"C"),
+        ("p/q/r/deep", b"D"),
+    ];
+    let mut read = Vec::new();
+    for (rel, _) in &wanted {
+        let entry = must_some(listing.iter().find(|e| e.rel == *rel), rel);
+        let path = must(entry_path(&dir, &entry.rel), "entry_path");
+        read.push((*rel, must(files.read(&path), "read of an entry")));
+    }
+    same(
+        read,
+        wanted
+            .iter()
+            .map(|(rel, bytes)| (*rel, bytes.to_vec()))
+            .collect(),
+        "every file of the tree read through its joined entry path",
+    );
+}
+
+fn a_read_returns_the_file_as_it_is_at_the_call<R: OutputFilesRig>(rig: &R) {
+    let mut files = rig.reader(&[("v/f", Node::File(b"first"))]);
+    let path = at(rig, "v/f");
+    must(files.list(&at(rig, "v")), "list");
+    same(
+        must(files.read(&path), "first read"),
+        b"first".to_vec(),
+        "the first read",
+    );
+    rig.change(&mut files, "v/f", b"second");
+    same(
+        must(files.read(&path), "second read"),
+        b"second".to_vec(),
+        "the read after a change",
+    );
+}
+
+fn no_call_changes_the_tree<R: OutputFilesRig>(rig: &R) {
+    let mut files = rig.reader(&[
+        ("n/file", Node::File(b"data")),
+        ("n/dir", Node::Directory),
+        ("n/link", Node::Link("n/file")),
+    ]);
+    let before = rig.snapshot(&files);
+    let dir = at(rig, "n");
+    let _ = files.list(&dir);
+    for rel in ["n/file", "n/dir", "n/link", "n/nothing"] {
+        let path = at(rig, rel);
+        let _ = files.stat(&path);
+        let _ = files.list(&path);
+        let _ = files.read(&path);
+    }
+    let _ = files.read(&at(rig, "../escape"));
+    same(
+        rig.snapshot(&files),
+        before,
+        "the tree after every method of the reader",
+    );
+}
