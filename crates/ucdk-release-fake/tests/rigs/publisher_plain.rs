@@ -49,4 +49,8 @@ impl PublisherRig for PlainRig {
     fn reads(&self, p: &Flawed) -> Vec<ReadStep> {
         self.0.reads(p)
     }
+
+    fn sent(&self, p: &Flawed) -> usize {
+        self.0.sent(p)
+    }
 }

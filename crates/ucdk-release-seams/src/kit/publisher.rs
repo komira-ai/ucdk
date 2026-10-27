@@ -278,7 +278,7 @@ pub fn publisher_scenarios<R: PublisherRig>() -> Vec<Scenario<R>> {
             "a_stage_or_commit_grant_reads_no_staged_state_but_through_observe",
             more::a_stage_or_commit_grant_reads_no_staged_state_but_through_observe::<R>,
         )
-        .gated(needs_staging::<R>),
+        .gated(needs_a_staging_channel::<R>),
         Scenario::new(
             "a_channel_that_does_not_stage_creates_a_coordinate_once",
             |rig| {

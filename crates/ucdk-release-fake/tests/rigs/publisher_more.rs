@@ -329,6 +329,10 @@ impl PublisherRig for MoreRig {
         self.base.reads(&p.base)
     }
 
+    fn sent(&self, p: &Wrapped) -> usize {
+        self.base.sent(&p.base)
+    }
+
     fn coordinate(&self, label: &str) -> Coordinate {
         self.base.coordinate(label)
     }

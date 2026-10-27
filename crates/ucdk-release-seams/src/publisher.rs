@@ -71,6 +71,23 @@ pub struct Listed {
     pub held: Held,
 }
 
+/// A channel of a registry, written to with a stage grant and a commit grant and read with a
+/// grant of its repository.
+///
+/// A call whose grant is for another repository, has expired, is of a phase the call does not take
+/// or does not name every coordinate of the call is refused with `GrantRefused` before anything is
+/// sent, so the secret of a grant is never presented where it was not issued for. A read of a
+/// public channel needs no grant, but a grant that is presented is checked, and a bad one is
+/// refused all the same. Every read of a private channel needs a good grant, and a stranger is
+/// refused every read of it, whether it asks about something the channel holds or not, so that no
+/// answer tells it what exists.
+///
+/// A stage grant stages and aborts, a commit grant commits and yanks, and a read grant reads and
+/// writes nothing. Stage grants and commit grants are for `observe`, which shows them the staged
+/// state they made: their `fetch`, `newest` and `list` find nothing of staged state, and a private
+/// channel may refuse those three reads to them with `Denied`. A read grant is never refused a
+/// read of its repository. `newest` and `list` name no coordinate, so any good grant of the
+/// repository serves them, whatever coordinates it names.
 pub trait Publisher: Send {
     fn types(&self) -> &[ArtifactType];
 

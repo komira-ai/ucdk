@@ -45,6 +45,7 @@ mod publisher_access;
 mod publisher_grants;
 mod publisher_more;
 mod publisher_private;
+mod publisher_reads;
 mod publisher_rig;
 mod publisher_shapes;
 mod publisher_visible;

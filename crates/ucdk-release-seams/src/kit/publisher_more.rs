@@ -10,8 +10,9 @@ use ucdk_release_proto::v1::{Coordinate, Stamped};
 use super::publisher_rig::{
     Arrangement, ChannelShape, Placement, PublisherRig, Set, built, commit, fetched,
     held_by_another, holder_of, is_yanked, looked, observed, plain_shapes, present_held, publish,
-    sets_beside, siblings_beside, stage, staged_held, staging_publisher, stranger,
+    sets_beside, siblings_beside, stage, staged_held, staging_publisher, staging_shapes, stranger,
 };
+use super::publisher_visible::found_nothing;
 use super::{must, must_err, same};
 use crate::{CommitAnswer, CommitUnit, ListScope, Publisher, SeamError, StageAnswer, YankUnit};
 
@@ -318,11 +319,14 @@ pub(super) fn a_set_that_names_a_coordinate_twice_is_refused<R: PublisherRig>(
 /// observe, and an observe shows it only to a stage grant and a commit grant: a stage grant, a
 /// commit grant and a read grant fetch nothing of it and find nothing of it with `newest` or
 /// `list`, and a read grant observes it `Absent`, told the declared set or not. Held on every
-/// channel that stages: a public one, a private one and one addressed by group.
+/// channel that stages: a public one, a private one and one addressed by group. A stage grant and
+/// a commit grant are for `observe` only, so a private channel may refuse their `fetch`, `newest`
+/// and `list` with `Denied` as well as answer nothing; a read grant is for reading, and is never
+/// refused.
 pub(super) fn a_stage_or_commit_grant_reads_no_staged_state_but_through_observe<R: PublisherRig>(
     rig: &R,
 ) {
-    for shape in rig.shapes().into_iter().filter(|s| s.stages) {
+    for shape in staging_shapes(rig) {
         let mut p = built(rig, &shape);
         let set = Set::of(rig, &["a"]);
         stage(rig, &mut p, &set);
@@ -333,25 +337,25 @@ pub(super) fn a_stage_or_commit_grant_reads_no_staged_state_but_through_observe<
         };
         for phase in [GrantPhase::Stage, GrantPhase::Commit, GrantPhase::Read] {
             let grant = rig.grant(&p, phase, &set.coords);
-            same(
-                must(p.fetch(&grant, a), "a fetch of a staged coordinate"),
-                None,
+            let may_refuse = shape.private & (phase != GrantPhase::Read);
+            found_nothing(
+                p.fetch(&grant, a),
+                Option::is_none,
+                may_refuse,
                 &format!(
                     "the bytes of a staged coordinate fetched with a {phase:?} grant ({shape:?})"
                 ),
             );
-            same(
-                must(
-                    p.newest(&grant, &a.channel, &a.name),
-                    "a newest of a staged coordinate",
-                )
-                .is_empty(),
-                true,
+            found_nothing(
+                p.newest(&grant, &a.channel, &a.name),
+                Vec::is_empty,
+                may_refuse,
                 &format!("a staged coordinate found with newest and a {phase:?} grant ({shape:?})"),
             );
-            same(
-                must(p.list(&grant, &scope), "a list of a staged coordinate").is_empty(),
-                true,
+            found_nothing(
+                p.list(&grant, &scope),
+                Vec::is_empty,
+                may_refuse,
                 &format!("a staged coordinate listed with a {phase:?} grant ({shape:?})"),
             );
         }

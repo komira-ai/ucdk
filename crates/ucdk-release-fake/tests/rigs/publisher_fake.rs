@@ -8,11 +8,11 @@ use ucdk_core::ManualClock;
 use ucdk_release::codec::GrantPhase;
 use ucdk_release_fake::{FakeRegistry, Read};
 use ucdk_release_proto::v1::{ArtifactType, Coordinate, Repository};
+use ucdk_release_seams::Grant;
 use ucdk_release_seams::kit::{
     Arrangement, ChannelShape, LOCATION, Payload, Placement, PublisherRig, ReadStep, Sibling,
     coordinate, every_field_in_a_set_of_its_own, federated_repository,
 };
-use ucdk_release_seams::{Grant, Publisher};
 
 use super::publisher::Flawed;
 use super::publisher_flaw::{Behind, Flaw, Hook};
@@ -41,6 +41,11 @@ pub struct FakePublisherRig {
     burns: bool,
     /// The channel holds every coordinate: nothing is unrepresentable.
     holds_all: bool,
+    /// A private channel refuses `fetch`, `newest` and `list` to a stage grant and a commit grant.
+    writer_reads_refused: bool,
+    /// The registry takes each sibling of a coordinate only in a call that names the coordinate,
+    /// and the rig says every sibling is published in one set with its base.
+    pairing: bool,
 }
 
 impl FakePublisherRig {
@@ -74,6 +79,26 @@ impl FakePublisherRig {
             narrow: false,
             burns: true,
             holds_all: false,
+            writer_reads_refused: false,
+            pairing: false,
+        }
+    }
+
+    /// A registry whose private channels refuse `fetch`, `newest` and `list` to a stage grant and
+    /// a commit grant, which are for `observe` only.
+    pub fn refusing_writer_reads() -> Self {
+        Self {
+            writer_reads_refused: true,
+            ..Self::conforming()
+        }
+    }
+
+    /// A registry that takes each sibling of a coordinate only together with it, and a rig that
+    /// says so: every sibling is published in one set with its base.
+    pub fn pairing() -> Self {
+        Self {
+            pairing: true,
+            ..Self::conforming()
         }
     }
 
@@ -270,14 +295,27 @@ impl PublisherRig for FakePublisherRig {
         if self.unconditional {
             registry = registry.tag_replacing();
         }
-        Flawed::new(
+        let mut channel = Flawed::new(
             registry,
             self.clock.clone(),
             self.banned(),
             flaw,
             *shape,
             (self.seals, self.version_yank),
-        )
+        );
+        if self.writer_reads_refused {
+            channel = channel.refusing_writer_reads();
+        }
+        if self.pairing {
+            let base = self.coordinate("a");
+            let paired = self
+                .siblings(&base)
+                .into_iter()
+                .map(|sibling| (sibling.coordinate, base.clone()))
+                .collect();
+            channel = channel.taking_only_with_the_base(paired);
+        }
+        channel
     }
 
     fn arrange(&self, p: &mut Flawed, what: &Arrangement) {
@@ -351,6 +389,10 @@ impl PublisherRig for FakePublisherRig {
 
     fn advance(&self, ms: u64) {
         self.clock.advance(Duration::from_millis(ms));
+    }
+
+    fn sent(&self, p: &Flawed) -> usize {
+        p.sent()
     }
 
     fn reads(&self, p: &Flawed) -> Vec<ReadStep> {
@@ -440,6 +482,11 @@ impl PublisherRig for FakePublisherRig {
             ];
         }
         let mut all = every_field_in_a_set_of_its_own(base);
+        if self.pairing {
+            for sibling in &mut all {
+                sibling.placement = Placement::SameSet;
+            }
+        }
         match self.hook {
             Some(Hook::SiblingDiffersInTwoFields) => {
                 all[0].coordinate = Coordinate {

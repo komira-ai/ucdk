@@ -212,13 +212,27 @@ fn held_by_the_lax_stub(stub: More) -> &'static [&'static str] {
         More::Lax(Lax::OthersCommittedBlind(_, Holder::Read, false)) => &[LIST, OTHERS_OBSERVE],
         More::Lax(Lax::OthersCommittedBlind(..)) => &[OTHERS_OBSERVE],
         // What a private channel lets a stage or a commit grant read, and a stranger, is held with
-        // the reads of a read grant.
+        // the reads of a read grant; what a channel that is not private lets a stage or a commit
+        // grant read is held with the reads that need no grant.
+        More::Lax(Lax::WriterGrantOnRead(Kind::Grouped | Kind::NonStaging, ..)) => {
+            &[PUBLIC_READ, READ_GRANT]
+        }
         More::Lax(_) => &[READ_GRANT],
-        More::BadGrantTakenOnShape(_, defect, verb) => match (verb, defect) {
+        More::BadGrantTakenOnShape(kind, defect, verb) => match (verb, defect) {
             // A grant that names the base and not the coordinate read is also held by the
-            // scenario about the fields of a coordinate, which reads the sibling of a base.
-            (Verb::Observe | Verb::Fetch, Defect::Uncovered) => &[PHASE, READ_GRANT],
-            (Verb::Observe | Verb::Fetch | Verb::Newest | Verb::List, _) => &[READ_GRANT],
+            // scenario about the fields of a coordinate, which reads the sibling of a base of a
+            // private channel. A bad grant on a read is refused by a public channel, which a read
+            // needs no grant of, and by a private one.
+            (Verb::Observe | Verb::Fetch, Defect::Uncovered) => match kind {
+                Kind::Public => &[PUBLIC_READ],
+                Kind::Private => &[PHASE, READ_GRANT],
+                Kind::Grouped | Kind::NonStaging => &[PUBLIC_READ, PHASE, READ_GRANT],
+            },
+            (Verb::Observe | Verb::Fetch | Verb::Newest | Verb::List, _) => match kind {
+                Kind::Public => &[PUBLIC_READ],
+                Kind::Private => &[READ_GRANT],
+                Kind::Grouped | Kind::NonStaging => &[PUBLIC_READ, READ_GRANT],
+            },
             (_, Defect::Foreign) => &[FOREIGN],
             (_, Defect::Expired) => &[EXPIRED],
             (_, Defect::Uncovered | Defect::OtherWritePhase) => &[PHASE],
@@ -234,7 +248,12 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
     let mut table: Vec<(Stub, &'static [&'static str])> = vec![
         (Stub::Flaw(F::AbsentIsAnError), &[OBSERVE_ABSENT]),
         (Stub::Flaw(F::StagedDigestIsWrong), &[STAGE_OBSERVE, ECHO]),
-        (Stub::Flaw(F::StrangerSeesStaged), &[STRANGER_STAGED]),
+        // A stranger told the declared set is asked too, so the scenario about reads that need no
+        // grant also fails a stranger who sees staged state.
+        (
+            Stub::Flaw(F::StrangerSeesStaged),
+            &[STRANGER_STAGED, PUBLIC_READ],
+        ),
         (Stub::Flaw(F::StageGrantIsBlindToStaged), &[STAGE_GRANT]),
         (Stub::Flaw(F::CommitGrantIsBlindToStaged), &[COMMIT_GRANT]),
         (
@@ -680,7 +699,7 @@ fn each_scenario_fails_on_its_nonconforming_stub() {
 #[test]
 fn each_further_publisher_stub_fails_the_scenarios_that_hold_it() {
     let table = every_stub();
-    assert_eq!(table.len(), 409, "the number of stubs of the table");
+    assert_eq!(table.len(), 419, "the number of stubs of the table");
     further_stubs_fail_exactly(
         "publisher",
         &names(&publisher_scenarios::<FakePublisherRig>()),
@@ -864,7 +883,7 @@ fn a_rig_that_lacks_what_a_scenario_needs_skips_it_and_passes_the_rest() {
 /// channel of any shape, those about what a channel that stages or commits can do (a lifecycle
 /// scenario is gated by the capability, not by the channel being public or plain), those about a
 /// private or a grouped one, and the one about what it declares.
-const RUN_BY_A_PRIVATE_GROUPED_CHANNEL: [&str; 22] = [
+const RUN_BY_A_PRIVATE_GROUPED_CHANNEL: [&str; 23] = [
     COMMIT_READABLE,
     ABORT,
     SET_COMMIT,
@@ -885,6 +904,7 @@ const RUN_BY_A_PRIVATE_GROUPED_CHANNEL: [&str; 22] = [
     READ_GRANT,
     RACE,
     DUP_OTHER,
+    WRITER_READS,
     ECHO,
     DECLARES,
 ];

@@ -8,7 +8,10 @@ use ucdk_release::codec::{GrantFault, GrantPhase};
 use ucdk_release::publish::{Held, Presence};
 use ucdk_release_proto::v1::{Coordinate, Stamped};
 
-use super::publisher_grants::{self as grants, Spoiled, denied, is_denied, seen};
+use super::publisher_grants::{
+    self as grants, Spoiled, denied, denied_unsent, refused_unsent, seen,
+};
+use super::publisher_reads as reads;
 use super::publisher_rig::{
     A_DAY_MS, Arrangement, ChannelShape, Placement, PublisherRig, Set, built, commit, fetched,
     first_phase, held_by_another, looked, observed, observed_alone, phases_of, present_held,
@@ -19,7 +22,10 @@ use super::{must, must_err, same};
 use crate::{CommitAnswer, Grant, ListScope, Publisher, SeamError, StageAnswer};
 
 /// A read of a public channel needs no grant, and staged state is nothing a stranger can read,
-/// however the read is asked: by `observe`, `fetch`, `newest` or `list`.
+/// however the read is asked: by `observe`, told the set it was staged in or not, `fetch`,
+/// `newest` or `list`, on every public shape that stages, one addressed by group included. A read
+/// needing no grant takes no bad grant either: one that is for another repository, has expired or
+/// names no coordinate asked for is refused, and nothing is sent.
 pub(super) fn public_read_needs_no_grant<R: PublisherRig>(rig: &R, shape: &ChannelShape) {
     let mut p = built(rig, shape);
     let set = Set::of(rig, &["a"]);
@@ -29,6 +35,18 @@ pub(super) fn public_read_needs_no_grant<R: PublisherRig>(rig: &R, shape: &Chann
         let only_staged = Set::of(rig, &["b"]);
         stage(rig, &mut p, &only_staged);
         let b = &only_staged.coords[0];
+        let blobs = only_staged.blobs();
+        let items = only_staged.items(&blobs);
+        same(
+            must(
+                p.observe(&Grant::none(), b, &items),
+                "an observe of a staged coordinate by a stranger told the declared set",
+            ),
+            Presence::Absent,
+            &format!(
+                "a staged coordinate observed by a stranger told the declared set ({shape:?})"
+            ),
+        );
         same(
             must(
                 p.fetch(&Grant::none(), b),
@@ -72,6 +90,7 @@ pub(super) fn public_read_needs_no_grant<R: PublisherRig>(rig: &R, shape: &Chann
         true,
         "what a stranger lists",
     );
+    reads::a_bad_grant_reads_nothing(rig, shape);
 }
 
 /// A channel in which each write has something to change: a committed coordinate to yank, two
@@ -115,10 +134,12 @@ fn every_write_refuses_a_bad_grant<R: PublisherRig>(
 ) {
     let blobs = writes.fresh.blobs();
     let items = writes.fresh.items(&blobs);
-    same(
-        must_err(p.stage(stage_grant, &items), "a stage with a bad grant"),
-        fault.clone(),
-        &format!("the answer to a stage with a grant {what}"),
+    refused_unsent(
+        rig,
+        p,
+        fault,
+        |p| p.stage(stage_grant, &items),
+        &format!("a stage with a grant {what}"),
     );
     same(
         observed(rig, p, GrantPhase::Stage, &writes.fresh, 0),
@@ -127,10 +148,12 @@ fn every_write_refuses_a_bad_grant<R: PublisherRig>(
     );
     let blobs = writes.to_commit.blobs();
     let items = writes.to_commit.items(&blobs);
-    same(
-        must_err(p.commit(commit_grant, &items), "a commit with a bad grant"),
-        fault.clone(),
-        &format!("the answer to a commit with a grant {what}"),
+    refused_unsent(
+        rig,
+        p,
+        fault,
+        |p| p.commit(commit_grant, &items),
+        &format!("a commit with a grant {what}"),
     );
     staged_held(observed(rig, p, GrantPhase::Stage, &writes.to_commit, 0));
     same(
@@ -138,22 +161,20 @@ fn every_write_refuses_a_bad_grant<R: PublisherRig>(
         None,
         &format!("the bytes after a commit with a grant {what}"),
     );
-    same(
-        must_err(
-            p.abort(stage_grant, &writes.to_abort.coords),
-            "an abort with a bad grant",
-        ),
-        fault.clone(),
-        &format!("the answer to an abort with a grant {what}"),
+    refused_unsent(
+        rig,
+        p,
+        fault,
+        |p| p.abort(stage_grant, &writes.to_abort.coords),
+        &format!("an abort with a grant {what}"),
     );
     staged_held(observed(rig, p, GrantPhase::Stage, &writes.to_abort, 0));
-    same(
-        must_err(
-            p.yank(commit_grant, &writes.held.coords[0], "a reason"),
-            "a yank with a bad grant",
-        ),
-        fault.clone(),
-        &format!("the answer to a yank with a grant {what}"),
+    refused_unsent(
+        rig,
+        p,
+        fault,
+        |p| p.yank(commit_grant, &writes.held.coords[0], "a reason"),
+        &format!("a yank with a grant {what}"),
     );
     present_held(stranger(p, &writes.held.coords[0]));
 }
@@ -205,14 +226,11 @@ fn a_commit_grant_stages_nothing_and_a_stage_grant_commits_nothing<R: PublisherR
     let blobs = set.blobs();
     let items = set.items(&blobs);
     let commit_grant = rig.grant(&p, GrantPhase::Commit, &set.coords);
-    let refusal = must_err(
-        p.stage(&commit_grant, &items),
+    denied_unsent(
+        rig,
+        &mut p,
+        |p| p.stage(&commit_grant, &items),
         "a stage with a commit grant",
-    );
-    same(
-        denied(&refusal),
-        true,
-        "a stage with a commit grant is Denied",
     );
     same(
         observed(rig, &mut p, GrantPhase::Stage, &set, 0),
@@ -221,14 +239,11 @@ fn a_commit_grant_stages_nothing_and_a_stage_grant_commits_nothing<R: PublisherR
     );
     stage(rig, &mut p, &set);
     let stage_grant = rig.grant(&p, GrantPhase::Stage, &set.coords);
-    let refusal = must_err(
-        p.commit(&stage_grant, &items),
+    denied_unsent(
+        rig,
+        &mut p,
+        |p| p.commit(&stage_grant, &items),
         "a commit with a stage grant",
-    );
-    same(
-        denied(&refusal),
-        true,
-        "a commit with a stage grant is Denied",
     );
     same(
         fetched(rig, &mut p, &set.coords[0]),
@@ -314,8 +329,10 @@ fn a_grant_covers_the_coordinates_it_names_and_no_others<R: PublisherRig>(
         // Every subset but the empty one and the whole, by the bits of the mask.
         for mask in 1..7 {
             let some = rig.grant(&p, GrantPhase::Stage, &picked(&trio, mask));
-            is_denied(
-                p.stage(&some, &items),
+            denied_unsent(
+                rig,
+                &mut p,
+                |p| p.stage(&some, &items),
                 &format!(
                     "a stage grant that names only the coordinates {mask:03b} of three ({shape:?})"
                 ),
@@ -332,8 +349,10 @@ fn a_grant_covers_the_coordinates_it_names_and_no_others<R: PublisherRig>(
     stage(rig, &mut p, &trio);
     for mask in 1..7 {
         let some = rig.grant(&p, GrantPhase::Commit, &picked(&trio, mask));
-        is_denied(
-            p.commit(&some, &items),
+        denied_unsent(
+            rig,
+            &mut p,
+            |p| p.commit(&some, &items),
             &format!(
                 "a commit grant that names only the coordinates {mask:03b} of three ({shape:?})"
             ),
@@ -349,8 +368,10 @@ fn a_grant_covers_the_coordinates_it_names_and_no_others<R: PublisherRig>(
     if p.stages() {
         for mask in 1..7 {
             let some = rig.grant(&p, GrantPhase::Stage, &picked(&trio, mask));
-            is_denied(
-                p.abort(&some, &trio.coords),
+            denied_unsent(
+                rig,
+                &mut p,
+                |p| p.abort(&some, &trio.coords),
                 &format!(
                     "a stage grant that names only the coordinates {mask:03b} of three cannot abort them ({shape:?})"
                 ),
@@ -373,13 +394,17 @@ fn a_yank_needs_the_commit_grant_that_names_it<R: PublisherRig>(rig: &R) {
     let (set, other) = (Set::of(rig, &["a"]), Set::of(rig, &["b"]));
     publish(rig, &mut p, &set);
     let stage_grant = rig.grant(&p, GrantPhase::Stage, &set.coords);
-    is_denied(
-        p.yank(&stage_grant, &set.coords[0], "a reason"),
+    denied_unsent(
+        rig,
+        &mut p,
+        |p| p.yank(&stage_grant, &set.coords[0], "a reason"),
         "a yank with a stage grant",
     );
     let elsewhere = rig.grant(&p, GrantPhase::Commit, &other.coords);
-    is_denied(
-        p.yank(&elsewhere, &set.coords[0], "a reason"),
+    denied_unsent(
+        rig,
+        &mut p,
+        |p| p.yank(&elsewhere, &set.coords[0], "a reason"),
         "a yank with a commit grant that does not name the coordinate",
     );
     present_held(stranger(&mut p, &set.coords[0]));
@@ -424,7 +449,9 @@ pub(super) fn newest_lists_every_held_coordinate_of_the_name<R: PublisherRig>(
     let mut other = vec![rig.coordinate("b"), rig.coordinate("ab")];
     for sibling in siblings_beside(rig, &a1) {
         match (sibling.field, sibling.placement) {
-            ("channel", _) => alone.push(sibling.coordinate),
+            // Held in another channel, so that `newest` of this one does not find it.
+            ("channel", Placement::SameSet) => together.push(sibling.coordinate),
+            ("channel", Placement::OwnSet) => alone.push(sibling.coordinate),
             ("version" | "platform", Placement::SameSet) => {
                 together.push(sibling.coordinate.clone());
                 want.push(sibling.coordinate);

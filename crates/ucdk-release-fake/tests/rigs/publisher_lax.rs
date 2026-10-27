@@ -261,11 +261,12 @@ pub fn field_blind() -> Vec<More> {
     all
 }
 
-/// Every stub that is lax about a bad grant on a shape of channel other than the public one that
-/// stages.
+/// Every stub that is lax about a bad grant on a shape of channel: the writes of the public channel
+/// that stages are held by the stubs of every channel, and its reads, which need no grant, are
+/// held here.
 pub fn on_shapes() -> Vec<More> {
     let mut all = Vec::new();
-    for kind in [Kind::Private, Kind::Grouped, Kind::NonStaging] {
+    for kind in [Kind::Public, Kind::Private, Kind::Grouped, Kind::NonStaging] {
         for defect in [
             Defect::Foreign,
             Defect::Expired,
@@ -279,8 +280,11 @@ pub fn on_shapes() -> Vec<More> {
                 // that take a read grant for another.
                 let names_nothing = matches!(verb, Verb::Newest | Verb::List);
                 let kept = match kind {
-                    // The public channel that stages is held by the stubs of every channel.
-                    Kind::Public => false,
+                    Kind::Public => {
+                        !verb.writes()
+                            && defect != Defect::OtherWritePhase
+                            && !(names_nothing && defect == Defect::Uncovered)
+                    }
                     Kind::Private => verb.writes(),
                     Kind::Grouped => {
                         verb.writes()

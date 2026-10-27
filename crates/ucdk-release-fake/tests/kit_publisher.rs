@@ -22,6 +22,8 @@ kit_tests!(
         FakePublisherRig::yanking_a_version(),
         FakePublisherRig::unconditional(),
         FakePublisherRig::restricted(),
+        FakePublisherRig::pairing(),
+        FakePublisherRig::refusing_writer_reads(),
     ],
     publisher_scenarios;
     observe_absent_is_not_an_error,

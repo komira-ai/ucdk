@@ -14,6 +14,7 @@ use ucdk_release_seams::{
 };
 
 use super::publisher_access::{Needs, covering_every, covers_last};
+use super::publisher_client::Client;
 use super::publisher_grant::{issue, scope_of};
 use super::secret::texts;
 
@@ -22,7 +23,7 @@ pub use super::publisher_flaw::{Call, Flaw};
 
 /// A stub of the fake registry: the conforming fake with one promise broken, or with none.
 pub struct Flawed {
-    pub(super) inner: FakeRegistry,
+    pub(super) inner: Client,
     pub(super) clock: ManualClock,
     /// Every coordinate that was in a `stage` or `commit` call, with its bytes.
     pub(super) known: Vec<(Coordinate, Vec<u8>)>,
@@ -31,6 +32,11 @@ pub struct Flawed {
     /// Every coordinate that was in a call at a place after the first.
     later: Vec<Coordinate>,
     banned: Vec<Coordinate>,
+    /// Each coordinate the channel takes only in a call that names its base, with the base.
+    paired: Vec<(Coordinate, Coordinate)>,
+    /// A private channel refuses `fetch`, `newest` and `list` to a stage grant and a commit grant,
+    /// which are for `observe` only.
+    refuses_writer_reads: bool,
     pub(super) flaw: Option<Flaw>,
     pub(super) shape: ChannelShape,
     seals: bool,
@@ -62,13 +68,19 @@ impl Flawed {
         shape: ChannelShape,
         (seals, version_yank): (bool, bool),
     ) -> Self {
+        let sends = match flaw {
+            Some(Flaw::SendsRefused(defect)) => Some(defect),
+            _ => None,
+        };
         Self {
-            inner: registry,
+            inner: Client::new(registry, clock.clone(), sends),
             clock,
             known: Vec::new(),
             declared: Vec::new(),
             later: Vec::new(),
             banned,
+            paired: Vec::new(),
+            refuses_writer_reads: false,
             flaw,
             shape,
             seals,
@@ -83,6 +95,44 @@ impl Flawed {
             list_lags: false,
             group_fails: false,
         }
+    }
+
+    /// The same channel taking each `(sibling, base)` coordinate only in a call that names its
+    /// base, and refusing the stage and the commit of a call that names the sibling alone.
+    #[must_use]
+    pub(super) fn taking_only_with_the_base(self, paired: Vec<(Coordinate, Coordinate)>) -> Self {
+        Self { paired, ..self }
+    }
+
+    /// The same channel refusing `fetch`, `newest` and `list` to a stage grant and a commit grant
+    /// when it is private.
+    #[must_use]
+    pub(super) fn refusing_writer_reads(self) -> Self {
+        Self {
+            refuses_writer_reads: true,
+            ..self
+        }
+    }
+
+    /// How many requests the publisher has sent to the registry.
+    pub(super) fn sent(&self) -> usize {
+        self.inner.sent()
+    }
+
+    /// Whether a call over `ks` names a coordinate the channel takes only with its base and not the
+    /// base.
+    fn names_a_sibling_alone(&self, ks: &[Coordinate]) -> bool {
+        self.paired
+            .iter()
+            .any(|(sibling, base)| ks.contains(sibling) && !ks.contains(base))
+    }
+
+    /// Whether a read with `g` is one a private channel refuses because the grant is for
+    /// `observe` only.
+    fn refuses_to_read_for(&self, g: &Grant) -> bool {
+        self.refuses_writer_reads
+            && self.shape.private
+            && matches!(scope_of(g).as_str(), "stage" | "commit")
     }
 
     pub(super) fn is(&self, flaw: Flaw) -> bool {
@@ -474,6 +524,9 @@ impl Publisher for Flawed {
         if self.sealed(&coordinates) {
             return self.answer_to_a_sealed_version(StageAnswer::Duplicate);
         }
+        if self.names_a_sibling_alone(&coordinates) {
+            return Err(SeamError::Refused(Reason::Channel));
+        }
         let staged_before = items
             .first()
             .and_then(|item| self.staged_bytes(item.coordinate));
@@ -563,6 +616,9 @@ impl Publisher for Flawed {
         }
         if self.sealed(&coordinates) {
             return self.answer_to_a_sealed_version(CommitAnswer::Duplicate);
+        }
+        if self.names_a_sibling_alone(&coordinates) {
+            return Err(SeamError::Refused(Reason::Channel));
         }
         self.remember(items);
         let stranger_in = self.writer_for_a_stranger(
@@ -729,6 +785,9 @@ impl Publisher for Flawed {
             g
         };
         let found = self.inner.fetch(g, k)?;
+        if self.refuses_to_read_for(g) {
+            return Err(SeamError::GrantRefused(GrantFault::Denied));
+        }
         if found.is_none()
             && matches!(
                 self.flaw,
@@ -770,6 +829,9 @@ impl Publisher for Flawed {
             g
         };
         let mut found = self.inner.newest(g, ch, name)?;
+        if self.refuses_to_read_for(g) {
+            return Err(SeamError::GrantRefused(GrantFault::Denied));
+        }
         if self.is(Flaw::NewestIsEmpty) {
             found.clear();
         }
@@ -829,6 +891,9 @@ impl Publisher for Flawed {
             g
         };
         let mut listed = self.inner.list(g, scope)?;
+        if self.refuses_to_read_for(g) {
+            return Err(SeamError::GrantRefused(GrantFault::Denied));
+        }
         if self.is(Flaw::ListIsEmpty) {
             listed.clear();
         }

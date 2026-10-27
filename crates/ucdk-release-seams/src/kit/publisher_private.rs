@@ -4,16 +4,17 @@
 //! with an empty set, what a coordinate of another writer reads as, and what a read grant and a
 //! stranger may do on a channel whose every read needs a grant.
 
-use ucdk_release::codec::{GrantFault, GrantPhase};
+use ucdk_release::codec::GrantPhase;
 use ucdk_release::publish::Presence;
 
-use super::publisher_grants::{denied, is_denied};
+use super::publisher_grants::denied;
+use super::publisher_reads as reads;
 use super::publisher_rig::{
-    A_DAY_MS, Arrangement, ChannelShape, PublisherRig, ReadStep, Set, built, held_by_another,
-    observed, phases_of, present_held, publish, stage, staged_held,
+    Arrangement, ChannelShape, PublisherRig, ReadStep, Set, built, held_by_another, observed,
+    phases_of, present_held, publish, stage, staged_held,
 };
 use super::{must, must_err, same};
-use crate::{Grant, ListScope, Publisher, SeamError};
+use crate::{Publisher, SeamError};
 
 /// An observe of a channel addressed by group is a group read and then an index read.
 pub(super) fn a_private_observe_reads_the_group_then_the_index<R: PublisherRig>(
@@ -128,6 +129,7 @@ pub(super) fn observe_with_an_empty_set_cannot_see_staged_state_and_still_sees_c
     stage(rig, &mut p, &Set::of(rig, &["a"]));
     rig.arrange(&mut p, &held_by_another(rig, &both.coords[1]));
     let grant = rig.grant(&p, GrantPhase::Stage, &both.coords);
+    let before = rig.reads(&p).len();
     same(
         must(
             p.observe(&grant, &both.coords[0], &[]),
@@ -136,10 +138,21 @@ pub(super) fn observe_with_an_empty_set_cannot_see_staged_state_and_still_sees_c
         Presence::Absent,
         "staged state seen with no set",
     );
+    same(
+        rig.reads(&p)[before..].to_vec(),
+        vec![ReadStep::Index],
+        "the reads of an observe told no set: there is no group to read",
+    );
+    let before = rig.reads(&p).len();
     present_held(must(
         p.observe(&grant, &both.coords[1], &[]),
         "an observe of a committed coordinate with no set",
     ));
+    same(
+        rig.reads(&p)[before..].to_vec(),
+        vec![ReadStep::Index],
+        "the reads of an observe of a committed coordinate told no set",
+    );
 }
 
 /// On a private channel a read grant observes what is committed and is no stage, commit, abort
@@ -157,7 +170,7 @@ pub(super) fn a_read_grant_observes_committed_coordinates_and_can_neither_stage_
     publish(rig, &mut p, &a);
     stage(rig, &mut p, &staged);
     rig.arrange(&mut p, &held_by_another(rig, &theirs.coords[0]));
-    a_stranger_reads_nothing_of_a_private_channel(&mut p, &[&a, &staged, &theirs]);
+    reads::a_stranger_reads_nothing_of_a_private_channel(rig, shape);
     let read_a = rig.grant(&p, GrantPhase::Read, &a.coords);
     let read_b = rig.grant(&p, GrantPhase::Read, &b.coords);
     present_held(must(
@@ -196,98 +209,5 @@ pub(super) fn a_read_grant_observes_committed_coordinates_and_can_neither_stage_
         p.observe(&read_a, &a.coords[0], &[]),
         "an observe after the refusals",
     ));
-    a_private_channel_reads_only_for_a_good_grant(rig, shape);
-}
-
-/// A read of a private channel, an observe, a fetch, a `newest` and a `list`, needs a grant that
-/// is for this repository, covers what is read and has not expired, whatever its phase: a stage
-/// grant and a commit grant that are bad are no better than a read grant that is.
-fn a_private_channel_reads_only_for_a_good_grant<R: PublisherRig>(rig: &R, shape: &ChannelShape) {
-    let mut p = built(rig, shape);
-    let (a, b) = (Set::of(rig, &["a"]), Set::of(rig, &["b"]));
-    publish(rig, &mut p, &a);
-    let k = &a.coords[0];
-    let scope = ListScope {
-        channel: k.channel.clone(),
-        prefix: String::new(),
-    };
-    let phases = [GrantPhase::Read, GrantPhase::Stage, GrantPhase::Commit];
-    for phase in phases {
-        let foreign = rig.foreign_grant(&p, phase, &a.coords);
-        let uncovered = rig.grant(&p, phase, &b.coords);
-        for (what, grant) in [
-            ("for another repository", &foreign),
-            ("that does not name the coordinate", &uncovered),
-        ] {
-            is_denied(
-                p.observe(grant, k, &[]),
-                &format!("an observe with a {phase:?} grant {what} ({shape:?})"),
-            );
-            is_denied(
-                p.fetch(grant, k),
-                &format!("a fetch with a {phase:?} grant {what} ({shape:?})"),
-            );
-        }
-        is_denied(
-            p.newest(&foreign, &k.channel, &k.name),
-            &format!("a newest with a {phase:?} grant for another repository ({shape:?})"),
-        );
-        is_denied(
-            p.list(&foreign, &scope),
-            &format!("a list with a {phase:?} grant for another repository ({shape:?})"),
-        );
-    }
-    let old = phases.map(|phase| rig.grant(&p, phase, &a.coords));
-    rig.advance(A_DAY_MS);
-    for (phase, old) in phases.into_iter().zip(&old) {
-        let refusals = [
-            ("observe", p.observe(old, k, &[]).map(|_| ())),
-            ("fetch", p.fetch(old, k).map(|_| ())),
-            ("newest", p.newest(old, &k.channel, &k.name).map(|_| ())),
-            ("list", p.list(old, &scope).map(|_| ())),
-        ];
-        for (call, answer) in refusals {
-            same(
-                answer,
-                Err(SeamError::GrantRefused(GrantFault::Expired)),
-                &format!("a {call} with an expired {phase:?} grant ({shape:?})"),
-            );
-        }
-    }
-}
-
-/// Every read of a private channel needs a grant, a stranger's included, and a stranger is
-/// `Denied` however the read is asked, an observe told the declared set included, and whatever
-/// the coordinate is: one committed, one only staged or one another writer committed.
-fn a_stranger_reads_nothing_of_a_private_channel<P: Publisher>(p: &mut P, sets: &[&Set]) {
-    let none = Grant::none();
-    for set in sets {
-        let held = &set.coords[0];
-        let blobs = set.blobs();
-        let items = set.items(&blobs);
-        let scope = ListScope {
-            channel: held.channel.clone(),
-            prefix: String::new(),
-        };
-        is_denied(
-            p.observe(&none, held, &[]),
-            "an observe by a stranger of a private channel",
-        );
-        is_denied(
-            p.observe(&none, held, &items),
-            "an observe told the declared set by a stranger of a private channel",
-        );
-        is_denied(
-            p.fetch(&none, held),
-            "a fetch by a stranger of a private channel",
-        );
-        is_denied(
-            p.newest(&none, &held.channel, &held.name),
-            "a newest by a stranger of a private channel",
-        );
-        is_denied(
-            p.list(&none, &scope),
-            "a list by a stranger of a private channel",
-        );
-    }
+    reads::a_bad_grant_reads_nothing(rig, shape);
 }

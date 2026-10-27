@@ -3,6 +3,8 @@
 
 use ucdk_release_seams::kit::ChannelShape;
 
+use super::publisher_lax::Defect;
+
 /// The channels a stub is behind: the channels of every other shape are the conforming fake, so
 /// that a scenario that runs on one kind of channel only is held to fail the stub there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -293,4 +295,7 @@ pub enum Flaw {
     /// A channel that yanks a version says so and yanks the platforms of every version of the
     /// name when the grant covers the version it names.
     VersionYankReachesEveryVersion,
+    /// A publisher that does not look at a grant that is bad in the way given: it sends the call
+    /// with the secret of the grant, the registry refuses it, and the refusal is the answer.
+    SendsRefused(Defect),
 }

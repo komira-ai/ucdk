@@ -16,6 +16,11 @@
 //! is plain. A reader of a private channel holds a read grant where a reader of a public one is a
 //! stranger (`looked`), and staged state of a channel addressed by group is observed told the set
 //! it was staged in.
+//!
+//! A grant that is bad is refused by every read as well as every write, on every declared shape,
+//! and a refused call is never sent (`PublisherRig::sent`). Stage and commit grants are for
+//! `observe`: a private channel may refuse their `fetch`, `newest` and `list`, and a scenario that
+//! asks them accepts `Denied` there as well as nothing.
 
 use sha2::{Digest as _, Sha256};
 use ucdk_core::Hash256;
@@ -248,6 +253,16 @@ pub trait PublisherRig {
     /// The group and index reads the channel's observes made, in order. Empty for a channel
     /// that does not address staged state by group.
     fn reads(&self, publisher: &Self::Publisher) -> Vec<ReadStep>;
+
+    /// How many requests the publisher has sent to its registry so far, a refused one included,
+    /// counted when it is made and before the registry admits it. The kit takes the count before
+    /// and after a call: a call whose grant is for another repository, has expired, is of the
+    /// wrong phase or does not name the coordinates of the call is refused by the publisher before
+    /// it sends anything, so the secret of a grant is never presented to a registry it was not
+    /// issued for, and the count does not move. The seam shows a publisher's answers and not its
+    /// requests, so a registry that sends such a call and maps the refusal to `Denied` can only be
+    /// told from one that sends nothing by this count; that is why the method has no default.
+    fn sent(&self, publisher: &Self::Publisher) -> usize;
 
     /// The coordinate the kit calls `label`. Distinct labels map to distinct coordinates, and a
     /// label that starts with another maps to a name that starts with the other's name, because
