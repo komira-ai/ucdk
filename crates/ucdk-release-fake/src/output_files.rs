@@ -100,7 +100,8 @@ impl FakeOutputFiles {
 
     /// The common start of every call: log it, check the path, fail an unreadable path. The
     /// path that comes back is the one the call is about: a `.` part and an empty part (a
-    /// repeated slash, a trailing one) name nothing, as the operating system reads them.
+    /// repeated slash, a trailing one) name nothing, and the reader drops them itself, never
+    /// leaving them to the operating system.
     fn enter(&mut self, method: &str, path: &str) -> Result<String, SeamError> {
         self.calls.push(format!("{method} {path}"));
         check_path(path)?;
