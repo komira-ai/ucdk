@@ -112,6 +112,25 @@ pub enum Flaw {
     UnknownSignalsAreCodes,
     /// The runner beats at most twice for a run, however much the child writes.
     BeatsCappedAtTwo,
+    /// A bare name is looked for on the `PATH` of an earlier run when the child's environment
+    /// names none.
+    PathRemembered,
+    /// An environment variable called `path`, in any case, is the `PATH`.
+    PathKeyCaseInsensitive,
+    /// A directory of the `PATH` that is not absolute is relative to the runner's own working
+    /// directory and not the one the run was given.
+    RelativePathEntryUsesRunnerCwd,
+    /// Spaces at the ends of an environment value are cut.
+    EnvValueTrimmed,
+    /// An environment value is cut at its first newline.
+    EnvValueCutAtNewline,
+    /// A backslash in an environment value is dropped.
+    EnvValueBackslashEaten,
+    /// A character that is not ASCII in an environment value is replaced by `?`.
+    EnvValueNonAscii,
+    /// The program name is cut into words at its spaces, so a program whose path holds a space
+    /// cannot be started.
+    Argv0ReSplitOnSpace,
 }
 
 pub struct FakeProcessRig {
@@ -156,6 +175,8 @@ pub struct Scripted {
     leftover_env: Vec<(String, String)>,
     /// The error output of the last run that ended with a nonzero code.
     leaked_stderr: Vec<u8>,
+    /// The `PATH` of the last run that had one.
+    last_path: Option<String>,
 }
 
 impl ProcessRig for FakeProcessRig {
@@ -174,6 +195,7 @@ impl ProcessRig for FakeProcessRig {
             stderr_seen: Vec::new(),
             leftover_env: Vec::new(),
             leaked_stderr: Vec::new(),
+            last_path: None,
         }
     }
 
@@ -203,9 +225,10 @@ impl Scripted {
         self.flaw == Some(flaw)
     }
 
-    /// The directories of the command's own `PATH`, in order.
-    fn path_dirs<'c>(&self, command: &'c Command) -> Vec<&'c str> {
-        let mut dirs: Vec<&str> = command
+    /// The directories of the command's own `PATH`, in order, each as an absolute path: one that
+    /// is not absolute is relative to the directory `base`.
+    fn path_dirs(&self, command: &Command, base: &str) -> Vec<String> {
+        let mut dirs: Vec<String> = command
             .env
             .iter()
             .filter(|(key, _)| key == "PATH")
@@ -216,11 +239,20 @@ impl Scripted {
                     path.split(':').collect()
                 }
             })
+            .map(|dir| rooted(dir, base))
             .collect();
         if self.is(Flaw::PathLimitedToTwo) {
             dirs.truncate(2);
         }
         dirs
+    }
+
+    /// The installed program called `name` in a directory of the `path` given as text, looked
+    /// for as a runner does, relative entries against `base`.
+    fn found_on(&self, path: &str, base: &str, name: &str) -> Option<String> {
+        path.split(':')
+            .map(|dir| format!("{}/{name}", rooted(dir, base)))
+            .find(|program| self.programs.contains_key(program))
     }
 
     /// Where a stub that looks for the program in the wrong place finds it, as an absolute path
@@ -231,12 +263,33 @@ impl Scripted {
             return None;
         }
         let on_path = || {
-            self.path_dirs(command)
+            self.path_dirs(command, cwd)
                 .into_iter()
                 .map(|dir| format!("{dir}/{name}"))
                 .find(|path| self.programs.contains_key(path))
         };
         let slash = name.contains('/');
+        let own_path = command.env.iter().find(|(key, _)| key == "PATH");
+        if !slash && self.is(Flaw::PathRemembered) && own_path.is_none() {
+            return self
+                .last_path
+                .as_deref()
+                .and_then(|path| self.found_on(path, cwd, name));
+        }
+        if !slash && self.is(Flaw::PathKeyCaseInsensitive) && own_path.is_none() {
+            return command
+                .env
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
+                .and_then(|(_, path)| self.found_on(path, cwd, name));
+        }
+        if !slash && self.is(Flaw::RelativePathEntryUsesRunnerCwd) {
+            let path = own_path.map_or("", |(_, path)| path.as_str());
+            return Some(
+                self.found_on(path, RUNNER_CWD, name)
+                    .unwrap_or_else(|| format!("/unfound/{name}")),
+            );
+        }
         if slash && self.is(Flaw::SlashNameSearchedOnPath) {
             return Some(on_path().unwrap_or_else(|| format!("/unfound/{name}")));
         }
@@ -260,8 +313,8 @@ impl Scripted {
         if name.contains('/') {
             return self.programs.get(&format!("{cwd}/{name}"));
         }
-        let dirs = self.path_dirs(command);
-        let found = |dir: &&str| self.programs.get(&format!("{dir}/{name}"));
+        let dirs = self.path_dirs(command, cwd);
+        let found = |dir: &String| self.programs.get(&format!("{dir}/{name}"));
         if self.is(Flaw::LastPathEntryWins) {
             dirs.iter().rev().find_map(found)
         } else {
@@ -311,6 +364,23 @@ impl Scripted {
             if self.is(Flaw::EnvValueLowercased) {
                 *value = value.to_lowercase();
             }
+            if self.is(Flaw::EnvValueTrimmed) {
+                *value = value.trim().to_owned();
+            }
+            if self.is(Flaw::EnvValueCutAtNewline)
+                && let Some((head, _)) = value.split_once('\n')
+            {
+                *value = head.to_owned();
+            }
+            if self.is(Flaw::EnvValueBackslashEaten) {
+                *value = value.replace('\\', "");
+            }
+            if self.is(Flaw::EnvValueNonAscii) {
+                *value = value
+                    .chars()
+                    .map(|c| if c.is_ascii() { c } else { '?' })
+                    .collect();
+            }
         }
     }
 
@@ -323,6 +393,15 @@ impl Scripted {
                 set.remove(name);
             }
         }
+    }
+}
+
+/// The directory `dir` of a `PATH` as an absolute path: relative to `base` when it is not one.
+fn rooted(dir: &str, base: &str) -> String {
+    if dir.starts_with('/') {
+        dir.to_owned()
+    } else {
+        format!("{base}/{dir}")
     }
 }
 
@@ -396,7 +475,17 @@ impl ProcessRunner for Scripted {
             }
             command.env.sort();
         }
+        if self.is(Flaw::Argv0ReSplitOnSpace)
+            && command.argv.first().is_some_and(|name| name.contains(' '))
+        {
+            return Err(SeamError::Unknown(
+                "the program cannot be started".to_owned(),
+            ));
+        }
         let given_env = command.env.clone();
+        if let Some((_, path)) = command.env.iter().find(|(key, _)| key == "PATH") {
+            self.last_path = Some(path.clone());
+        }
         let bare_name = command.argv.first().cloned().unwrap_or_default();
         if self.is(Flaw::PathMissCached) && self.missed.contains(&bare_name) {
             return Err(SeamError::Unknown(

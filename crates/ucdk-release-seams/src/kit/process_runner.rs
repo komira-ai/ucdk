@@ -258,6 +258,54 @@ fn a_bare_name_is_resolved_on_the_childs_path_and_never_the_runners<R: ProcessRi
         "child".to_owned(),
         "the program that ran after the name was missed on another PATH",
     );
+    // A directory of the `PATH` that is not absolute is relative to the working directory of the
+    // run, whichever directory that is.
+    let there = format!("{}/elsewhere", rig.scratch());
+    rig.install(
+        &mut runner,
+        &format!("{there}/child-bin/tool"),
+        prints("there"),
+    );
+    for (cwd, want) in [(rig.scratch(), "child"), (there, "there")] {
+        // The argument tells the two runs apart for a rig that scripts by command.
+        let relative = command(&["tool", want], &[("PATH", "child-bin")]);
+        let result = must(
+            run_with(&mut runner, &relative, &cwd, 1 << 20),
+            "run of a bare name found by a directory of the PATH that is relative",
+        );
+        same(
+            text(&result.stdout),
+            want.to_owned(),
+            &format!("the program that ran with a relative directory of the PATH in {cwd}"),
+        );
+    }
+    // Nothing of an earlier run is remembered: a name that the `PATH` of an earlier run had is
+    // Unknown when this run has none, and only a variable called `PATH` is the `PATH`. The name
+    // is on no `PATH` that the runner could have of its own.
+    rig.install(&mut runner, &format!("{child_dir}/kept"), prints("kept"));
+    let result = must(
+        run_plain(
+            rig,
+            &mut runner,
+            &command(&["kept"], &[("PATH", &child_dir)]),
+        ),
+        "run of a bare name found on the PATH given",
+    );
+    same(
+        text(&result.stdout),
+        "kept".to_owned(),
+        "the program that ran on the PATH given",
+    );
+    must_err(
+        run_plain(rig, &mut runner, &command(&["kept"], &[])),
+        "run of a bare name by a child that has no PATH, after one that had",
+    );
+    for key in ["path", "Path"] {
+        must_err(
+            run_plain(rig, &mut runner, &command(&["kept"], &[(key, &child_dir)])),
+            "run of a bare name by a child whose variable is not called PATH",
+        );
+    }
 }
 
 fn a_name_found_nowhere_on_the_childs_path_is_unstartable<R: ProcessRig>(rig: &R) {
@@ -396,8 +444,12 @@ fn argv_and_environment_are_exactly_what_was_given<R: ProcessRig>(rig: &R) {
         &[
             ("A", "1"),
             ("B", ""),
+            ("BS", "a\\b"),
             ("EQ", "a=b=c"),
+            ("NA", "\u{e9}"),
+            ("NL", "l1\nl2"),
             ("PATH", "/nowhere"),
+            ("SP", " x "),
             ("lower", "MiXed"),
         ],
     );
@@ -407,11 +459,23 @@ fn argv_and_environment_are_exactly_what_was_given<R: ProcessRig>(rig: &R) {
     same(
         text(&result.stdout),
         format!(
-            "cwd {}\n{want_args}env A=1\nenv B=\nenv EQ=a=b=c\nenv PATH=/nowhere\n\
-             env lower=MiXed\n",
+            "cwd {}\n{want_args}env A=1\nenv B=\nenv BS=a\\b\nenv EQ=a=b=c\nenv NA=\u{e9}\n\
+             env NL=l1\nl2\nenv PATH=/nowhere\nenv SP= x \nenv lower=MiXed\n",
             rig.scratch()
         ),
         "the working directory, the arguments and the whole environment the child saw",
+    );
+    // A program whose path holds a space is one program.
+    let spaced = format!("{}/with space/report", rig.scratch());
+    rig.install(&mut runner, &spaced, Behavior::Reports);
+    let result = must(
+        run_plain(rig, &mut runner, &command(&[&spaced, "x"], &[])),
+        "run of a program whose path holds a space",
+    );
+    same(
+        text(&result.stdout),
+        format!("cwd {}\narg x\n", rig.scratch()),
+        "what a program whose path holds a space reported",
     );
     // No environment given is no environment, and no `PATH` given is no `PATH`.
     let small: [(&[(&str, &str)], &str); 2] = [(&[], ""), (&[("A", "1")], "env A=1\n")];
