@@ -94,7 +94,8 @@ impl FakeProcessRunner {
 
     /// Whether the program of `command` is found, as `exec` finds it: an absolute name where it
     /// is, a name with a `/` in it relative to the working directory `cwd`, and only a bare name
-    /// on the `PATH` of the command's own environment.
+    /// on the `PATH` of the command's own environment, where a directory that is not absolute is
+    /// relative to `cwd` too.
     fn startable(&self, command: &Command, cwd: &str) -> bool {
         let program = command.argv.first().map_or("", String::as_str);
         if program.starts_with('/') {
@@ -108,7 +109,15 @@ impl FakeProcessRunner {
             .iter()
             .filter(|(key, _)| key == "PATH")
             .flat_map(|(_, path)| path.split(':'))
-            .any(|dir| self.programs.contains(&format!("{dir}/{program}")))
+            .any(|dir| {
+                // A directory of the `PATH` that is not absolute is relative to `cwd`.
+                let dir = if dir.starts_with('/') {
+                    dir.to_owned()
+                } else {
+                    format!("{cwd}/{dir}")
+                };
+                self.programs.contains(&format!("{dir}/{program}"))
+            })
     }
 }
 
