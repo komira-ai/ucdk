@@ -61,13 +61,13 @@ impl FakeOutputFiles {
     /// `stat` answers `None` at `path`, and `list` and `read` answer `Permanent`. The listing of
     /// its parent does not name it, and nothing below it exists either.
     pub fn missing(&mut self, path: &str) {
-        self.missing.insert(path.to_owned());
+        self.missing.insert(normalized(path));
     }
 
     /// A `stat`, `list` or `read` of `path` fails with `Unknown`. The listing of its parent
     /// does not read the entry, so it still names it.
     pub fn unreadable(&mut self, path: &str) {
-        self.unreadable.insert(path.to_owned());
+        self.unreadable.insert(normalized(path));
     }
 
     /// The file at `path` is a symlink from now on.
@@ -85,14 +85,15 @@ impl FakeOutputFiles {
         &self.calls
     }
 
-    /// The paths and what is at them, to compare before and after a call.
-    pub fn snapshot(&self) -> Vec<(String, FileKind, usize)> {
+    /// The paths and what is at them (a file's bytes included), to compare before and after a
+    /// call.
+    pub fn snapshot(&self) -> Vec<(String, FileKind, Vec<u8>)> {
         self.tree
             .iter()
             .map(|(path, node)| match node {
-                Node::File(bytes) => (path.clone(), FileKind::File, bytes.len()),
-                Node::Directory => (path.clone(), FileKind::Directory, 0),
-                Node::Symlink => (path.clone(), FileKind::Symlink, 0),
+                Node::File(bytes) => (path.clone(), FileKind::File, bytes.clone()),
+                Node::Directory => (path.clone(), FileKind::Directory, Vec::new()),
+                Node::Symlink => (path.clone(), FileKind::Symlink, Vec::new()),
             })
             .collect()
     }
@@ -103,11 +104,7 @@ impl FakeOutputFiles {
     fn enter(&mut self, method: &str, path: &str) -> Result<String, SeamError> {
         self.calls.push(format!("{method} {path}"));
         check_path(path)?;
-        let parts: Vec<&str> = path
-            .split('/')
-            .filter(|part| !part.is_empty() && *part != ".")
-            .collect();
-        let path = format!("/{}", parts.join("/"));
+        let path = normalized(path);
         if self.unreadable.contains(&path) {
             return Err(SeamError::Unknown(format!("{path} cannot be read")));
         }
@@ -124,6 +121,16 @@ impl FakeOutputFiles {
         });
         self.tree.get(path).filter(|_| !gone)
     }
+}
+
+/// `path` without its `.` parts and empty parts (a repeated slash, a trailing one), the path a
+/// call is about: a slashed path is the unslashed one, for a symlink and a regular file too.
+fn normalized(path: &str) -> String {
+    let parts: Vec<&str> = path
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect();
+    format!("/{}", parts.join("/"))
 }
 
 fn kind_of(node: &Node) -> FileKind {

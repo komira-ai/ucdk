@@ -32,8 +32,9 @@ pub trait OutputFilesRig {
     /// reader's back.
     fn change(&self, files: &mut Self::Files, rel: &str, bytes: &[u8]);
 
-    /// The path, kind and byte length of everything in the tree, taken without the reader.
-    fn snapshot(&self, files: &Self::Files) -> Vec<(String, FileKind, usize)>;
+    /// The path, kind and bytes of everything in the tree (no bytes for a directory or a
+    /// symlink), taken without the reader.
+    fn snapshot(&self, files: &Self::Files) -> Vec<(String, FileKind, Vec<u8>)>;
 }
 
 fn at<R: OutputFilesRig>(rig: &R, rel: &str) -> String {
@@ -106,9 +107,11 @@ pub fn output_files_scenarios<R: OutputFilesRig>() -> Vec<Scenario<R>> {
     ]
 }
 
-/// The operating system reads `/d/./x` and `/d//x` as `/d/x` and `list` of `/d/` as `list` of
-/// `/d`, and the contract refuses only a `..` part: a reader that refuses or fails on any of
-/// them, or lists with a leading slash, is not one.
+/// A reader drops each `.` part and each empty part of a path itself, a trailing slash
+/// included, before it looks the path up, so `/d/./x` and `/d//x` are `/d/x`, `/d/x/` is `/d/x`
+/// (a file) and `list` of `/d/` is `list` of `/d`; the contract refuses only a `..` part. A
+/// reader that refuses or fails on any of them, answers a slashed file as nothing, or lists
+/// with a leading slash, is not one.
 fn a_dot_part_a_repeated_slash_and_a_trailing_slash_name_the_path_they_stand_in<
     R: OutputFilesRig,
 >(
@@ -133,9 +136,12 @@ fn a_dot_part_a_repeated_slash_and_a_trailing_slash_name_the_path_they_stand_in<
             &format!("what is at {spelled:?}"),
         );
     }
-    for suffix in ["/d/./x", "/d//x", "/./d/x", "/d/./z", "/d//z"] {
+    for suffix in [
+        "/d/./x", "/d//x", "/./d/x", "/d/./z", "/d//z", "/d/x/", "/d/z/",
+    ] {
         let spelled = format!("{}{suffix}", rig.root());
-        let want: &[u8] = if suffix.ends_with('x') { b"X" } else { b"Z" };
+        let bare = suffix.trim_end_matches('/');
+        let want: &[u8] = if bare.ends_with('x') { b"X" } else { b"Z" };
         same(
             must(files.read(&spelled), &format!("read of {spelled:?}")),
             want.to_vec(),
@@ -256,6 +262,26 @@ fn a_listing_names_the_kind_of_every_entry<R: OutputFilesRig>(rig: &R) {
         true,
         "the listing of an empty directory is empty",
     );
+    // Siblings named with the listed directory's name as a prefix are not below it: `d` beside
+    // `d2`, `d.bak` and `d-x`, an empty `e` beside `e2`, at the top and a directory down.
+    let mut files = rig.reader(&[
+        ("q/d/x", Node::File(b"x")),
+        ("q/d2/x", Node::File(b"2")),
+        ("q/d.bak/x", Node::File(b"b")),
+        ("q/d-x/x", Node::File(b"-")),
+        ("q/e", Node::Directory),
+        ("q/e2", Node::File(b"2")),
+        ("r/p/d/x", Node::File(b"x")),
+        ("r/p/d2/x", Node::File(b"y")),
+    ]);
+    let mut rels = |rel: &str| -> Vec<String> {
+        let listing = must(files.list(&at(rig, rel)), "list");
+        listing.into_iter().map(|e| e.rel).collect()
+    };
+    for rel in ["q/d", "q/d2", "q/d.bak", "q/d-x", "r/p/d"] {
+        same(rels(rel), vec!["x".to_owned()], "a listing beside siblings");
+    }
+    same(rels("q/e"), Vec::new(), "an empty listing beside siblings");
 }
 
 fn a_listed_symlink_is_never_descended<R: OutputFilesRig>(rig: &R) {
@@ -284,6 +310,10 @@ fn stat_tells_a_file_a_directory_a_symlink_and_nothing_apart<R: OutputFilesRig>(
         ("s/a..b", Node::File(b"x")),
         ("s/..dots", Node::Directory),
         ("s/dots../x", Node::File(b"x")),
+        // A link to itself, and two links to each other (a loop is an error to follow).
+        ("s/self", Node::Link("s/self")),
+        ("s/loop_a", Node::Link("s/loop_b")),
+        ("s/loop_b", Node::Link("s/loop_a")),
     ]);
     let mut stat = |rel: &str| must(files.stat(&at(rig, rel)), "stat");
     same(stat("s/file"), Some(FileKind::File), "a file");
@@ -342,6 +372,13 @@ fn stat_tells_a_file_a_directory_a_symlink_and_nothing_apart<R: OutputFilesRig>(
             Some(FileKind::Symlink),
             &format!("what is at the symlink {rel:?} named with a trailing slash"),
         );
+    }
+    // `stat` does not follow, so a loop is a `Symlink` like any link, slashed or not.
+    for link in ["s/self", "s/loop_a", "s/loop_b"] {
+        for slash in ["", "/"] {
+            let rel = format!("{link}{slash}");
+            same(stat(&rel), Some(FileKind::Symlink), &rel);
+        }
     }
 }
 
@@ -696,7 +733,8 @@ fn a_read_returns_the_file_as_it_is_at_the_call<R: OutputFilesRig>(rig: &R) {
 
 fn no_call_changes_the_tree<R: OutputFilesRig>(rig: &R) {
     let mut files = rig.reader(&[
-        ("n/file", Node::File(b"data")),
+        // Capitals and a carriage return: a rewrite to bytes of the same length must show.
+        ("n/file", Node::File(b"Data\r\nEnd")),
         ("n/dir", Node::Directory),
         ("n/link", Node::Link("n/file")),
     ]);

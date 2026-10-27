@@ -84,7 +84,7 @@ pub fn entry_path(dir: &str, rel: &str) -> Result<String, SeamError>;   // `dir`
 
 **Where it lands (Decided here; the rule is in 11).** The trait, `FakeOutputFiles` and `run_output_files_kit` land in PR 4 with the other seams, and the real reader lands in PR 12a with `Buck2` and `Bazel`, the first real implementations that use it, so 12a cannot be accepted before it exists and passes its kit. It is not part of the store PR 12b. The `Buck2` and `Bazel` tests run over a `FakeProcessRunner` and a `FakeOutputFiles` in every pull request. `FakeBuildSystem` does not use it: it is the specification of what the build-system seam promises, and it makes its outputs and its reports itself.
 
-Kit scenarios (`run_output_files_kit`, 4.6), thirteen, each with the one non-conforming stub that the kit's self-test feeds it and that the scenario must fail:
+Kit scenarios (`run_output_files_kit`, 4.6), fourteen, each with the one non-conforming stub that the kit's self-test feeds it and that the scenario must fail:
 
 | Scenario | What it asserts | Stub it must fail |
 |---|---|---|
@@ -100,7 +100,8 @@ Kit scenarios (`run_output_files_kit`, 4.6), thirteen, each with the one non-con
 | `a_path_that_is_relative_or_climbs_is_refused` | `stat`, `list` and `read` of a relative path and of a path with a `..` part are `Refused` | a `read` that joins or resolves the path unchecked |
 | `an_entry_of_a_listed_directory_is_read_through_its_joined_path` | for every `File` entry of a `list`, `read(entry_path(dir, rel)?)` answers that file's bytes | an `entry_path` that drops a nested part |
 | `a_read_returns_the_file_as_it_is_at_the_call` | a file changed between two reads is read with its new bytes | a reader that caches the first answer |
-| `no_call_changes_the_tree` | a tree compared before and after every method is equal | a `read` that touches the file |
+| `no_call_changes_the_tree` | a tree, with the bytes of each file, compared before and after every method is equal | a `read` that touches the file |
+| `a_dot_part_a_repeated_slash_and_a_trailing_slash_name_the_path_they_stand_in` | a `.` part, an empty part and a trailing slash (a file's and a symlink's too) name nothing of their own: the reader strips them itself, and the slashed path answers as the unslashed one | a reader that refuses a path with a `.` part |
 
 Each is run against `FakeOutputFiles` in PR 4 and against the real reader over a temporary directory in 12a (`output_files::*`, 11). `entry_path` is pure and is tested once, in PR 4, where it lands: `output_files::entry_path_joins_a_checked_rel` and `output_files::entry_path_refuses_an_empty_dot_dotdot_or_absolute_rel_and_an_empty_part` (it answers `Refused` for `""`, `"."`, `".."`, `"a/../b"`, `"/a"` and `"a//b"`). The faults of `FakeOutputFiles` that the `Buck2` and `Bazel` tests use are `missing`, `unreadable`, `symlink_at` and `changes_after_listing` (4.5 of release.md).
 
