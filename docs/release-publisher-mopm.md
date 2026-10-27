@@ -1,6 +1,6 @@
 # The mopm release Publisher
 
-Status: design, revision 5. Nothing in this document is implemented yet. Where it says "the publisher does X"
+Status: design, revision 6. Nothing in this document is implemented yet. Where it says "the publisher does X"
 it describes what the crate will do when the PRs in section 15 land. The document is in two files to stay
 under the size bound: this one holds sections 1, 2, 4 to 9 and 14 to 17 (the design); sections 3, 10, 11, 12
 and 13 (the mopm facts, the transport and the error table, the rig, the scenario table and the changes asked of
@@ -9,15 +9,23 @@ mopm) are in [release-publisher-mopm-verification.md](release-publisher-mopm-ver
 Revision 5 follows the maintainers' direction: publishing is the pattern every package manager has, stage,
 validate, publish, with abort, and the design, the seam and the engine express that shape first. A channel
 that cannot stage is the special case. The earlier two-shape design (a one-call shape first, the staged shape
-behind mopm changes) is gone: mopm stages, and the changes it needed have landed or are in review. What
-changed is listed in section 16; what this changes in the seam and the engine documents is section 17.
+behind mopm changes) is gone: mopm stages, and the changes it needed have landed (mopm#260 and mopm#261 are
+merged). What changed is listed in section 16; what this changes in the seam and the engine documents is
+section 17.
+
+Revision 6 applies review of revision 5. The seam is not unchanged: `abort` must take the declared set, because the
+group id depends on every declared file's digest and size and coordinates do not carry them (sections 7.4 and
+17). The kit facts are re-keyed to the merged kit (ucdk#45) and the open second part (ucdk#47), including what
+neither part runs on a group-addressed channel (section 12). The mopm facts are re-read against the merged
+mopm#261, and the grant scope, the digest chain and the validate phase are described as the source has them.
 
 ## 1. Summary
 
 ucdk's first real release channel is a mopm registry. This document designs `ucdk-release-mopm`, a Rust
 crate that implements `ucdk_release_seams::Publisher` against mopm's HTTP API (the group publish path and
-the public read path) and is held to the publisher kit (`run_publisher_kit::<R: PublisherRig>`, 39
-scenarios, nine contract points, and the scenarios the seam owners added for the kit's last two parts).
+the public read path) and is held to the publisher kit (`run_publisher_kit::<R: PublisherRig>`: 30 scenarios
+on `main` after ucdk#45, 46 once its second part, ucdk#47, lands; section 12 says which of them run on the
+channel shape mopm declares).
 
 **The shape.** A release is published in three steps with an abort, each its own seam call and each bounded
 on its own:
@@ -26,9 +34,9 @@ on its own:
    reserved, nothing visible.
 2. **Validate.** The engine runs the tests and checks of the Publish action on the staged set before anything
    is public. mopm exposes no read of staged bytes, so the engine validates its own local copy of the set and
-   proves it is the staged one by digest: the registry reports the declared `sha256` of every staged file,
-   which storage verified at upload, and the engine requires it to equal the digest of the member it
-   validated (section 7.1).
+   proves it is the staged one by digest: the registry reports the declared `sha256` of every staged file, and
+   the engine requires it to equal the digest of the member it validated (section 7.1). What binds the declared
+   digest to the stored bytes is the signed upload and the registry's re-hash before the copy, not the read.
 3. **Publish.** `commit` makes the staged set readable, all or none. `abort` gives the staged state back, and
    the engine calls it when validation fails.
 
@@ -47,10 +55,13 @@ Four facts shape everything:
    the declared set, with test vectors (mopm#261), so the publisher computes it and reads
    `GET /groups/{id}`, which lists each member's declared files (`subdir`, `filename`, `sha256`, `size`,
    and `uploaded` while the group is open); 404 means no group. `getVersion` names the group of a version, and
-   `manifest_sha256` is optional on commit. Since mopm#260 (live) a `group_conflict` carries a stable
+   `manifest_sha256` is optional on commit. Since mopm#260 (released in 0.0.76) a `group_conflict` carries a stable
    `error.reason`, create takes `on_overlap: supersede | refuse`, and the answer lists the groups it
-   superseded. mopm#261 is in review: the staged shape's observe is built against its documented contract and
-   proven on the emulator now, and against a real registry after it is deployed (section 13).
+   superseded. mopm#261 is merged (release 0.0.77): the staged shape's observe and abort are built against the
+   merged contract and proven on the emulator, and against a real registry once a deployment that carries it is
+   the manual run's target (section 13). The id covers each declared file's `sha256` and `size`, so a caller
+   that does not hold the declared set cannot address its group: `observe` and `abort` both take the set
+   (section 17).
 3. mopm cannot be asked for the bytes of a staged file. Validation reads the engine's local staged set, and
    the read-back after the commit fetches the published bytes and the engine hashes them (section 8).
 4. mopm seals a `(name, version)` once a group commits (and burns it if the group fails). A later set cannot
@@ -67,13 +78,16 @@ declares, and which are a gap.
 
 Three things in this document are stated as limits of the evidence, not as facts about the product:
 
-- Section 3 was read from the mopm sources and API description, not executed, and the facts that come from
-  mopm#261 were read from its description and the specification text it adds; it is not merged.
+- Section 3 was read from the mopm sources and API description, not executed. It was first read at an early
+  commit; the facts of mopm#260 and mopm#261 were re-read against the merged source (the merge commit of
+  mopm#261), and each is marked with what was checked.
 - The in-process emulator (section 11) copies this document's reading of mopm. A scenario that passes on it
   is evidence about the publisher, not about mopm, until the manual run of PR 7 repeats it against a real
   deployment.
-- The kit parts for the publisher (4g, 4h) have not landed. Their hooks are those the seam owners decided
-  (section 11); a row that depends on a hook says so.
+- The first part of the publisher kit is merged (ucdk#45, kit part 4g, 30 scenarios) and the second is open
+  (ucdk#47, part 4h, 46). Section 12 keys every row to the part that holds it. The kit's gates run almost none of
+  the staging scenarios on a channel addressed by group, which is the one shape mopm has; a green kit run for
+  this crate means little until that changes (sections 12 and 17).
 
 ## 2. Goals and non-goals
 
@@ -103,8 +117,9 @@ Non-goals
 - Private repositories. mopm has none; the publisher refuses a PRIVATE repository (section 8, G-private).
 - Claiming a package name. The publisher never claims one (section 3 says how a package comes to exist).
 - Reaching a live registry from CI. CI runs the kit against an in-process emulator (section 11).
-- Changing the seam, or mopm, from this repository. Seam changes are decided by the seam owners (section 17
-  asks for a comment and nothing else); mopm changes are requests (section 13).
+- Changing the seam, the kit or mopm from this repository. Seam changes are decided by the seam owners (section
+  17 asks for one signature change, `abort` taking the declared set, a comment, and kit scenarios on a
+  group-addressed channel); mopm changes are requests (section 13).
 
 ## 4. The mapping
 
@@ -129,10 +144,10 @@ and the declared set (section 3) and is never a stored value.
 
 | Method | mopm call | Grant used | Error mapping (summary; full table in section 10) | Idempotency and atomicity argument |
 |---|---|---|---|---|
-| `observe(g, k, set)` | With a non-empty `set`: the group read of the group id computed from the actor and `set` (token), then the package read `GET /packages/{n}/{v}` (public). With an empty `set`: the package read only. | A grant that is presented is checked for repository and expiry on every verb, and for coverage where the verb names coordinates (section 9). The group read needs a stage or commit envelope. | A 404 whose parsed body code is `package_not_found` or `version_not_found` gives `Absent`; for the group read only a 404 `group_not_found` means "no group". Any other 404, an unparsable 404, and every read failure is `Transient` (`Refused(Channel)` for `route_not_found`), never `Absent`. A tombstone is `Burned` or `Yanked` (section 8). An expired grant that is presented is `GrantRefused(Expired)`, which `SeamError::observe_failure` treats as `INDETERMINATE` even at preflight. | A read. Exactness rests on the version record being uncached and strongly consistent (section 3, proven against a deployment by the manual run). Never calls `list`, search or create. Reports the registry's own digest (for a staged file, the declared one that storage verified at upload); no verdict rests on it alone (section 8). |
+| `observe(g, k, set)` | With a non-empty `set`: the group read of the group id computed from the actor and `set` (token), then the package read `GET /packages/{n}/{v}` (public). With an empty `set`: the package read only. | A grant that is presented is checked for repository and expiry on every verb, and for coverage where the verb names coordinates (section 9). The group read needs a stage or commit envelope. | A 404 whose parsed body code is `package_not_found` or `version_not_found` gives `Absent`; for the group read only a 404 `group_not_found` means "no group". Any other 404, an unparsable 404, and every read failure is `Transient` (`Refused(Channel)` for `route_not_found`), never `Absent`. A tombstone is `Burned` or `Yanked` (section 8). An expired grant that is presented is `GrantRefused(Expired)`, which `SeamError::observe_failure` treats as `INDETERMINATE` even at preflight. | A read. Exactness rests on the version record being uncached and strongly consistent (section 3, proven against a deployment by the manual run). Never calls `list`, search or create. Reports the registry's own digest (for a staged file, the declared one, bound to the stored bytes by the signed upload and the registry's re-hash, 7.1); no verdict rests on it alone (section 8). |
 | `stage(g, items)` | the group read first: open with every declared file uploaded gives `Duplicate`; else `POST /groups` with `on_overlap: refuse`, repeated with the identical body while `reserving`, then `PUT` each file the answer lists with `uploaded: false`, with the returned headers and no token | stage grant | 409 `version_exists` gives `Duplicate` (a burned coordinate too: the engine's observe reads `Burned`); every `group_conflict` is classified by its reason (section 6) | The group id is a function of actor and declared set, so a repeat of the identical set resumes the same group. A different set that shares a member is refused, never superseded; a create that lists a superseded group anyway is "not honoured" (section 6). |
 | `commit(g, items)` | `POST /groups/{id}/commit` naming each member and sending no manifest hash, then poll `GET /groups/{id}` until `visible`. The answer is decided by the group status in the body, not the HTTP status. | commit grant | body status already `committed` or `visible` gives `Duplicate`; `validating` is polled and gives `Committed` at `visible`; a refused commit is classified by a status read (section 7) | an identical commit body is idempotent server-side; a different body is 409 `group_commit_refused`. Sent once. |
-| `abort(g, ks)` | `DELETE /groups/{id}`; on 409 or 404, `GET /groups/{id}` | stage grant | section 7 table | DELETE is idempotent only for `aborted`; the follow-up read makes the rest idempotent |
+| `abort(g, set)` | the group id computed from the actor and `set` (every declared file's digest and size), then `DELETE /groups/{id}`; on 409 or 404, `GET /groups/{id}` | stage grant covering every coordinate of `set` | section 7 table | DELETE is idempotent only for `aborted`; the follow-up read makes the rest idempotent. The set is an argument because the id cannot be computed from coordinates (7.4) |
 | `yank(g, k, reason)` | read the version record (`k` must be held in it, else `Permanent`), check the grant covers every held sibling, then `PUT /packages/{n}/{v}/yank` with `{yanked: true, reason}` | commit grant covering `k` and every held sibling of its version | see section 7 | server-side no-op on repeat. Coarser than a coordinate: `yank_unit() == Version`, so the engine names and covers every sibling (section 7). |
 | `fetch(g, k)` | `GET /packages/{n}/{v}`, then `GET` the file `url` from that record for `k`'s subdirectory | none | 404 version, no such file, a tombstoned version (no url) give `None` | Returns the bytes as served, and judges nothing: the engine hashes them against the set's digest. Never builds a URL itself, and a staged file has no URL, so staged bytes are never returned. The URL's origin is checked against configuration (section 10). |
 | `newest(g, ch, name)` | `GET /packages/{n}` (versions, newest first, yanked and takedown-tombstoned included), one sparse-index read for the digests, and the per-version record for any version the index does not show yet | none | see rules below | A read of committed state; compares nothing. |
@@ -316,7 +331,10 @@ makes the failure impossible to miss, and (1) with (2) as the fix.
   open-group slots of the actor until then, which is an operational note for the staged shape: validation can
   take minutes, and a failed run that does not reach `abort` (a killed job) leaves its group open. Runbook: a
   refusal for the open-group cap ends the wave `REFUSED`; the operator aborts the stale groups
-  (`ucdk release abort`) and reruns.
+  (`ucdk release abort`, which loads the run's sealed set and so can address each group, 7.4) and reruns. The
+  same command is the answer to `overlap_refused`: the same actor's open group of another set holds the
+  number, `stage` answers `Duplicate`, the engine's observe reads `Absent` and the action ends
+  `INDETERMINATE`; the operator runs `ucdk release abort` for the run that staged the other set, then reruns.
 
 ## 7. Validate, commit, lost answers, abort and yank
 
@@ -331,19 +349,25 @@ the staged set provable, and to say plainly what it cannot do.
   digest. That is also what the project's own release flow does with `mopm publish --staged <dir>
   --no-commit`: it tests the files in the staged directory and checks them against the plan.
 - **What ties the validated bytes to the staged ones.** `observe(k, set)` returns `Staged(held)` only when the
-  group is `open`, lists exactly the declared files of `k`'s member, and every one is `uploaded`; `held`'s
-  digest is the declared `sha256`, which storage verified against the signed checksum at upload (the `PUT` is
-  refused if the bytes differ, and the length is exact). The engine requires that digest to equal the digest
+  group is `open`, lists exactly the declared files of `k`'s member, and every one is `uploaded`. `held`'s digest
+  is the declared `sha256`: the group read reports what the caller declared, and its `uploaded` flag is a size
+  check of the stored object, not a hash. What binds the declared digest to the stored bytes is elsewhere: the
+  upload URL signs `x-amz-checksum-sha256` and the length, so storage refuses a `PUT` whose bytes differ, the
+  quarantine key derives from the group and the digest, and the registry's validator hashes the quarantined
+  bytes again before it copies them. The engine requires that digest to equal the digest
   of the member it validated, once after the stage (its S4) and again immediately before the commit (its
   commit step 2). So the chain is: the tests ran on local bytes with digest D, the registry holds stored bytes
   with digest D, the commit publishes those, and the read-back fetches the published bytes and hashes them to
   D again.
-- **What it does not prove.** It does not prove that nobody replaced a staged file between the last
-  observe and the commit: mopm gives no way to read the staged object, and the only writer is the holder of the
-  actor's token and of an upload URL that lives at most 300 seconds and is not issued again for a file that is
-  held. The window is one request wide, and the read-back after the commit is what notices a substitution (too
-  late to prevent it, in time to refuse a smoke and yank). The manual run checks that a held file is not
-  offered a URL by a repeat create.
+- **What it does not prove.** It does not prove that the staged object still holds the declared bytes at the
+  moment of the commit: mopm gives no way to read it, and the writers are the holder of the actor's token (any
+  token of the actor can read, abort and commit the group, section 9) and the holder of an upload URL, which
+  lives at most 300 seconds and is not issued again for a file that is held. Even a replaced object is not
+  published under the declared digest: the copy step hashes the quarantined bytes against the declared `sha256`
+  and fails the group on a mismatch, which burns the numbers (`failed`, 7.2) instead of publishing other bytes.
+  So the exposure is a burned version, not a published substitution, and the read-back after the commit still
+  fetches the published bytes and the engine hashes them. The manual run checks that a held file is not offered
+  a URL by a repeat create.
 - A group in `validating` or later is not `Staged`: its package records are not readable yet, so `observe`
   says `Absent` for it, which is the lost-answer window of 7.3.
 
@@ -414,7 +438,17 @@ stages again and the identical create resumes the same group.
 
 ### 7.4 Abort
 
-`abort(g, ks)` computes the group id and sends `DELETE`. The engine calls it when validation fails (section
+`abort(g, set)` takes the declared set of the action whose staged state is given back, as `observe(g, k, set)`
+and `commit` do. It cannot take coordinates alone: the group id is `grp_` plus a hash of the actor and, for every
+declared file, its subdirectory, file name, `sha256` and `size`, and a coordinate carries none of those. mopm has
+no lookup by set and no list route, and a staged group is invisible to `getVersion`, so nothing but the set
+addresses it. The publisher computes the id, checks the grant covers every coordinate of `set`, and sends
+`DELETE`. The set is exact: another set is another group (a 404, so `Ok` and nothing given back).
+
+The engine always has the set. A Publish action's sealed set is in its store and the ledger's records name it by
+hash, so the engine's abort after a failed validation passes it, and `ucdk release abort` in a fresh process
+loads it the same way (release.md, "What abort does") and passes its items. A local record of group ids stays
+rejected (decision 1): the set is already the record. The engine calls `abort` when validation fails (section
 17) and from `ucdk release abort`:
 
 | mopm answer | Publisher answer |
@@ -487,7 +521,7 @@ verifies the token); the guard catches our own mistakes. What the kit's private 
   set, reads the group, and reads the package record, and combines them: package record found wins; otherwise a
   group that is `open`, lists exactly the declared files of `k`'s member (the same subdirectory, file name,
   digest and size as `set` declares), and has every one `uploaded` gives `Staged(held)`, the digest being the
-  declared one that storage verified at upload; otherwise `Absent`. A group read that lists files other than
+  declared one (7.1 says what binds it to the stored bytes); otherwise `Absent`. A group read that lists files other than
   the declared ones is a broken response (`Permanent`, "malformed"), because the id is a function of the set.
   A group that is `validating` or later is not `Staged` (7.1). Both reads use the same grant and no other call
   is made. A non-empty `set` lacking `k` is `Refused(Reason::Channel)`.
@@ -517,8 +551,8 @@ verifies the token); the guard catches our own mistakes. What the kit's private 
 
 `Grant` is opaque and carries a secret and an expiry. mopm has one token scope that matters (`publish`, for
 exact `(name, version)` pairs) and no phases, so the stage, commit and read phases are mapped as follows.
-Every token is publish-capable for its exact pairs, for stage, commit and yank alike; the phase is a label
-in the envelope, not something the server checks until M10.
+Every token is publish-capable for its exact pairs at create, and for the actor's groups afterwards, for stage,
+commit and yank alike; the phase is a label in the envelope, not something the server checks until M10.
 
 **Threat model.** Phase separation here guards the engine against its own bugs (a stage grant used to
 commit, a read grant used to write). It does not stop a holder of the token, who can call mopm directly.
@@ -531,7 +565,7 @@ Which envelope authorises which verb:
 
 | Phase | Identity presented | Allows |
 |---|---|---|
-| Stage | publish-scope token, exact pairs | group read, create, upload, abort |
+| Stage | publish-scope token (exact pairs at create; the actor's groups after) | group read, create, upload, abort |
 | Commit | publish-scope token (a fresh exchange) | commit, poll, yank, group read |
 | Read | `Grant::none()` always | package reads only |
 
@@ -565,8 +599,11 @@ Rules, each checked client-side first and refused as `GrantRefused(...)` with no
   discipline, not server enforcement, until M10.
 - **Coverage per coordinate.** Every coordinate of the call must appear, by all five fields, in the
   envelope's list. One missing coordinate, not just the first, is `Denied`. A yank also needs every held
-  sibling of its version covered (section 7). The server independently binds the token to exact
-  `(name, version)` pairs, at most 100 distinct package names (`grant_limit`).
+  sibling of its version covered (section 7); an abort needs every coordinate of its set covered. At create the
+  server binds the token to exact `(name, version)` pairs, at most 100 distinct package names (`grant_limit`).
+  That is the only place it does: the group read, abort and commit require the `publish` scope and the actor,
+  so any publish-scope token of the same actor can read, abort or commit the group, and a token that acts for
+  an account is narrowed by package name, not by version.
 - **Expiry.** A grant whose `expires_ms` is at or before the injected clock's now is `Expired`, checked
   before every authenticated request and not only at call entry. A 401 `token_expired` from mopm is
   `Expired` before commit is sent and `Unknown` after. An unknown or revoked token is `Denied`.
@@ -611,9 +648,12 @@ call at a time**, not the whole publish, and the call must not outlive either:
   (5 seconds). A holder whose lease lapses mid-call is stale: its next fenced ledger write fails, and
   another holder may already have taken over.
 
-The time between the calls (a validation that runs for minutes) spends neither clock: the engine exchanges
-the commit grant after validation, and a fresh stage-phase grant for an abort. That is the gain of the
-staged shape over a single long call: the upload gets the whole bound, and so does the wait for visibility.
+The time between the calls (a validation that runs for minutes) spends neither token clock: the engine exchanges
+the commit grant after validation, and a fresh stage-phase grant for an abort. It does spend the lease clock
+unless the engine keeps it: the validations of the validate phase run under the same beat and renew rule as a
+Test action (release.md 3.3), and a validation that outlives the lease falls into the stale-holder path below.
+The gain of the staged shape over a single long call is that the upload gets the whole bound, and so does the
+wait for visibility.
 
 The budgets, from `Config`:
 
@@ -726,16 +766,27 @@ handed to the publisher at construction) and is a decision for the seam owners (
 20. **`on_overlap: refuse` is always sent; a registry that does not honour it is a requirement proven by the
     manual run, and a `superseded` list under `refuse` is refused as a contradiction (section 6).** Why: the
     create answer has no positive marker of honour, so a runtime check would be a claim with nothing behind it.
-21. **Validation reads the engine's local sealed set, tied to the staged one by the digest `observe` reports,
-    because mopm exposes no read of staged bytes (section 7.1).** Why: it is the only evidence available and
-    the read-back closes the chain. Alternative: ask mopm for a read of staged bytes (a new surface, a new
-    way to leak unreleased bytes, for a check the digest already makes).
+21. **Validation reads the engine's local sealed set, proven identical to the staged one by the digest
+    `observe` reports, because mopm exposes no read of staged bytes (section 7.1).** Why: it is the only
+    evidence available and the read-back closes the chain. Alternative: ask mopm for a read of staged bytes (a
+    new surface, a new way to leak unreleased bytes, for a check the digest already makes). The phase is a slot
+    the maintainers' direction asks for; what runs in it, and what it costs, is question 8.
+22. **`abort` takes the declared set, not coordinates (sections 7.4 and 17).** Why: the group id covers each
+    declared file's digest and size, mopm has no lookup by set, and a staged group is invisible to every read
+    that takes a coordinate; the engine holds the set. Alternatives: a mopm route that lists the actor's open
+    groups (a new surface, and it still needs a rule for which group is ours); a local record of group ids (a
+    second source of truth, rejected in decision 1).
+23. **A green kit run is held to an exact list of skipped scenarios.** Why: a rig that declares only a
+    group-addressed shape skips most of the kit today (section 12), and a skip is not a pass; the rig's test pins
+    the skipped names and a floor on the passed ones, so a change that skips more fails here.
 
 ## 15. PR plan
 
 Each PR is small, passes `cargo xtask check` and the 99% line and branch coverage bar for the crates it
 touches, and ships tests that failed first for any fix.
 
+0. **Seam and kit (the seam owners).** `abort` takes the declared set, the `stages()` comment, and the kit
+   scenarios on a group-addressed channel (section 17). PR 2 needs the signature; PR 6 needs the scenarios.
 1. **Skeleton and mapping types.** Crate manifest (not `pure`), licence headers, `Config` (no default
    registry, `Roots::Bundle` only, `lease_ttl` and the construction-time budget check, per call: stage,
    commit, abort), `Transport` trait and types, `Secret` types, coordinate-to-member mapping with mopm's
@@ -749,10 +800,11 @@ touches, and ships tests that failed first for any fix.
 2. **Stage and abort.** The group id (computed from the actor and the set, pinned by the vectors of
    mopm#261), the group read, `stage` (read, create with `on_overlap: refuse`, the `reserving` repeat,
    uploads of the files not held, the id check, every `group_conflict` reason's class, the `superseded`
-   contradiction) and `abort` (the table of 7.4). Starts when mopm#261 has merged, so the wire contract is
-   frozen by its tests. Tests on a hand-built fake `Transport`: a repeat of the same set resumes and uploads
-   nothing held, a different set sharing a member is refused and ends nothing, a lost create answer, an
-   expired upload URL, every table row.
+   contradiction) and `abort` (the table of 7.4, taking the set). Unblocked on the mopm side (mopm#261 has merged) and needing PR 0 for the signature; the wire
+   contract is frozen by its tests. Tests on a hand-built fake `Transport`: a repeat of the same set resumes and
+   uploads nothing held, a different set sharing a member is refused and ends nothing, a lost create answer, an
+   expired upload URL, an abort by the staged set deletes the group and an abort by a set that differs in one
+   digest sends a delete for another id and gives nothing back, every table row.
 3. **`observe`, `newest`, `list`.** Package read, the group read for a declared set (`Staged` only for an
    open group listing exactly the declared files, all uploaded), 404 kinds, tombstone mapping (`Burned`,
    `Yanked`), the sparse-index read with its fallback, ambiguity rule, caps. Tests for lag, failed reads never
@@ -767,16 +819,16 @@ touches, and ships tests that failed first for any fix.
    and without the coordinate held, a 400 on commit with the group still open, and the yank refusals (not
    held, uncovered sibling).
 6. **Emulator and rig; kit.** `ucdk-release-mopm-emulator` (section 11), `MopmRig` with the hooks, and
-   `run_publisher_kit` for the staged shape, plus the TCP-stub adapter tests. Lands after kit parts 6 and 7
-   (4g, 4h).
+   `run_publisher_kit` for the staged shape, plus the TCP-stub adapter tests. Lands after kit part 4h (ucdk#47)
+   and the group-addressed scenarios of PR 0; until then its test pins the exact skip list (decision 23), and
+   its coverage claim is that list, not "the kit passes".
 7. **Manual non-production conformance job** script and its documentation: protected environment, manual
    dispatch, the non-production marker check, the overlap probe and the checklist of section 11. Scenarios are
-   marked proven against real mopm only after this run. Needs mopm#261 deployed.
+   marked proven against real mopm only after this run. Needs a deployment that carries mopm#261 (release 0.0.77 or later), which this repository cannot check.
 
 Outside this crate and in this order of need: the engine and machine change of section 5.1 (before any
 multi-platform release); the validate phase of section 17 (before the first release that has tests to run on
-the staged set); the maintainers' M1 (mopm#261), then M6 and M8 (in the same change), then M10, then M3
-(section 13); the yank verb's sibling rule in the engine.
+the staged set); mopm's M10, then M3 (M1, M6 and M8 are in mopm#261, merged; section 13); the yank verb's sibling rule in the engine.
 
 ## 16. Seam owners' answers, what changed, and open questions
 
@@ -793,15 +845,23 @@ from the bytes it gave; `Roots::Bundle(path)` is the only v1 trust source; the s
 
 **What revision 5 changed.** On the maintainers' direction the staged shape is primary: the summary, goals,
 mapping, sections 6 to 9, the scenario table, the decisions and the PR plan are written for stage, validate,
-publish, with abort, and the one-call shape is dropped (decision 1). mopm#260 is live: `group_conflict` is
+publish, with abort, and the one-call shape is dropped (decision 1). mopm#260 is released: `group_conflict` is
 classified by `error.reason` (section 6), `on_overlap` is always `refuse`, and the honoured check is reduced to
-what an answer can show (decision 20, M16). mopm#261 is in review: the group id is computed and the group read
+what an answer can show (decision 20, M16). mopm#261 is merged: the group id is computed and the group read
 makes the staged state observable (sections 3, 4, 8), the manifest hash is neither computed nor sent (decision
 11), and `getVersion` names the group. The lease and token bound is per call (9.3). Section 7.1 says where
 validation reads its bytes and what that proves, and section 17 lists what this changes in the seam (a comment)
 and in the engine documents (the validate phase, the abort after a failed validation, where `committing` is
 written). What earlier revisions established stays: the error classes, lease and token time, grants,
 the read-back hashed by the engine, the multi-platform declared set, burned and yanked handling.
+
+**What revision 6 changed.** `abort` takes the declared set (7.4, decision 22, section 17), because the group id
+covers each file's digest and size. The kit table is re-keyed to the merged kit and the open second part, with
+what runs on a group-addressed channel (section 12, decision 23). mopm#261 is merged and its facts are re-read
+against the merged source; the group-read digest, the token scope (exact pairs at create only) and the
+substitution window are stated as the source has them (7.1, section 9). The validate phase says what it adds
+and costs (question 8), validations under it beat like a Test action (9.3), and the engine edits are made
+consistent (S4, commit step 3, the abort wording).
 
 **Open questions**, each with a recommendation:
 
@@ -831,65 +891,108 @@ the read-back hashed by the engine, the multi-platform declared set, burned and 
    storage verified at upload, without a fetch (the seam text allows it). `decide_publish` then separates
    "same bytes" from "other bytes" on a digest nothing re-checks after the copy. Recommend accepting that for
    the preflight and commit phases, because the read-back fetches and hashes before any success.
-8. **The validate phase (engine owners).** Which validation kind a Publish action may hold that runs on the
-   staged set, and its place in `machine.validation_placement`. Recommend one kind that reads only the engine's
-   local set (never the channel), so the same kind serves a staging channel (run after S4) and a non-staging one
-   (run before the commit), and that the project's tests of the set are what it runs.
+8. **The validate phase: what it adds and costs (engine owners, maintainers).** A validation that reads only the
+   sealed set, as `SET_CLOSURE` does, is the same function before and after the stage, so it stays in the
+   preflight: after the stage it adds a digest tie that S4 already checks, and costs an open-group slot, a
+   daily file-allowance charge per attempt, the group deadline (12 hours by default, configurable up to 18) and
+   an abort. The phase earns its place only for a validation too costly to run before the registry has accepted
+   the set and reserved the numbers: the project's own flow tests the exact staged files between stage and
+   commit, and that is the kind the slot is for. No such kind is defined in `machine.validation_placement`
+   today, so nothing runs in the phase yet. Recommend one kind, named targets run against the sealed files (it
+   reads only the engine's local set, never the channel), placed after the stage, and that the engine enters
+   the phase only when a machine declares one, so no attempt pays the cost for nothing.
 9. **The abort after a failed validation (engine owners).** Recommend the engine exchanges a fresh stage-phase
    grant for it (the stage grant is dropped at S4 because a validation may outlast its life), counts it outside
    `Publish.attempts`, and reports the abort's `InFlight` or failure as staged state left for
    `ucdk release abort`.
-10. **`stages()` wording (seam owners).** Recommend rewording its comment to name staging as the primary shape
-    and `false` as the declared capability, with no change of signature and no default (section 17).
+10. **`stages()` wording (seam owners).** Recommend rewording its comment, and the copy in release.md 4.3, to
+    name staging as the primary shape and `false` as the declared capability, with no change of signature and
+    no default (section 17).
 11. **A marker of `on_overlap` honoured (maintainers).** Recommend asking for the create answer to echo the
     value it applied (M16, section 13); until then the manual run's probe is the only proof.
+12. **`abort` takes the set (seam owners).** The signature change of section 17, with the fake, the kit's abort
+    scenarios and the engine's call sites. Recommend yes, as its own pull request before PR 2. The alternative,
+    a mopm route that lists the actor's open groups, would still need a rule for which group is ours.
+13. **Group-addressed scenarios in the kit (seam owners).** Recommend the scenarios of section 17 item 3, and a
+    kit rule that a rig whose declared shapes leave most scenarios skipped is reported, not green.
 
-## 17. What this changes in the seam
+## 17. What this changes in the seam, the kit and the engine documents
 
 The maintainers' direction is that stage, validate, publish, with abort, is the shape the seam and the engine
 express first, and that a channel that cannot stage is the special case. This section says what that needs, by
 reading `crates/ucdk-release-seams/src/publisher.rs` and `grant.rs` on `main` and sections 4.3 to 5.3 of
-[release.md](release.md).
+[release.md](release.md). Most of the shape is already there. One signature is not right for it.
 
-**The seam: one comment, nothing else.**
+**The seam: one signature and one comment.**
 
-- The trait already models the shape. `stages()`, `stage`, `commit` and `abort` exist; `Presence::Staged(Held)`
-  is "held by the registry and not readable by a stranger"; `StageAnswer::Staged | Duplicate`; and
-  `observe(g, k, set)` takes the declared set precisely so that a registry that addresses staged state by a
-  group derived from the whole set (mopm) can answer "staged with our digest". No signature changes, and no new
-  verb is needed for validation: it is the engine's step and reads the engine's own set.
-- **`stages()`: reword its doc comment, keep it required.** Today it reads "True if the channel holds staged
+- The trait already models the shape: `stages()`, `stage`, `commit` and `abort`; `Presence::Staged(Held)` is
+  "held by the registry and not readable by a stranger"; `StageAnswer::Staged | Duplicate`; and `observe(g, k,
+  set)` takes the declared set so that a registry that addresses staged state by a group derived from the whole
+  set can answer "staged with our digest". No new verb is needed for validation: it is the engine's step and
+  reads the engine's own set.
+- **`abort` takes the declared set (the one signature change).** Today it is `abort(g, ks: &[Coordinate])`, and
+  a `Coordinate` has no digest or size. A registry that addresses staged state by a group derived from the
+  whole set cannot find its group from coordinates: mopm's group id covers every declared file's `sha256` and
+  `size`, has no lookup by set, and hides a staged group from every coordinate read (7.4). The change is
+  `abort(&mut self, g: &Grant, set: &[StageItem<'_>])`, with the doc "gives back the staged state of the action
+  whose declared items are `set`; never touches a committed coordinate", the same set `observe` and `commit`
+  take. An empty set gives back nothing and answers `Ok`. For a registry that addresses by coordinate the items
+  carry their coordinates, so nothing is lost. It touches `crates/ucdk-release-fake/src/registry.rs`, the fake's
+  tests, the kit's abort scenarios and the rigs' wrappers (`publisher.rs`, `publisher_more.rs`,
+  `publisher_shapes.rs` of the kit and the rigs under `ucdk-release-fake/tests/rigs`), and the engine's call
+  sites, and is its own pull request before PR 2 (section 15). The kit scenario that aborts a committed and a
+  staged coordinate together (`abort_gives_staged_state_back_and_never_touches_a_committed_coordinate`) names a
+  set no group-addressed registry can hold, since a group commits all or none; a group-addressed variant stages
+  one set, commits another, and aborts the staged set.
+- **`stages()`: reword its doc comment, keep it required.** It reads today "True if the channel holds staged
   bytes that are not yet readable. False: `stage` and `abort` are never called and `commit` carries the bytes."
   That is accurate; the change is to say that staging is the primary shape and `false` is the declared
   capability of a channel that cannot stage. It stays a required method with no default: a default of `true`
   would let a channel that cannot stage inherit a claim it cannot keep, and a default of `false` would make
-  the special case the default, which is what the direction reverses.
-- **No read of staged bytes is added.** A registry that exposed one could let validation read the channel's
-  copy; mopm exposes none, and the digest tie of 7.1 (the staged digest equals the digest of the member the
-  engine validated, checked at S4 and again at the commit) is what the seam already supports. `fetch` of a
-  staged coordinate stays "nothing for a stranger".
-- **The kit** needs no new scenario for the shape: rows 2 to 9 and 27 to 30 of section 12 are the stage,
-  observe, commit and abort contract, and the mopm rig declares only `{stages: true}`. The kit's helpers that
-  make a non-staging rig run the same fixtures stay for the channels that need them.
+  the special case the default, which is what the direction reverses. The same comment is copied in release.md
+  4.3, and the copy changes with it.
+- **No read of staged bytes is added.** mopm exposes none, and the digest tie of 7.1 is what the seam already
+  supports. `fetch` of a staged coordinate stays "nothing for a stranger".
 
-**The engine documents (`release.md`), proposed in this change:**
+**The kit: what main runs for a group-addressed channel, and what must be added.**
+
+- On `main` (ucdk#45) every scenario but the declarations check is gated by `plain_shapes`, which drops a
+  group-addressed shape (`!s.private && !s.group_addressed`) through `needs_a_plain_channel`, `needs_staging`,
+  `needs_no_staging` and the gates built on them. A rig that declares only `{stages: true, group_addressed:
+  true}`, which is mopm's rig, runs one of 30 scenarios. In the open second part (ucdk#47) the scenarios gated
+  by a grouped shape (five, all about observe), by any shape (three grant scenarios), by a public shape (one)
+  and the declarations check also run: ten of 46. The rest are skipped, and a skip is not a pass. This is
+  counted from the gates, not by running a rig.
+- Most staging scenarios already observe with the set (`observed`) and are not about reading by coordinate
+  alone, so the plain gate excludes them for no reason of their own. The seam owners' kit work is: (1) run the
+  stage, observe-with-set, commit, abort, lost-answer, duplicate and set scenarios of section 12 on every
+  declared staging shape, grouped ones included, keeping the plain gate only for scenarios that read by
+  coordinate alone (`observed_alone`); (2) add the group-addressed abort variant above; (3) report a rig that
+  leaves most of the kit skipped. Until then the mopm rig's own test pins the skip list (decision 23).
+
+**The engine documents (`release.md`), changed in this pull request:**
 
 1. **A validate phase between the stage phase and the commit phase (5.2).** After S4 the engine runs the Publish
-   action's staged-set validations on its own sealed set (verified as in the preflight), tied to the staged set
-   by the digest S4 already requires. A failure ends the action `VALIDATION_FAILED` before anything is public.
-   Today 5.2 says a kind that needs staged state "is not part of v1" and that a failed validation never leaves
-   staged state; both change.
-2. **The abort after a failed validation is the engine's, not only `ucdk release abort`'s.** It uses a fresh
-   stage-phase grant, because S4 drops the stage grant (a validation may outlast its ten minutes), and each
-   intent is removed once an observe shows `Absent` (5.2, 5.3).
-3. **`committing` is written after validation, not at S4.** The intent's `phase=committing` means "a commit may
-   have started", so it is rewritten when the validate phase has passed, immediately before the commit phase.
-4. **A non-staging channel runs the same validations on the local set before its commit**, with no abort, so
+   action's staged-set validations on its own sealed set (verified as in the preflight), proven to be the
+   staged one by the digest S4 already requires. A failure ends the action `VALIDATION_FAILED` before anything
+   is public. Today 5.2 says a kind that needs staged state "is not part of v1" and that a failed validation
+   never leaves staged state; both change. Question 8 says what the phase adds and what it costs.
+2. **The abort after a failed validation is the engine's, not only `ucdk release abort`'s.** It uses a newly
+   exchanged stage-phase grant, because S4 drops the stage grant (a validation may outlast its ten minutes),
+   passes the action's declared set, and each intent is removed once an observe shows `Absent` (5.2, 5.3).
+3. **`ucdk release abort` loads the set.** It reads the stage's sealed set from the store (the set document at
+   the generation the `stage` record names, 4.2), verifies it as the preflight does, and passes its items to
+   `abort`; a stage whose set cannot be loaded or verified is refused, not guessed at.
+4. **`committing` is written after validation, not at S4.** The intent is written `phase=staging` at S2 and
+   rewritten `committing` when the validate phase has passed, immediately before the commit phase; commit step
+   3 says so.
+5. **A non-staging channel runs the same validations on the local set before its commit**, with no abort, so
    the validation step does not depend on the channel's capability.
-5. **4.3 and PR 14 (11):** the first real publisher has `stages() == true`; the revision-4 text that made it
-   `false` first is reverted.
-6. **The ambiguity table (5.3)** gains the failed validation, and the interrupted run re-checks the digest
-   tie by its observe and skips a validation already `Confirmed` for the same set (5.4).
+6. **4.3 and PR 14 (11):** the trait listing carries the new `abort` signature and the reworded `stages()`
+   comment; the first real publisher has `stages() == true`; the revision-4 text that made it `false` first is
+   reverted.
+7. **The ambiguity table (5.3)** gains the failed validation, and the interrupted run re-checks the digest tie
+   by its observe and skips a validation already `Confirmed` for the same set (5.4).
 
 Not decided here, and asked of the engine owners (section 16, questions 8 and 9): the validation kind and its
-placement rule, and the abort's grant and attempt accounting. The seam is unaffected by either.
+placement rule, and the abort's attempt accounting.
