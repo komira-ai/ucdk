@@ -775,3 +775,156 @@ mod grouped {
         assert_eq!(w.registry.read_log(), [Read::Group, Read::Index]);
     }
 }
+
+/// The standard coordinate with its name and version replaced.
+fn named(name: &str, version: &str) -> Coordinate {
+    Coordinate {
+        name: name.to_owned(),
+        version: version.to_owned(),
+        ..coordinate("a")
+    }
+}
+
+/// Stages `c` with `bytes` under its own stage grant.
+fn stage_one(w: &mut World, c: &Coordinate, bytes: &[u8]) -> Result<StageAnswer, SeamError> {
+    let g = w.grant(GrantPhase::Stage, std::slice::from_ref(c));
+    let (blob, held) = (
+        Blob {
+            name: c.name.as_str(),
+            bytes,
+        },
+        held(),
+    );
+    let item = StageItem {
+        coordinate: c,
+        file: &blob,
+        held: &held,
+    };
+    w.registry.stage(&g, &[item])
+}
+
+#[test]
+fn coordinates_that_differ_only_where_a_slash_falls_are_two_coordinates() {
+    let (one, other) = (named("a", "b/c"), named("a/b", "c"));
+    let mut w = World::new();
+    assert_eq!(stage_one(&mut w, &one, b"one"), Ok(StageAnswer::Staged));
+    let (blob, held) = (
+        Blob {
+            name: "a",
+            bytes: b"one",
+        },
+        held(),
+    );
+    let item = StageItem {
+        coordinate: &one,
+        file: &blob,
+        held: &held,
+    };
+    let g = w.grant(GrantPhase::Commit, std::slice::from_ref(&one));
+    assert_eq!(w.registry.commit(&g, &[item]), Ok(CommitAnswer::Committed));
+    let none = Grant::none();
+    assert!(matches!(
+        w.registry.observe(&none, &one, &[]),
+        Ok(Presence::Present(_))
+    ));
+    assert_eq!(w.registry.fetch(&none, &one), Ok(Some(b"one".to_vec())));
+    assert_eq!(w.registry.observe(&none, &other, &[]), Ok(Presence::Absent));
+    assert_eq!(w.registry.fetch(&none, &other), Ok(None));
+    assert_eq!(w.registry.bytes(&other), None);
+}
+
+#[test]
+fn a_grant_for_one_coordinate_does_not_stage_another_that_differs_where_a_slash_falls() {
+    let (one, other) = (named("a", "b/c"), named("a/b", "c"));
+    let mut w = World::new();
+    let g = w.grant(GrantPhase::Stage, std::slice::from_ref(&one));
+    let (blob, held) = (
+        Blob {
+            name: "a/b",
+            bytes: b"other",
+        },
+        held(),
+    );
+    let item = StageItem {
+        coordinate: &other,
+        file: &blob,
+        held: &held,
+    };
+    assert_eq!(
+        w.registry.stage(&g, &[item]),
+        Err(SeamError::GrantRefused(GrantFault::Denied))
+    );
+    assert!(!w.registry.is_staged(&other));
+    assert!(!w.registry.is_staged(&one));
+}
+
+#[test]
+fn a_grant_covers_a_coordinate_whose_fields_hold_line_breaks_and_nothing_else() {
+    let broken = named("a\nb", "c\n1:d");
+    let mut w = World::new();
+    assert_eq!(stage_one(&mut w, &broken, b"x"), Ok(StageAnswer::Staged));
+    assert!(w.registry.is_staged(&broken));
+    // The pieces a line-splitting reader would see are not coordinates the grant covers.
+    for piece in [named("a", "c"), named("b", "c"), named("a", "b")] {
+        let g = w.grant(GrantPhase::Stage, std::slice::from_ref(&broken));
+        let (blob, held) = (
+            Blob {
+                name: "n",
+                bytes: b"y",
+            },
+            held(),
+        );
+        let item = StageItem {
+            coordinate: &piece,
+            file: &blob,
+            held: &held,
+        };
+        assert_eq!(
+            w.registry.stage(&g, &[item]),
+            Err(SeamError::GrantRefused(GrantFault::Denied))
+        );
+    }
+}
+
+#[test]
+fn a_grant_for_a_repository_whose_location_holds_a_line_break_is_for_that_repository_only() {
+    let mut w = World::new();
+    w.repository.location = format!("{LOCATION}\nstable");
+    let one = coordinate("a");
+    assert_eq!(
+        stage_one(&mut w, &one, b"a"),
+        Err(SeamError::GrantRefused(GrantFault::Denied))
+    );
+    assert!(!w.registry.is_staged(&one));
+}
+
+#[test]
+fn a_secret_that_is_not_a_run_of_whole_texts_covers_nothing() {
+    let mut w = World::new();
+    let whole = format!("5:stage{}:{LOCATION}", LOCATION.len());
+    let read = |w: &mut World, secret: &str| {
+        let g = Grant::issued(secret.as_bytes().to_vec(), u64::MAX);
+        w.registry.newest(&g, "stable", "a")
+    };
+    // The same secret, whole, is a stage grant of this repository.
+    assert_eq!(read(&mut w, &whole), Ok(Vec::new()));
+    // Each of these breaks the framing: a text cut short, a length that is no number, no
+    // length, and a length with no text.
+    for broken in [
+        format!("{whole}3:ab"),
+        format!("{whole}x:1"),
+        format!("{whole}abc"),
+        format!("{whole}3:"),
+    ] {
+        assert_eq!(
+            read(&mut w, &broken),
+            Err(SeamError::GrantRefused(GrantFault::Denied)),
+            "{broken}"
+        );
+    }
+    let g = Grant::issued(b"\xff:1".to_vec(), u64::MAX);
+    assert_eq!(
+        w.registry.newest(&g, "stable", "a"),
+        Err(SeamError::GrantRefused(GrantFault::Denied))
+    );
+}
