@@ -318,6 +318,14 @@ impl FakeRegistry {
         self.faults.lose_staged_state = true;
     }
 
+    /// The staged state of `coordinates` vanishes, as it does at a registry that drops a
+    /// reservation after answering a refusal.
+    pub fn drop_staged(&mut self, coordinates: &[Coordinate]) {
+        for coordinate in coordinates {
+            self.staged.remove(&coordinate_key(coordinate));
+        }
+    }
+
     /// `coordinate` is staged by another writer, with `bytes`. A stage over it answers
     /// `Duplicate`; an observe finds `Absent`, the staged state of another writer being held
     /// where the grant cannot see it, unless `others_staged_visible` is called.

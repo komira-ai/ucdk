@@ -1,49 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
-//! The self-test of the publisher kit, first part: for every scenario a stub of the registry that
-//! breaks the promise it holds and is failed by it, further stubs, each a wrong implementation that
-//! fails exactly the scenarios its row names, the declarations a rig can get wrong, and a rig that can build one kind of
-//! channel only, which must skip exactly the scenarios that need another and fail every stub of the
-//! ones it still runs.
+//! The self-test of the publisher kit: for every scenario a stub of the registry that breaks the
+//! promise it holds and is failed by it, further stubs, each a wrong implementation that fails
+//! exactly the scenarios its row names, the declarations a rig can get wrong, a rig that can build
+//! one kind of channel only, which must skip exactly the scenarios that need another and fail
+//! every stub of the ones it still runs, and a rig of public channels only, which must skip the
+//! scenarios about private and grouped ones.
 
 mod rigs;
 
-use rigs::publisher::{FakePublisherRig, Flaw, Hook};
+use rigs::publisher::{FakePublisherRig, Flaw};
+use rigs::publisher_flaw::{Bad, Behind, Call, Hook};
+use rigs::publisher_lax::{
+    Defect, Holder, Kind, Lax, Verb, coverage_of_two, field_blind, on_shapes,
+    others_committed_blind, others_staged_seen, partial_coverage, read_grant_writes,
+    read_grants_see_staged, strangers_let_in, writer_grants_on_reads, writers_see_staged,
+};
 use rigs::publisher_more::{Field, More, MoreRig};
+use rigs::publisher_names::*;
 use rigs::{further_stubs_fail_exactly, names};
 use ucdk_release_seams::kit::{ChannelShape, Report, publisher_scenarios, run_publisher_kit};
-
-const OBSERVE_ABSENT: &str = "observe_absent_is_not_an_error";
-const STAGE_OBSERVE: &str = "stage_then_observe_returns_staged_with_the_same_digest";
-const STRANGER_STAGED: &str = "a_staged_coordinate_is_not_readable_by_a_stranger";
-const STAGE_GRANT: &str = "a_stage_grant_observes_the_staged_state_it_made";
-const COMMIT_GRANT: &str = "a_commit_grant_observes_it_too";
-const COMMIT_READABLE: &str = "commit_makes_the_staged_coordinates_readable_with_the_same_digest";
-const STAGE_PRESENT: &str = "stage_of_present_same_is_duplicate_and_changes_nothing";
-const COMMIT_OVER: &str = "commit_over_present_different_leaves_old_bytes";
-const ABORT: &str = "abort_gives_staged_state_back_and_never_touches_a_committed_coordinate";
-const SET_COMMIT: &str = "a_set_commit_makes_every_coordinate_readable_or_none";
-const NOT_STAGE_BYTES: &str = "a_channel_that_does_not_stage_commits_with_the_bytes";
-const NO_DIGEST: &str = "no_digest_exposed_is_refused";
-const YANK: &str = "yank_keeps_bytes_fetchable";
-const YANKED_COMMIT: &str = "yanked_coordinate_cannot_be_committed_again";
-const LOST: &str = "lost_answer_is_resolvable_by_observe";
-const LIST: &str = "list_may_lag_but_observe_is_exact";
-const SECOND_COMMIT: &str = "a_second_commit_of_the_same_bytes_is_duplicate";
-const OWN_STAGED: &str = "a_stage_over_ones_own_staged_coordinate_is_duplicate";
-const COMMIT_CARRIES: &str = "a_commit_carries_exactly_what_was_staged";
-const DUPLICATE_SET: &str = "a_duplicate_answer_leaves_every_coordinate_of_the_set_as_it_was";
-const NAMED_TWICE: &str = "a_set_that_names_a_coordinate_twice_is_refused";
-const WRITER_READS: &str = "a_stage_or_commit_grant_reads_no_staged_state_but_through_observe";
-const NOT_STAGING: &str = "a_channel_that_does_not_stage_creates_a_coordinate_once";
-const VANISHED: &str =
-    "a_commit_of_staged_state_that_vanished_is_not_committed_and_a_restage_works";
-const BECOMING: &str = "a_retry_of_a_commit_that_is_becoming_readable_is_committed_or_duplicate_and_never_a_second_write";
-const UNREPRESENTABLE: &str =
-    "a_coordinate_the_channel_cannot_hold_is_refused_before_anything_is_sent";
-const SEALED: &str = "a_sealed_version_refuses_a_later_platform_and_observes_it_absent";
-const BURNED: &str = "a_burned_coordinate_is_neither_absent_nor_present_nor_committable";
-const ECHO: &str = "a_registry_that_echoes_the_declared_digest_fails_readback";
-const DECLARES: &str = "the_declarations_of_a_rig_hold_of_what_it_builds";
 
 /// A wrong rig that is not one registry flaw: a declaration that is not true, or a registry
 /// that does what the rig says it does not.
@@ -108,15 +83,21 @@ fn run(stub: Stub) -> Report {
     run_on(FakePublisherRig::conforming(), stub)
 }
 
+/// The stub behind the channels of one kind only, on a rig that declares every shape: the channels
+/// of the other kinds are the conforming fake.
+fn run_behind(stub: Stub, behind: Behind) -> Report {
+    let base = FakePublisherRig::conforming();
+    match stub {
+        Stub::Flaw(flaw) => run_publisher_kit(&base.with_flaw_behind(flaw, behind)),
+        Stub::More(more) => run_publisher_kit(&MoreRig::flawed_behind(base, more, behind)),
+        other => panic!("{other:?} is not a stub of one channel"),
+    }
+}
+
 /// The stub behind the channels that do not stage only, on a rig that declares both shapes: the
 /// channel that stages is the conforming fake.
 fn run_behind_the_channel_that_does_not_stage(stub: Stub) -> Report {
-    let base = FakePublisherRig::conforming();
-    match stub {
-        Stub::Flaw(flaw) => run_publisher_kit(&base.with_flaw_only_unstaged(flaw)),
-        Stub::More(more) => run_publisher_kit(&MoreRig::flawed_only_unstaged(base, more)),
-        other => panic!("{other:?} is not a stub of one channel"),
-    }
+    run_behind(stub, Behind::Unstaged)
 }
 
 fn own(scenario: &'static str, stub: Stub) -> (&'static str, Stub) {
@@ -143,6 +124,22 @@ fn own_stubs() -> Vec<(&'static str, Stub)> {
         own(YANKED_COMMIT, Stub::Flaw(F::CommitOverYankedCommits)),
         own(LOST, Stub::Flaw(F::ObserveAfterALostAnswerIsAbsent)),
         own(LIST, Stub::Flaw(F::ObserveReadsTheLaggingList)),
+        own(PUBLIC_READ, Stub::Flaw(F::AnonymousFetchIsDenied)),
+        own(FOREIGN, Stub::Flaw(F::AForeignGrantIsAccepted)),
+        own(PHASE, Stub::Flaw(F::TheWrongPhaseIsAccepted)),
+        own(EXPIRED, Stub::Flaw(F::AnExpiredGrantIsAccepted)),
+        own(NEWEST, Stub::Flaw(F::NewestDropsYanked)),
+        own(STAMP, Stub::Flaw(F::TheStampIsDropped)),
+        own(OTHERS_OBSERVE, Stub::Flaw(F::GrantedObserveIsBlindToOthers)),
+        own(GROUP_THEN_INDEX, Stub::Flaw(F::IndexIsReadBeforeTheGroup)),
+        own(ANOTHER_GROUP, Stub::Flaw(F::GroupedObserveIsBlindToOthers)),
+        own(FAILED_READ, Stub::Flaw(F::FailedGroupReadIsAbsent)),
+        own(DECLARED_SET, Stub::Flaw(F::TheDeclaredSetIsDropped)),
+        own(EMPTY_SET, Stub::Flaw(F::AnEmptySetSeesStagedState)),
+        own(READ_GRANT, Stub::Flaw(F::AReadGrantMayWrite)),
+        own(RACE, Stub::Flaw(F::ARacedCommitOverwrites)),
+        own(TRANSIENT, Stub::Flaw(F::TransientAfterCommitIsPermanent)),
+        own(DUP_OTHER, Stub::Flaw(F::StageOverOtherBytesIsStaged)),
         own(
             SECOND_COMMIT,
             Stub::Flaw(F::SecondCommitOfTheSameBytesIsCommitted),
@@ -175,6 +172,83 @@ fn own_stubs() -> Vec<(&'static str, Stub)> {
     ]
 }
 
+/// Every write that takes a bad grant for a good one, in every way a grant is bad.
+fn every_bad_grant_taken_by_a_call() -> Vec<(Call, Bad)> {
+    let mut all = Vec::new();
+    for bad in [Bad::Foreign, Bad::Expired, Bad::Uncovered] {
+        for call in [Call::Stage, Call::Commit, Call::Abort, Call::Yank] {
+            all.push((call, bad));
+        }
+    }
+    all
+}
+
+/// The scenarios that fail a stub that is lax about a grant on one verb, field or shape of
+/// channel: the one about the defect of the grant, or the one about a read grant for a read.
+fn held_by_the_lax_stub(stub: More) -> &'static [&'static str] {
+    match stub {
+        More::GrantBlindToField(..) | More::CoverageOfTwo(..) => &[PHASE],
+        // A read grant taken for a write grant is refused on every shape the kit builds, and on a
+        // private channel the scenario about read grants holds it too.
+        More::ReadGrantWrites(Kind::Public, _) => &[PHASE],
+        More::ReadGrantWrites(..) => &[PHASE, READ_GRANT],
+        More::WriterSeesStaged(..) | More::ReadSeesStaged(_) => &[WRITER_READS],
+        More::ReadSeesOthersStaged => &[DUP_OTHER],
+        // A grant that names some of the coordinates of a call is refused for each of them.
+        More::Lax(Lax::PartialCoverage(..)) => &[PHASE],
+        // The staged state of another writer is read by no grant of any phase, in any way.
+        More::Lax(Lax::OthersStagedSeen(..)) => &[DUP_OTHER],
+        // An observe of a coordinate another writer committed is told the set on a channel
+        // addressed by group by the scenario about another group, and is told none by the one
+        // about a grant that observes another writer's commit; a channel that is not addressed
+        // by group is asked both ways by the second. The scenario about a listing that lags
+        // reads such a coordinate of a private channel with a read grant, and the one about an
+        // empty set reads one with a stage grant.
+        More::Lax(Lax::OthersCommittedBlind(Kind::Grouped, _, true)) => &[ANOTHER_GROUP],
+        More::Lax(Lax::OthersCommittedBlind(Kind::Grouped, Holder::Stage, false)) => {
+            &[OTHERS_OBSERVE, EMPTY_SET]
+        }
+        More::Lax(Lax::OthersCommittedBlind(Kind::Public, ..)) => &[OTHERS_OBSERVE],
+        // A read grant that is blind to what another writer committed is blind to it when the
+        // scenarios that observe a coordinate another writer holds read it with one: the one about
+        // the digest of such a coordinate and the one about a set that meets it.
+        More::Lax(Lax::OthersCommittedBlind(_, Holder::Read, false)) => {
+            &[NO_DIGEST, LIST, OTHERS_OBSERVE, DUPLICATE_SET]
+        }
+        More::Lax(Lax::OthersCommittedBlind(..)) => &[OTHERS_OBSERVE],
+        // What a private channel lets a stage or a commit grant read, and a stranger, is held with
+        // the reads of a read grant; what a channel that is not private lets a stage or a commit
+        // grant read is held with the reads that need no grant.
+        More::Lax(Lax::WriterGrantOnRead(Kind::Grouped | Kind::NonStaging, ..)) => {
+            &[PUBLIC_READ, READ_GRANT]
+        }
+        // A stranger of a private channel is refused by the scenario about a stranger and a staged
+        // coordinate, as well as by the one about read grants.
+        More::Lax(Lax::StrangerSeesStaged(_)) => &[STRANGER_STAGED, READ_GRANT],
+        More::Lax(_) => &[READ_GRANT],
+        More::BadGrantTakenOnShape(kind, defect, verb) => match (verb, defect) {
+            // A grant that names the base and not the coordinate read is also held by the
+            // scenario about the fields of a coordinate, which reads the sibling of a base of a
+            // private channel. A bad grant on a read is refused by a public channel, which a read
+            // needs no grant of, and by a private one.
+            (Verb::Observe | Verb::Fetch, Defect::Uncovered) => match kind {
+                Kind::Public => &[PUBLIC_READ],
+                Kind::Private => &[PHASE, READ_GRANT],
+                Kind::Grouped | Kind::NonStaging => &[PUBLIC_READ, PHASE, READ_GRANT],
+            },
+            (Verb::Observe | Verb::Fetch | Verb::Newest | Verb::List, _) => match kind {
+                Kind::Public => &[PUBLIC_READ],
+                Kind::Private => &[READ_GRANT],
+                Kind::Grouped | Kind::NonStaging => &[PUBLIC_READ, READ_GRANT],
+            },
+            (_, Defect::Foreign) => &[FOREIGN],
+            (_, Defect::Expired) => &[EXPIRED],
+            (_, Defect::Uncovered | Defect::OtherWritePhase) => &[PHASE],
+        },
+        other => panic!("{other:?} is not lax about a grant on a shape"),
+    }
+}
+
 /// Every stub with every scenario it fails, in the kit's order: the stub of each scenario, and
 /// the further stubs.
 fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
@@ -182,7 +256,12 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
     let mut table: Vec<(Stub, &'static [&'static str])> = vec![
         (Stub::Flaw(F::AbsentIsAnError), &[OBSERVE_ABSENT]),
         (Stub::Flaw(F::StagedDigestIsWrong), &[STAGE_OBSERVE, ECHO]),
-        (Stub::Flaw(F::StrangerSeesStaged), &[STRANGER_STAGED]),
+        // A stranger told the declared set is asked too, so the scenario about reads that need no
+        // grant also fails a stranger who sees staged state.
+        (
+            Stub::Flaw(F::StrangerSeesStaged),
+            &[STRANGER_STAGED, PUBLIC_READ],
+        ),
         (Stub::Flaw(F::StageGrantIsBlindToStaged), &[STAGE_GRANT]),
         (Stub::Flaw(F::CommitGrantIsBlindToStaged), &[COMMIT_GRANT]),
         (
@@ -212,6 +291,14 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
                 YANKED_COMMIT,
                 LOST,
                 LIST,
+                PUBLIC_READ,
+                FOREIGN,
+                PHASE,
+                EXPIRED,
+                NEWEST,
+                STAMP,
+                OTHERS_OBSERVE,
+                READ_GRANT,
                 SECOND_COMMIT,
                 DUPLICATE_SET,
                 NAMED_TWICE,
@@ -228,6 +315,120 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
         (Stub::Flaw(F::CommitOverYankedCommits), &[YANKED_COMMIT]),
         (Stub::Flaw(F::ObserveAfterALostAnswerIsAbsent), &[LOST]),
         (Stub::Flaw(F::ObserveReadsTheLaggingList), &[LIST]),
+        (Stub::Flaw(F::AnonymousFetchIsDenied), &[PUBLIC_READ, ECHO]),
+        (Stub::Flaw(F::AForeignGrantIsAccepted), &[FOREIGN]),
+        (Stub::Flaw(F::TheWrongPhaseIsAccepted), &[PHASE]),
+        (Stub::Flaw(F::AnExpiredGrantIsAccepted), &[EXPIRED]),
+        (Stub::Flaw(F::NewestDropsYanked), &[NEWEST]),
+        (
+            Stub::Flaw(F::TheStampIsDropped),
+            &[COMMIT_READABLE, STAMP, BECOMING],
+        ),
+        // A read grant that is blind to a coordinate another writer committed is blind on a
+        // private channel too, which the scenarios about the digest of such a coordinate, a
+        // listing that lags, a race, a second commit and a set that meets it read with one.
+        (
+            Stub::Flaw(F::GrantedObserveIsBlindToOthers),
+            &[
+                NO_DIGEST,
+                LIST,
+                OTHERS_OBSERVE,
+                RACE,
+                SECOND_COMMIT,
+                DUPLICATE_SET,
+            ],
+        ),
+        (
+            Stub::Flaw(F::IndexIsReadBeforeTheGroup),
+            &[GROUP_THEN_INDEX],
+        ),
+        (
+            Stub::Flaw(F::GroupedObserveIsBlindToOthers),
+            &[ANOTHER_GROUP],
+        ),
+        (Stub::Flaw(F::FailedGroupReadIsAbsent), &[FAILED_READ]),
+        // The scenario about what a grant reads of staged state runs on the channel addressed by
+        // group too: its observe that is told the set, and its observe with a read grant that is
+        // told none, are the two promises these stubs break.
+        // A channel addressed by group finds staged state only by the set it was staged in, so
+        // each scenario that observes staged state on one is told it, and fails the stub that
+        // drops it.
+        (
+            Stub::Flaw(F::TheDeclaredSetIsDropped),
+            &[
+                STAGE_OBSERVE,
+                STAGE_GRANT,
+                COMMIT_GRANT,
+                ABORT,
+                SET_COMMIT,
+                LOST,
+                PHASE,
+                STAMP,
+                DECLARED_SET,
+                COMMIT_CARRIES,
+                DUPLICATE_SET,
+                NAMED_TWICE,
+                WRITER_READS,
+                VANISHED,
+                ECHO,
+            ],
+        ),
+        (
+            Stub::Flaw(F::AnEmptySetSeesStagedState),
+            &[EMPTY_SET, WRITER_READS],
+        ),
+        (Stub::Flaw(F::AReadGrantMayWrite), &[PHASE, READ_GRANT]),
+        (
+            Stub::Flaw(F::ARacedCommitOverwrites),
+            &[RACE, SECOND_COMMIT],
+        ),
+        (Stub::Flaw(F::TransientAfterCommitIsPermanent), &[TRANSIENT]),
+        (Stub::Flaw(F::StageOverOtherBytesIsStaged), &[DUP_OTHER]),
+        (
+            Stub::Flaw(F::StrangerObservesPrivate),
+            &[STRANGER_STAGED, READ_GRANT],
+        ),
+        (Stub::Flaw(F::StrangerFetchesPrivate), &[READ_GRANT]),
+        (Stub::Flaw(F::StrangerNewestPrivate), &[READ_GRANT]),
+        (Stub::Flaw(F::StrangerListsPrivate), &[READ_GRANT]),
+        (
+            Stub::Flaw(F::StrangerObservesPrivateWithASet),
+            &[READ_GRANT],
+        ),
+        // The scenario about read grants asks a private channel for a stranger's fetch of a staged
+        // coordinate too.
+        (
+            Stub::Flaw(F::StrangerFetchesStaged),
+            &[PUBLIC_READ, READ_GRANT],
+        ),
+        (
+            Stub::Flaw(F::ListIncludesStaged),
+            &[PUBLIC_READ, WRITER_READS],
+        ),
+        (
+            Stub::Flaw(F::NewestIncludesStaged),
+            &[PUBLIC_READ, WRITER_READS],
+        ),
+        (Stub::Flaw(F::NewestMatchesByPrefix), &[NEWEST]),
+        (Stub::Flaw(F::NewestIgnoresTheChannel), &[NEWEST]),
+        (Stub::Flaw(F::NewestDropsTheStamp), &[NEWEST]),
+        (Stub::Flaw(F::NewestWrongDigest), &[NEWEST]),
+        (Stub::Flaw(F::NewestDropsTheExceptionalMark), &[NEWEST]),
+        (Stub::Flaw(F::YankIgnoresThePhase), &[PHASE]),
+        (Stub::Flaw(F::StageIgnoresCoverage), &[PHASE]),
+        (Stub::Flaw(F::CommitIgnoresCoverage), &[PHASE]),
+        (Stub::Flaw(F::OnlyTheLastCoordinateIsCovered), &[PHASE]),
+        (Stub::Flaw(F::StrangerMayStage), &[PHASE]),
+        (Stub::Flaw(F::StrangerMayCommit), &[PHASE]),
+        (Stub::Flaw(F::StrangerMayAbort), &[PHASE]),
+        (Stub::Flaw(F::StrangerMayYank), &[PHASE]),
+        (Stub::Flaw(F::PrivateTakesAForeignReadGrant), &[READ_GRANT]),
+        (Stub::Flaw(F::PrivateTakesAnExpiredReadGrant), &[READ_GRANT]),
+        (
+            Stub::Flaw(F::PrivateTakesAnUncoveredReadGrant),
+            &[PHASE, READ_GRANT],
+        ),
+        (Stub::Flaw(F::ObserveDropsAForeignSet), &[DECLARED_SET]),
         (
             Stub::Flaw(F::SecondCommitOfTheSameBytesIsCommitted),
             &[SECOND_COMMIT],
@@ -257,6 +458,19 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
         (Stub::Flaw(F::ListWrongDigest), &[LIST]),
         (Stub::Flaw(F::ListIgnoresTheChannel), &[LIST]),
         (Stub::Flaw(F::ListIgnoresThePrefix), &[LIST]),
+        (Stub::Flaw(F::NewestIsEmpty), &[PUBLIC_READ, NEWEST]),
+        (Stub::Flaw(F::ListIsEmpty), &[LIST]),
+        (Stub::Flaw(F::TheMarkIsDropped), &[COMMIT_READABLE, STAMP]),
+        (
+            Stub::Flaw(F::LaterMembersHaveAWrongDigest),
+            &[COMMIT_READABLE, ECHO],
+        ),
+        (
+            Stub::Flaw(F::LaterMembersLoseTheirStamp),
+            &[COMMIT_READABLE],
+        ),
+        (Stub::Flaw(F::LaterMembersLoseTheirMark), &[COMMIT_READABLE]),
+        (Stub::Flaw(F::VersionYankReachesEveryVersion), &[YANK]),
         (Stub::More(More::CommitReplacesStaged), &[COMMIT_CARRIES]),
         (
             Stub::More(More::CommitUnstaged),
@@ -316,7 +530,7 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
         (Stub::Odd(Odd::SealedIsDuplicateOnOneCall), &[SEALED]),
         (
             Stub::Odd(Odd::SealsUndeclared),
-            &[OBSERVE_ABSENT, ABORT, YANK, COMMIT_CARRIES],
+            &[OBSERVE_ABSENT, ABORT, YANK, NEWEST, COMMIT_CARRIES],
         ),
         (Stub::Flaw(F::BurnedReadsAsAbsent), &[BURNED]),
         (Stub::Flaw(F::BurnedCommitIsCommitted), &[BURNED]),
@@ -329,6 +543,7 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
                 SET_COMMIT,
                 YANK,
                 LIST,
+                NEWEST,
                 DUPLICATE_SET,
                 ECHO,
                 DECLARES,
@@ -349,14 +564,28 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
         (Stub::Hook(Hook::SiblingDiffersInTwoFields), &[DECLARES]),
         (
             Stub::Hook(Hook::SiblingIsTheBase),
-            &[OBSERVE_ABSENT, ABORT, YANK, LIST, COMMIT_CARRIES, DECLARES],
+            &[
+                OBSERVE_ABSENT,
+                ABORT,
+                YANK,
+                LIST,
+                PHASE,
+                NEWEST,
+                COMMIT_CARRIES,
+                DECLARES,
+            ],
         ),
         (Stub::Odd(Odd::NoShapes), &[DECLARES]),
+        // A set refused for a grant that names too few of its coordinates is a set refused for
+        // one coordinate: the others are not applied.
         (
             Stub::More(More::CommitPartialOnRefusal),
-            &[SET_COMMIT, UNREPRESENTABLE],
+            &[SET_COMMIT, PHASE, UNREPRESENTABLE],
         ),
-        (Stub::More(More::StagePartialOnRefusal), &[UNREPRESENTABLE]),
+        (
+            Stub::More(More::StagePartialOnRefusal),
+            &[PHASE, UNREPRESENTABLE],
+        ),
         (Stub::More(More::YankWidensToTheCommitSet), &[YANK]),
         (Stub::More(More::YankByNamePrefix), &[YANK]),
         (Stub::More(More::ObserveByNamePrefix), &[OBSERVE_ABSENT]),
@@ -384,7 +613,10 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
             &[COMMIT_CARRIES],
         ),
         (Stub::More(More::AbortWithdrawsCommittedSibling), &[ABORT]),
-        (Stub::More(More::StagedRaceOverwrites), &[SECOND_COMMIT]),
+        (
+            Stub::More(More::StagedRaceOverwrites),
+            &[RACE, SECOND_COMMIT],
+        ),
         (Stub::More(More::NonStagingDupCommitDeduped), &[NAMED_TWICE]),
         (Stub::More(More::VanishedCommitIsRateLimited), &[VANISHED]),
         (
@@ -395,7 +627,10 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
             Stub::More(More::RetryWhileBecomingReplacesTheMark),
             &[BECOMING],
         ),
-        (Stub::More(More::FetchOfAStrangerFindsNothing), &[ECHO]),
+        (
+            Stub::More(More::FetchOfAStrangerFindsNothing),
+            &[PUBLIC_READ, READ_GRANT, ECHO],
+        ),
         (Stub::Odd(Odd::OnlyAPlatformSibling), &[DECLARES]),
         (Stub::Siblingless(More::Conforming), &[DECLARES]),
         (
@@ -419,18 +654,52 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
             &[DECLARES],
         ),
     ];
+    for (call, bad) in every_bad_grant_taken_by_a_call() {
+        table.push((
+            Stub::Flaw(F::BadGrantTakenBy(bad, call)),
+            match bad {
+                Bad::Foreign => &[FOREIGN],
+                Bad::Expired => &[EXPIRED],
+                Bad::Uncovered => &[PHASE],
+            },
+        ));
+    }
+    table.push((Stub::More(More::AbortTakesCommitGrant), &[PHASE]));
+    let lax = field_blind()
+        .into_iter()
+        .chain(on_shapes())
+        .chain(coverage_of_two())
+        .chain(read_grant_writes())
+        .chain(writers_see_staged())
+        .chain(read_grants_see_staged())
+        .chain([More::ReadSeesOthersStaged])
+        .chain(partial_coverage())
+        .chain(writer_grants_on_reads())
+        .chain(strangers_let_in())
+        .chain(others_staged_seen())
+        .chain(others_committed_blind());
+    for stub in lax {
+        table.push((Stub::More(stub), held_by_the_lax_stub(stub)));
+    }
     for field in Field::ALL {
+        // `newest` is asked of a name that has a sibling in the channel, the version and the
+        // platform, and of none that differs in its type.
+        let by_newest = field != Field::Type;
+        let staged: &[&str] = if by_newest {
+            &[OBSERVE_ABSENT, ABORT, YANK, NEWEST, COMMIT_CARRIES]
+        } else {
+            &[OBSERVE_ABSENT, ABORT, YANK, COMMIT_CARRIES]
+        };
+        let committed: &[&str] = if by_newest {
+            &[OBSERVE_ABSENT, YANK, NEWEST, COMMIT_CARRIES]
+        } else {
+            &[OBSERVE_ABSENT, YANK, COMMIT_CARRIES]
+        };
         table.extend([
             (Stub::More(More::YankSiblings(field)), &[YANK][..]),
             (Stub::More(More::AbortSiblings(field)), &[ABORT][..]),
-            (
-                Stub::More(More::StageSiblingTaken(field)),
-                &[OBSERVE_ABSENT, ABORT, YANK, COMMIT_CARRIES][..],
-            ),
-            (
-                Stub::More(More::CommitSiblingTaken(field)),
-                &[OBSERVE_ABSENT, YANK, COMMIT_CARRIES][..],
-            ),
+            (Stub::More(More::StageSiblingTaken(field)), staged),
+            (Stub::More(More::CommitSiblingTaken(field)), committed),
             (
                 Stub::More(More::ObserveStagedSibling(field)),
                 &[OBSERVE_ABSENT, ABORT][..],
@@ -465,6 +734,7 @@ fn each_scenario_fails_on_its_nonconforming_stub() {
 #[test]
 fn each_further_publisher_stub_fails_the_scenarios_that_hold_it() {
     let table = every_stub();
+    assert_eq!(table.len(), 419, "the number of stubs of the table");
     further_stubs_fail_exactly(
         "publisher",
         &names(&publisher_scenarios::<FakePublisherRig>()),
@@ -473,15 +743,35 @@ fn each_further_publisher_stub_fails_the_scenarios_that_hold_it() {
     );
 }
 
-/// The scenarios that need a channel that stages, and the one that needs a registry that seals a
-/// version, which a rig of one public channel that does not stage lacks.
-const NEEDS_STAGING_OR_SEALING: [&str; 11] = [
+/// The scenarios about a private channel or one addressed by group, which a rig of public
+/// channels lacks.
+const NEEDS_A_PRIVATE_OR_GROUPED_CHANNEL: [&str; 6] = [
+    GROUP_THEN_INDEX,
+    ANOTHER_GROUP,
+    FAILED_READ,
+    DECLARED_SET,
+    EMPTY_SET,
+    READ_GRANT,
+];
+
+/// The scenarios that need a channel that stages, a private or a grouped one, or a registry that
+/// seals a version, which a rig of one public channel that does not stage lacks.
+const NEEDS_MORE_THAN_ONE_PUBLIC_CALL: [&str; 20] = [
     STAGE_OBSERVE,
     STRANGER_STAGED,
     STAGE_GRANT,
     COMMIT_GRANT,
     STAGE_PRESENT,
     ABORT,
+    GROUP_THEN_INDEX,
+    ANOTHER_GROUP,
+    FAILED_READ,
+    DECLARED_SET,
+    EMPTY_SET,
+    READ_GRANT,
+    RACE,
+    TRANSIENT,
+    DUP_OTHER,
     OWN_STAGED,
     COMMIT_CARRIES,
     WRITER_READS,
@@ -490,20 +780,20 @@ const NEEDS_STAGING_OR_SEALING: [&str; 11] = [
 ];
 
 /// A rig that builds only a public channel whose commit carries the bytes skips exactly the
-/// scenarios about staged state and about a sealed version, says why, passes every other, and a
-/// skip is not counted as a pass.
+/// scenarios about staged state, about private and grouped channels and about a sealed version,
+/// says why, passes every other, and a skip is not counted as a pass.
 #[test]
 fn a_rig_of_one_call_to_a_commit_skips_exactly_the_scenarios_it_cannot_run() {
     let report = run_publisher_kit(&FakePublisherRig::restricted());
-    assert_eq!(report.skipped(), NEEDS_STAGING_OR_SEALING.to_vec());
+    assert_eq!(report.skipped(), NEEDS_MORE_THAN_ONE_PUBLIC_CALL.to_vec());
     assert_eq!(report.failed(), Vec::<&str>::new());
     let ran: Vec<&str> = names(&publisher_scenarios::<FakePublisherRig>())
         .into_iter()
-        .filter(|n| !NEEDS_STAGING_OR_SEALING.contains(n))
+        .filter(|n| !NEEDS_MORE_THAN_ONE_PUBLIC_CALL.contains(n))
         .collect();
     assert_eq!(report.passed(), ran);
     assert_eq!(
-        ran.len() + NEEDS_STAGING_OR_SEALING.len(),
+        ran.len() + NEEDS_MORE_THAN_ONE_PUBLIC_CALL.len(),
         report.names().len()
     );
     let reasons = report.skip_reasons();
@@ -526,6 +816,13 @@ fn the_stub_of_each_scenario_a_rig_of_one_call_runs() -> Vec<(&'static str, Stub
         (YANKED_COMMIT, Stub::More(More::NonStagingCommitOverYanked)),
         (LOST, Stub::Flaw(F::ObserveAfterALostAnswerIsAbsent)),
         (LIST, Stub::Flaw(F::ObserveReadsTheLaggingList)),
+        (PUBLIC_READ, Stub::Flaw(F::AnonymousFetchIsDenied)),
+        (FOREIGN, Stub::Flaw(F::AForeignGrantIsAccepted)),
+        (PHASE, Stub::Flaw(F::TheWrongPhaseIsAccepted)),
+        (EXPIRED, Stub::Flaw(F::AnExpiredGrantIsAccepted)),
+        (NEWEST, Stub::Flaw(F::NewestDropsYanked)),
+        (STAMP, Stub::Flaw(F::TheStampIsDropped)),
+        (OTHERS_OBSERVE, Stub::Flaw(F::GrantedObserveIsBlindToOthers)),
         (
             SECOND_COMMIT,
             Stub::Flaw(F::SecondCommitOfTheSameBytesIsCommitted),
@@ -602,7 +899,12 @@ fn a_rig_that_lacks_what_a_scenario_needs_skips_it_and_passes_the_rest() {
         ),
         (
             staging_only,
-            vec![COMMIT_OVER, NOT_STAGE_BYTES, NOT_STAGING, SEALED],
+            [
+                &[COMMIT_OVER, NOT_STAGE_BYTES][..],
+                &NEEDS_A_PRIVATE_OR_GROUPED_CHANNEL,
+                &[NOT_STAGING, SEALED],
+            ]
+            .concat(),
         ),
     ];
     for (rig, skipped) in rigs {
@@ -612,20 +914,56 @@ fn a_rig_that_lacks_what_a_scenario_needs_skips_it_and_passes_the_rest() {
     }
 }
 
-/// A rig that builds only private channels has no channel this part of the kit can run on: it
-/// skips every scenario that needs one, and passes only the one about what it declares. A kit
-/// that skipped everything is not a kit that passed.
+/// A rig that builds public channels only skips exactly the scenarios about private and grouped
+/// channels and about a sealed version, says why, and passes every other: a stranger's reads and
+/// the grants of a public channel are held, and a skip is never a pass.
 #[test]
-fn a_rig_with_no_public_channel_skips_what_runs_on_one_and_passes_nothing_else() {
-    let private = ChannelShape {
-        stages: true,
-        private: true,
-        group_addressed: true,
-    };
-    let report = run_publisher_kit(&FakePublisherRig::conforming().with_shapes(vec![private]));
-    assert_eq!(report.failed(), Vec::<&str>::new());
-    assert_eq!(report.passed(), vec![DECLARES]);
-    assert_eq!(report.skipped().len(), report.names().len() - 1);
+fn a_rig_of_public_channels_skips_the_scenarios_about_private_and_grouped_ones() {
+    let report = run_publisher_kit(&rig_of_public_channels());
+    report.assert_conforms();
+    let skipped = [&NEEDS_A_PRIVATE_OR_GROUPED_CHANNEL[..], &[SEALED]].concat();
+    let in_order: Vec<&str> = names(&publisher_scenarios::<FakePublisherRig>())
+        .into_iter()
+        .filter(|n| skipped.contains(n))
+        .collect();
+    assert_eq!(report.skipped(), in_order);
+    assert_eq!(report.passed().len(), report.names().len() - skipped.len());
+    let reasons = report.skip_reasons();
+    assert!(
+        reasons
+            .iter()
+            .any(|r| r.starts_with(&format!("{READ_GRANT}: ")) && r.contains("no private channel")),
+        "{reasons:?}"
+    );
+    assert!(
+        reasons
+            .iter()
+            .any(|r| r.starts_with(&format!("{GROUP_THEN_INDEX}: ")) && r.contains("by group")),
+        "{reasons:?}"
+    );
+    // What it still runs is held: the stub of each such scenario that is wrong about a public
+    // channel fails it.
+    for (scenario, stub) in own_stubs() {
+        if skipped.contains(&scenario) {
+            continue;
+        }
+        if matches!(stub, Stub::Odd(_)) {
+            continue;
+        }
+        let failed = run_on(rig_of_public_channels(), stub).failed();
+        assert!(
+            failed.contains(&scenario),
+            "the stub {stub:?} must fail {scenario} on a rig of public channels, and it failed {failed:?}"
+        );
+    }
+}
+
+/// A rig of the public channels, one that stages and one that does not.
+fn rig_of_public_channels() -> FakePublisherRig {
+    FakePublisherRig::conforming().with_shapes(vec![
+        ChannelShape::staging(),
+        ChannelShape::without_staging(),
+    ])
 }
 
 /// A rig that declares no shape fails the kit, whatever else it passes, and a scenario run alone
@@ -640,7 +978,7 @@ fn a_rig_that_declares_no_shape_fails_the_kit() {
     let alone = scenarios.iter().find(|s| s.name == OBSERVE_ABSENT);
     let why = alone.map(|s| s.run_on(&rig));
     assert!(
-        matches!(&why, Some(Err(text)) if text.contains("a public channel to run on")),
+        matches!(&why, Some(Err(text)) if text.contains("a channel to run on")),
         "{why:?}"
     );
 }

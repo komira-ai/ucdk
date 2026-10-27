@@ -8,10 +8,12 @@ use ucdk_release::codec::GrantPhase;
 use ucdk_release::publish::{Held, Presence};
 use ucdk_release_proto::v1::{Coordinate, Reason, Stamped};
 
+use super::publisher_gates::skips_that_name_a_declared_capability;
+use super::publisher_list::publisher_scenarios;
 use super::publisher_rig::{
-    Arrangement, ChannelShape, PublisherRig, Set, built, fetched, fetched_by_a_stranger,
-    needs_a_plain_channel, observed, plain_shapes, present_held, publish, sha, siblings_beside,
-    stage, staged_held, staging_publisher, stranger,
+    Arrangement, ChannelShape, PublisherRig, Set, built, commit, fetched, fetched_by_a_reader,
+    looked, observed, plain_shapes, present_held, publish, sha, siblings_beside, stage,
+    staged_held, stranger,
 };
 use super::{must, must_err, must_some, same};
 use crate::{
@@ -25,27 +27,6 @@ const LARGEST_SET: usize = 4;
 /// the arrangement makes it readable at the third.
 const LAG: u32 = 2;
 
-pub(super) fn needs_an_unrepresentable_coordinate<R: PublisherRig>(
-    rig: &R,
-) -> Option<&'static str> {
-    needs_a_plain_channel(rig).or_else(|| {
-        rig.unrepresentable()
-            .is_empty()
-            .then_some("the rig names no coordinate its channel cannot hold")
-    })
-}
-
-pub(super) fn needs_a_sealing_registry<R: PublisherRig>(rig: &R) -> Option<&'static str> {
-    needs_a_plain_channel(rig).or_else(|| {
-        (!rig.seals_versions()).then_some("the registry does not seal a version by its first group")
-    })
-}
-
-pub(super) fn needs_a_registry_that_can_burn<R: PublisherRig>(rig: &R) -> Option<&'static str> {
-    needs_a_plain_channel(rig)
-        .or_else(|| (!rig.can_burn()).then_some("the registry cannot burn a number"))
-}
-
 /// A coordinate whose staged state vanished is not committed, and nobody holds it: the commit is
 /// `Refused` or `Permanent` (an answer that asks to be retried, such as `RateLimited`, would be
 /// retried for ever instead of staged again), an observe finds `Absent`, and a new stage of it
@@ -55,8 +36,9 @@ pub(super) fn a_commit_of_staged_state_that_vanished_is_not_committed_and_a_rest
     R: PublisherRig,
 >(
     rig: &R,
+    shape: &ChannelShape,
 ) {
-    let mut p = staging_publisher(rig);
+    let mut p = built(rig, shape);
     let set = Set::of(rig, &["a"]);
     stage(rig, &mut p, &set);
     rig.arrange(&mut p, &Arrangement::LoseStagedState);
@@ -148,7 +130,7 @@ fn a_retry_is_not_a_second_write<R: PublisherRig>(
     );
     let mut seen = None;
     for _ in 0..=LAG + 1 {
-        match stranger(&mut p, &set.coords[0]) {
+        match looked(rig, shape, &mut p, &set.coords[0]) {
             Presence::Present(held) => {
                 seen = Some(held);
                 break;
@@ -230,7 +212,7 @@ pub(super) fn a_coordinate_the_channel_cannot_hold_is_refused_before_anything_is
     // What was refused left the channel as it was: an ordinary coordinate publishes.
     let set = Set::of(rig, &["a"]);
     publish(rig, &mut p, &set);
-    present_held(stranger(&mut p, &set.coords[0]));
+    present_held(looked(rig, shape, &mut p, &set.coords[0]));
 }
 
 /// A set that has a coordinate the channel cannot hold beside one it can is refused whole, at
@@ -306,7 +288,7 @@ pub(super) fn a_sealed_version_refuses_a_later_platform_and_observes_it_absent<R
         "the answer to a later platform of a sealed version",
     );
     same(
-        stranger(&mut p, &platform.coordinate),
+        looked(rig, shape, &mut p, &platform.coordinate),
         Presence::Absent,
         "a later platform of a sealed version",
     );
@@ -315,7 +297,7 @@ pub(super) fn a_sealed_version_refuses_a_later_platform_and_observes_it_absent<R
         None,
         "the bytes of a later platform of a sealed version",
     );
-    present_held(stranger(&mut p, &base));
+    present_held(looked(rig, shape, &mut p, &base));
 }
 
 /// A burned coordinate is neither absent nor present nor committable: an observe says `Burned`,
@@ -334,7 +316,11 @@ pub(super) fn a_burned_coordinate_is_neither_absent_nor_present_nor_committable<
             coordinate: a.clone(),
         },
     );
-    same(stranger(&mut p, a), Presence::Burned, "a burned coordinate");
+    same(
+        looked(rig, shape, &mut p, a),
+        Presence::Burned,
+        "a burned coordinate",
+    );
     same(
         observed(rig, &mut p, GrantPhase::Commit, &set, 0),
         Presence::Burned,
@@ -381,11 +367,17 @@ pub(super) fn a_burned_coordinate_is_neither_absent_nor_present_nor_committable<
     );
 }
 
-/// Whether the read-back of `k` on a public channel passes: the bytes are fetched as a stranger
-/// (`Grant::none()`) and hashed by the reader, and what they hash to is the digest the action
-/// expects. The scenarios of this part run on public channels only.
-fn read_back_passes<P: Publisher>(p: &mut P, k: &Coordinate, expected: &str) -> bool {
-    fetched_by_a_stranger(p, k).is_some_and(|bytes| sha(&bytes) == expected)
+/// Whether the read-back of `k` passes: the bytes are fetched as a reader of the channel (a
+/// stranger of a public one, the holder of a read grant of a private one) and hashed, and what they
+/// hash to is the digest the action expects.
+fn read_back_passes<R: PublisherRig>(
+    rig: &R,
+    shape: &ChannelShape,
+    p: &mut R::Publisher,
+    k: &Coordinate,
+    expected: &str,
+) -> bool {
+    fetched_by_a_reader(rig, shape, p, k).is_some_and(|bytes| sha(&bytes) == expected)
 }
 
 /// A registry reports, from `observe`, the digest it verified over the bytes it stored, and not
@@ -417,28 +409,34 @@ pub(super) fn a_registry_that_echoes_the_declared_digest_fails_readback<R: Publi
     }
     super::publisher_rig::commit(rig, &mut p, &set);
     for (at, k) in set.coords.iter().enumerate() {
-        let held = present_held(stranger(&mut p, k));
+        let held = present_held(looked(rig, shape, &mut p, k));
         same(
             held.digest,
             set.digest(at),
-            "the digest a committed coordinate is observed with, from the bytes that were sent",
+            &format!(
+                "the digest the member {at} of a committed set is observed with, from the bytes that were sent ({shape:?})"
+            ),
         );
         same(
-            read_back_passes(&mut p, k, &set.digest(at)),
+            read_back_passes(rig, shape, &mut p, k, &set.digest(at)),
             true,
-            "the read-back against the digest of the bytes that were sent",
+            &format!(
+                "the read-back of the member {at} against the digest of the bytes that were sent ({shape:?})"
+            ),
         );
         same(
-            read_back_passes(&mut p, k, &declared),
+            read_back_passes(rig, shape, &mut p, k, &declared),
             false,
-            "the read-back against a digest that was only declared",
+            &format!(
+                "the read-back of the member {at} against a digest that was only declared ({shape:?})"
+            ),
         );
     }
     let a = &set.coords[0];
     let grant = rig.grant(&p, GrantPhase::Commit, std::slice::from_ref(a));
     must(p.yank(&grant, a, "a reason"), "yank");
     same(
-        stranger(&mut p, a),
+        looked(rig, shape, &mut p, a),
         Presence::Yanked(Held {
             digest: set.digest(0),
             ..set.held.clone()
@@ -461,6 +459,12 @@ pub(super) fn the_declarations_of_a_rig_hold_of_what_it_builds<R: PublisherRig>(
     for shape in &shapes {
         built(rig, shape);
     }
+    sent_counts_every_request_the_publisher_makes(rig, &shapes);
+    same(
+        skips_that_name_a_declared_capability(rig, &publisher_scenarios::<R>()),
+        Vec::new(),
+        "the scenarios this rig skips for a capability it declares",
+    );
     for shape in plain_shapes(rig) {
         let mut p = built(rig, &shape);
         same(
@@ -480,6 +484,51 @@ pub(super) fn the_declarations_of_a_rig_hold_of_what_it_builds<R: PublisherRig>(
     members_depend_on_their_seed(rig);
     siblings_are_named(rig);
     siblings_differ_in_their_field(rig);
+}
+
+/// `PublisherRig::sent` counts the requests the publisher has made, taken before the registry
+/// admits one. The scenarios about a refused call only compare the count before and after, which a
+/// count that never moves passes, so it is asked to advance: across a good stage (on a channel that
+/// stages), across a good commit, and across a stranger's read of a private channel, which a
+/// conforming registry refuses, so that a count of the admitted requests alone is found as well.
+fn sent_counts_every_request_the_publisher_makes<R: PublisherRig>(
+    rig: &R,
+    shapes: &[ChannelShape],
+) {
+    let shape = must_some(
+        shapes.iter().find(|s| s.stages).or_else(|| shapes.first()),
+        "a shape the rig declares",
+    );
+    let mut p = built(rig, shape);
+    let set = Set::of(rig, &["s"]);
+    if p.stages() {
+        let before = rig.sent(&p);
+        stage(rig, &mut p, &set);
+        same(
+            rig.sent(&p) > before,
+            true,
+            &format!("the requests sent advance across a good stage ({shape:?})"),
+        );
+    }
+    let before = rig.sent(&p);
+    commit(rig, &mut p, &set);
+    same(
+        rig.sent(&p) > before,
+        true,
+        &format!("the requests sent advance across a good commit ({shape:?})"),
+    );
+    if let Some(shape) = shapes.iter().find(|s| s.private) {
+        let mut p = built(rig, shape);
+        let before = rig.sent(&p);
+        // The answer is not asked about: that a stranger is refused is held by the scenarios about
+        // reads. A conforming registry refuses it, and the request was sent all the same.
+        let _ = p.observe(&Grant::none(), &set.coords[0], &[]);
+        same(
+            rig.sent(&p) > before,
+            true,
+            &format!("the requests sent advance across a read the registry refuses ({shape:?})"),
+        );
+    }
 }
 
 /// The rig names a sibling the scenarios can publish beside the base: the checks about siblings

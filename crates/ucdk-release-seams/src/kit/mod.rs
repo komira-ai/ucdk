@@ -12,14 +12,13 @@
 //! wait for nothing: time moves only when a scenario asks its rig to move it.
 //!
 //! A scenario may be gated: it names a thing a rig can lack (a channel that stages, a registry
-//! that can burn a number), and the runner then records it as [`Verdict::Skipped`] with the
-//! reason. A skip is a legal outcome and never a pass: [`Report::passed`] does not list it,
+//! that can burn a number), as a [`Need`], and the runner then records it as
+//! [`Verdict::Skipped`] with it. A skip is a legal outcome and never a pass: [`Report::passed`] does not list it,
 //! [`Report::skipped`] does, and a rig that skips a scenario says so in its own test.
 //!
 //! - [`run_build_system_kit`], [`run_grant_source_kit`], [`run_output_files_kit`],
 //!   [`run_process_runner_kit`], [`run_publisher_kit`] and [`run_store_kit`] run a whole kit and
-//!   return its [`Report`]; the second half of the publisher kit joins them in the part that
-//!   follows.
+//!   return its [`Report`].
 //! - [`build_system_scenarios`], [`grant_source_scenarios`], [`output_files_scenarios`],
 //!   [`process_runner_scenarios`], [`publisher_scenarios`] and [`store_scenarios`] give the
 //!   scenarios one by one, for a test per scenario.
@@ -42,9 +41,16 @@ mod grant_source;
 mod output_files;
 mod process_runner;
 mod publisher;
+mod publisher_access;
+mod publisher_gates;
+mod publisher_grants;
+mod publisher_list;
 mod publisher_more;
+mod publisher_private;
+mod publisher_reads;
 mod publisher_rig;
 mod publisher_shapes;
+mod publisher_visible;
 mod store;
 
 pub use build_system::{
@@ -57,7 +63,9 @@ pub use grant_source::{
 };
 pub use output_files::{Node, OutputFilesRig, output_files_scenarios, run_output_files_kit};
 pub use process_runner::{Behavior, ProcessRig, process_runner_scenarios, run_process_runner_kit};
-pub use publisher::{publisher_scenarios, run_publisher_kit};
+pub use publisher::run_publisher_kit;
+pub use publisher_gates::skips_that_name_a_declared_capability;
+pub use publisher_list::publisher_scenarios;
 pub use publisher_rig::{
     Arrangement, ChannelShape, Payload, Placement, PublisherRig, ReadStep, Sibling,
     every_field_in_a_set_of_its_own,
@@ -122,11 +130,67 @@ fn permanent_naming(error: &SeamError, path: &str) -> bool {
     matches!(error, SeamError::Permanent(_)) & error.to_string().contains(path)
 }
 
+/// What a scenario needs of a rig and the rig can lack. A gate answers the need the rig does not
+/// meet, so that a skip can be compared with the rig's own declarations: the declarations scenario
+/// of the publisher kit fails a skip that names a capability the rig declares. The gates of the
+/// kit compute their answer from those declarations, so for them the comparison cannot fail; the
+/// run and skip sets the self-test pins are what hold which `Need` a gate names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Need {
+    /// A channel of any shape.
+    Channel,
+    /// A channel whose reads need no grant.
+    PublicChannel,
+    /// A channel whose every read needs a grant.
+    PrivateChannel,
+    /// A channel that stages and addresses staged state by group.
+    GroupedChannel,
+    /// A channel that stages, whatever else it is.
+    StagingChannel,
+    /// A channel whose commit carries the bytes, whatever else it is.
+    UnstagedChannel,
+    /// A channel that commits a set at once.
+    SetCommit,
+    /// A channel that does not stage and whose commit does not replace what is there.
+    ConditionalCommit,
+    /// A coordinate the channel cannot hold, named by the rig.
+    UnrepresentableCoordinate,
+    /// A registry that seals a version by the group that first wrote it.
+    SealingRegistry,
+    /// A registry that can burn a number.
+    BurningRegistry,
+}
+
+impl Need {
+    /// Why a rig that lacks the need cannot run the scenario.
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::Channel => "the rig declares no channel",
+            Self::PublicChannel => "the rig declares no public channel",
+            Self::PrivateChannel => "the rig declares no private channel",
+            Self::GroupedChannel => {
+                "the rig declares no channel that stages and is addressed by group"
+            }
+            Self::StagingChannel => "the rig declares no channel that stages",
+            Self::UnstagedChannel => "the rig declares no channel that does not stage",
+            Self::SetCommit => "the rig declares no channel that commits a set at once",
+            Self::ConditionalCommit => {
+                "the rig declares no channel that does not stage and is a conditional put"
+            }
+            Self::UnrepresentableCoordinate => {
+                "the rig names no coordinate its channel cannot hold"
+            }
+            Self::SealingRegistry => "the registry does not seal a version by its first group",
+            Self::BurningRegistry => "the registry cannot burn a number",
+        }
+    }
+}
+
 /// One named scenario of a kit over the rig type `R`.
 pub struct Scenario<R> {
     pub name: &'static str,
     run: fn(&R),
-    gate: Option<fn(&R) -> Option<&'static str>>,
+    gate: Option<fn(&R) -> Option<Need>>,
 }
 
 impl<R> Scenario<R> {
@@ -138,16 +202,16 @@ impl<R> Scenario<R> {
         }
     }
 
-    /// The same scenario, run only where `gate` answers `None`; an answer is the reason the rig
-    /// cannot run it, and the runner records the scenario as skipped with that reason.
+    /// The same scenario, run only where `gate` answers `None`; an answer is the [`Need`] the rig
+    /// does not meet, and the runner records the scenario as skipped with it.
     #[must_use]
-    pub fn gated(mut self, gate: fn(&R) -> Option<&'static str>) -> Self {
+    pub fn gated(mut self, gate: fn(&R) -> Option<Need>) -> Self {
         self.gate = Some(gate);
         self
     }
 
-    /// Why the scenario does not run on `rig`; `None` when it does.
-    pub fn skip_reason(&self, rig: &R) -> Option<&'static str> {
+    /// What the scenario needs that `rig` lacks, which is why it does not run; `None` when it does.
+    pub fn skip_need(&self, rig: &R) -> Option<Need> {
         self.gate.and_then(|gate| gate(rig))
     }
 
@@ -161,10 +225,10 @@ impl<R> Scenario<R> {
     pub fn verdict_on(&self, rig: &R) -> Verdict {
         // A gate may build a channel, and what a rig builds may panic: that is a failed
         // scenario, as one that panics in its body is.
-        let gate = panic::catch_unwind(AssertUnwindSafe(|| self.skip_reason(rig)));
+        let gate = panic::catch_unwind(AssertUnwindSafe(|| self.skip_need(rig)));
         match gate {
             Err(payload) => Verdict::Failed(describe(&*payload)),
-            Ok(Some(reason)) => Verdict::Skipped(reason),
+            Ok(Some(need)) => Verdict::Skipped(need),
             Ok(None) => match self.run_on(rig) {
                 Ok(()) => Verdict::Passed,
                 Err(why) => Verdict::Failed(why),
@@ -186,9 +250,8 @@ pub enum Verdict {
     Passed,
     /// The scenario failed, for this reason.
     Failed(String),
-    /// The rig lacks what the scenario needs, for this reason, and the scenario did not run. A
-    /// skip is not a pass.
-    Skipped(&'static str),
+    /// The rig lacks what the scenario needs, and the scenario did not run. A skip is not a pass.
+    Skipped(Need),
 }
 
 /// What one scenario came to.
@@ -225,7 +288,7 @@ impl Report {
         self.outcomes
             .iter()
             .filter_map(|o| match o.verdict {
-                Verdict::Skipped(reason) => Some(format!("{}: {reason}", o.name)),
+                Verdict::Skipped(need) => Some(format!("{}: {}", o.name, need.reason())),
                 _ => None,
             })
             .collect()

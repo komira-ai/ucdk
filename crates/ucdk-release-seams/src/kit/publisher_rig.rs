@@ -7,6 +7,20 @@
 //! that needs a channel the rig did not declare is skipped, with the reason, and a skip is never a
 //! pass. A declaration is held both ways, because a rig that states a thing about itself could
 //! otherwise hide a defect: the channel it builds for a shape must say what the shape says.
+//!
+//! A scenario about a promise a channel makes by what it can do, and not by who may read it, runs
+//! on every declared shape that can do it: a lifecycle scenario (a race, a duplicate, a set, an
+//! abort, a yank, `newest`, a stamp, a read-back) on each shape that stages or that commits, public
+//! or private, addressed by coordinate or by group. The gate of such a scenario is the capability
+//! (`stages`, `commit_unit`, `yank_unit`, `private`, `group_addressed`), and never that the shape
+//! is plain. A reader of a private channel holds a read grant where a reader of a public one is a
+//! stranger (`looked`), and staged state of a channel addressed by group is observed told the set
+//! it was staged in.
+//!
+//! A grant that is bad is refused by every read as well as every write, on every declared shape,
+//! and a refused call is never sent (`PublisherRig::sent`). Stage and commit grants are for
+//! `observe`: a private channel may refuse their `fetch`, `newest` and `list`, and a scenario that
+//! asks them accepts `Denied` there as well as nothing.
 
 use sha2::{Digest as _, Sha256};
 use ucdk_core::Hash256;
@@ -47,7 +61,28 @@ impl ChannelShape {
             ..Self::staging()
         }
     }
+
+    /// A public channel that stages and addresses staged state by the group of the declared set:
+    /// reads need no grant, and an observe of staged state is told the set.
+    pub const fn public_grouped() -> Self {
+        Self {
+            group_addressed: true,
+            ..Self::staging()
+        }
+    }
+
+    /// A private channel that stages and addresses staged state by the group of the declared set.
+    pub const fn private_grouped() -> Self {
+        Self {
+            stages: true,
+            private: true,
+            group_addressed: true,
+        }
+    }
 }
+
+/// A day, in milliseconds: how far a scenario moves the clock to expire the grants it made.
+pub(super) const A_DAY_MS: u64 = 86_400_000;
 
 /// A change to a world a scenario asks its rig to make.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,7 +109,8 @@ pub enum Arrangement {
     FailAfterCommit,
     /// A commit of a set fails whole: nothing becomes readable.
     CommitSetFailsWhole,
-    /// `list` lags behind what was committed.
+    /// `list` lags behind what was committed. A listing that was not arranged to lag names every
+    /// coordinate held in its scope.
     ListLags,
     /// The group read of an observe fails.
     FailGroupRead,
@@ -218,6 +254,16 @@ pub trait PublisherRig {
     /// that does not address staged state by group.
     fn reads(&self, publisher: &Self::Publisher) -> Vec<ReadStep>;
 
+    /// How many requests the publisher has sent to its registry so far, a refused one included,
+    /// counted when it is made and before the registry admits it. The kit takes the count before
+    /// and after a call: a call whose grant is for another repository, has expired, is of the
+    /// wrong phase or does not name the coordinates of the call is refused by the publisher before
+    /// it sends anything, so the secret of a grant is never presented to a registry it was not
+    /// issued for, and the count does not move. The seam shows a publisher's answers and not its
+    /// requests, so a registry that sends such a call and maps the refusal to `Denied` can only be
+    /// told from one that sends nothing by this count; that is why the method has no default.
+    fn sent(&self, publisher: &Self::Publisher) -> usize;
+
     /// The coordinate the kit calls `label`. Distinct labels map to distinct coordinates, and a
     /// label that starts with another maps to a name that starts with the other's name, because
     /// the kit lists by name prefix; the kit checks both.
@@ -286,20 +332,109 @@ pub(super) fn staging_shape<R: PublisherRig>(rig: &R) -> Option<ChannelShape> {
     plain_shapes(rig).into_iter().find(|s| s.stages)
 }
 
-/// The first declared plain shape that does not stage.
-pub(super) fn unstaged_shape<R: PublisherRig>(rig: &R) -> Option<ChannelShape> {
-    plain_shapes(rig).into_iter().find(|s| !s.stages)
-}
-
-/// Runs `scenario` once on each declared plain shape, a fresh channel each: a promise a registry
-/// makes of every channel is held on each shape the rig declares, and not on the first alone. A
-/// rig with no plain shape fails the scenario, which the runner skips before it gets here.
-pub(super) fn on_each_plain_shape<R: PublisherRig>(rig: &R, scenario: fn(&R, &ChannelShape)) {
-    let shapes = plain_shapes(rig);
-    must_some(shapes.first(), "a public channel to run on");
-    for shape in &shapes {
+/// Runs `scenario` once on each of `shapes`, a fresh channel each. A rig with none of them fails
+/// the scenario, which the runner skips before it gets here.
+pub(super) fn on_each_of<R: PublisherRig>(
+    rig: &R,
+    shapes: &[ChannelShape],
+    what: &str,
+    scenario: fn(&R, &ChannelShape),
+) {
+    must_some(shapes.first(), what);
+    for shape in shapes {
         scenario(rig, shape);
     }
+}
+
+/// The declared shapes whose reads need no grant.
+pub(super) fn public_shapes<R: PublisherRig>(rig: &R) -> Vec<ChannelShape> {
+    rig.shapes().into_iter().filter(|s| !s.private).collect()
+}
+
+/// The declared shapes whose every read, a stranger's included, needs a grant.
+pub(super) fn private_shapes<R: PublisherRig>(rig: &R) -> Vec<ChannelShape> {
+    rig.shapes().into_iter().filter(|s| s.private).collect()
+}
+
+/// The declared shapes that stage and address the staged state by the group of the declared set.
+pub(super) fn grouped_shapes<R: PublisherRig>(rig: &R) -> Vec<ChannelShape> {
+    rig.shapes()
+        .into_iter()
+        .filter(|s| s.group_addressed && s.stages)
+        .collect()
+}
+
+/// The phase of the grant an action holds first: the stage grant when the channel stages, and
+/// the commit grant when it does not.
+pub(super) fn first_phase<P: Publisher>(p: &P) -> GrantPhase {
+    if p.stages() {
+        GrantPhase::Stage
+    } else {
+        GrantPhase::Commit
+    }
+}
+
+/// The declared shapes that stage, of any address and any privacy.
+pub(super) fn staging_shapes<R: PublisherRig>(rig: &R) -> Vec<ChannelShape> {
+    rig.shapes().into_iter().filter(|s| s.stages).collect()
+}
+
+/// The declared shapes that do not stage, public or private.
+pub(super) fn unstaged_shapes<R: PublisherRig>(rig: &R) -> Vec<ChannelShape> {
+    rig.shapes().into_iter().filter(|s| !s.stages).collect()
+}
+
+/// The declared shapes that commit a set at once, public or private, staged or not.
+pub(super) fn set_commit_shapes<R: PublisherRig>(rig: &R) -> Vec<ChannelShape> {
+    rig.shapes()
+        .into_iter()
+        .filter(|s| built(rig, s).commit_unit() == CommitUnit::Set)
+        .collect()
+}
+
+/// The declared shapes that do not stage and whose commit is a conditional put.
+pub(super) fn conditional_shapes<R: PublisherRig>(rig: &R) -> Vec<ChannelShape> {
+    rig.shapes()
+        .into_iter()
+        .filter(|s| !s.stages && built(rig, s).conditional_put())
+        .collect()
+}
+
+/// Runs `scenario` once on each declared shape, a fresh channel each, whatever the shape stages,
+/// addresses or hides: a promise a scenario holds of every channel is held of each of them.
+pub(super) fn on_each_shape<R: PublisherRig>(rig: &R, scenario: fn(&R, &ChannelShape)) {
+    on_each_of(rig, &rig.shapes(), "a channel to run on", scenario);
+}
+
+/// Runs `scenario` once on each declared shape that stages.
+pub(super) fn on_each_staging_shape<R: PublisherRig>(rig: &R, scenario: fn(&R, &ChannelShape)) {
+    on_each_of(
+        rig,
+        &staging_shapes(rig),
+        "a channel that stages to run on",
+        scenario,
+    );
+}
+
+/// Runs `scenario` once on each declared shape that does not stage.
+pub(super) fn on_each_unstaged_shape<R: PublisherRig>(rig: &R, scenario: fn(&R, &ChannelShape)) {
+    on_each_of(
+        rig,
+        &unstaged_shapes(rig),
+        "a channel that does not stage to run on",
+        scenario,
+    );
+}
+
+/// The phases of the grants an action of a channel of `shape` holds, each of which may observe:
+/// the read grant, the stage grant of a channel that stages, and the commit grant.
+pub(super) fn phases_of(shape: &ChannelShape) -> Vec<GrantPhase> {
+    let mut all = vec![GrantPhase::Read];
+    if shape.stages {
+        all.push(GrantPhase::Stage);
+    }
+    all.push(GrantPhase::Commit);
+    all
 }
 
 /// A fresh channel of `shape`, held to what the shape says.
@@ -319,52 +454,6 @@ pub(super) fn staging_publisher<R: PublisherRig>(rig: &R) -> R::Publisher {
         rig,
         &must_some(staging_shape(rig), "a public channel that stages"),
     )
-}
-
-/// A fresh channel of the first declared plain shape that does not stage.
-pub(super) fn unstaged_publisher<R: PublisherRig>(rig: &R) -> R::Publisher {
-    built(
-        rig,
-        &must_some(unstaged_shape(rig), "a public channel that does not stage"),
-    )
-}
-
-/// The gate of a scenario that runs on any plain channel.
-pub(super) fn needs_a_plain_channel<R: PublisherRig>(rig: &R) -> Option<&'static str> {
-    plain_shapes(rig)
-        .is_empty()
-        .then_some("the rig declares no public channel without a group address")
-}
-
-/// The gate of a scenario about staged state.
-pub(super) fn needs_staging<R: PublisherRig>(rig: &R) -> Option<&'static str> {
-    staging_shape(rig)
-        .is_none()
-        .then_some("the rig declares no public channel that stages")
-}
-
-/// The gate of a scenario about a channel whose commit carries the bytes.
-pub(super) fn needs_no_staging<R: PublisherRig>(rig: &R) -> Option<&'static str> {
-    unstaged_shape(rig)
-        .is_none()
-        .then_some("the rig declares no public channel that does not stage")
-}
-
-/// The gate of a scenario about a conditional put on a channel whose commit carries the bytes.
-pub(super) fn needs_a_conditional_commit<R: PublisherRig>(rig: &R) -> Option<&'static str> {
-    let Some(shape) = unstaged_shape(rig) else {
-        return Some("the rig declares no public channel that does not stage");
-    };
-    (!built(rig, &shape).conditional_put())
-        .then_some("the channel is not a conditional put: its commit may replace what is there")
-}
-
-/// The gate of a scenario that commits several coordinates in one call.
-pub(super) fn needs_a_set_commit<R: PublisherRig>(rig: &R) -> Option<&'static str> {
-    (!plain_shapes(rig)
-        .iter()
-        .any(|s| built(rig, s).commit_unit() == CommitUnit::Set))
-    .then_some("the rig declares no public channel that commits a set at once")
 }
 
 // ---- sets ----
@@ -584,9 +673,67 @@ pub(super) fn observed_alone<R: PublisherRig>(
     )
 }
 
+/// What an observe with a grant of `phase` for the whole of `set` sees of the coordinate at `at`
+/// on a channel of `shape`: told the set the coordinate was staged in when the channel addresses
+/// staged state by group, which finds it only so, and told no set otherwise.
+pub(super) fn observed_as_staged<R: PublisherRig>(
+    rig: &R,
+    shape: &ChannelShape,
+    p: &mut R::Publisher,
+    phase: GrantPhase,
+    set: &Set,
+    at: usize,
+) -> Presence {
+    if shape.group_addressed {
+        observed(rig, p, phase, set, at)
+    } else {
+        observed_alone(rig, p, phase, set, at)
+    }
+}
+
 /// The bytes a stranger fetches for `k`, as the read-back of a publish on a public channel does.
 pub(super) fn fetched_by_a_stranger<P: Publisher>(p: &mut P, k: &Coordinate) -> Option<Vec<u8>> {
     must(p.fetch(&Grant::none(), k), "a fetch by a stranger")
+}
+
+/// What a reader sees of `k` on a channel of `shape`: a stranger on a public channel, which needs
+/// no grant, and the holder of a read grant on a private one, which turns a stranger away.
+pub(super) fn looked<R: PublisherRig>(
+    rig: &R,
+    shape: &ChannelShape,
+    p: &mut R::Publisher,
+    k: &Coordinate,
+) -> Presence {
+    if shape.private {
+        let grant = rig.grant(p, GrantPhase::Read, std::slice::from_ref(k));
+        must(p.observe(&grant, k, &[]), "an observe with a read grant")
+    } else {
+        stranger(p, k)
+    }
+}
+
+/// The bytes a reader fetches for `k` on a channel of `shape`, as the read-back of a publish
+/// does: as a stranger on a public channel, and with a read grant on a private one.
+pub(super) fn fetched_by_a_reader<R: PublisherRig>(
+    rig: &R,
+    shape: &ChannelShape,
+    p: &mut R::Publisher,
+    k: &Coordinate,
+) -> Option<Vec<u8>> {
+    if shape.private {
+        fetched(rig, p, k)
+    } else {
+        fetched_by_a_stranger(p, k)
+    }
+}
+
+/// The set of `sets` that holds `k`, and the position of `k` in it: the set `k` was staged in,
+/// which a channel addressed by group finds staged state by.
+pub(super) fn holder_of<'a>(sets: &'a [Set], k: &Coordinate) -> (&'a Set, usize) {
+    let found = sets
+        .iter()
+        .find_map(|set| set.coords.iter().position(|c| c == k).map(|at| (set, at)));
+    must_some(found, "the set the coordinate was staged in")
 }
 
 /// The bytes a read grant fetches for `k`.

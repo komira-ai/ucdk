@@ -14,7 +14,9 @@ use ucdk_release_seams::{
 };
 
 use super::publisher::{FakePublisherRig, Flawed};
+use super::publisher_flaw::Behind;
 use super::publisher_grant::issue;
+use super::publisher_lax::{Defect, Kind, Lax, Pair, Verb};
 use super::secret::texts;
 
 /// One field of a coordinate.
@@ -32,6 +34,13 @@ impl Field {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum More {
+    /// A call whose grant names a coordinate that differs from the one asked in the field only
+    /// is taken for one that names it.
+    GrantBlindToField(Field, Verb),
+    /// On a channel of the kind, a bad grant of the defect is taken for a good one by the verb.
+    BadGrantTakenOnShape(Kind, Defect, Verb),
+    /// An abort is taken from a commit grant.
+    AbortTakesCommitGrant,
     /// The conforming fake, wrapped and changed in no way.
     Conforming,
     /// On a channel that stages, a commit that lost a race replaces the bytes that won.
@@ -134,6 +143,20 @@ pub enum More {
     CommitPublishesSiblingStagedBytes,
     /// An abort also yanks the committed coordinates of the name it names that differ in a field.
     AbortWithdrawsCommittedSibling,
+    /// A stage, a commit or an abort of three coordinates checks the grant for two of them only.
+    CoverageOfTwo(Verb, Pair),
+    /// On a channel of the kind, a read grant is taken for the grant of the write.
+    ReadGrantWrites(Kind, Verb),
+    /// On a channel of the kind, a read that is a `fetch`, a `newest` or a `list` and carries a
+    /// stage or a commit grant answers staged state.
+    WriterSeesStaged(Kind, Verb),
+    /// On a channel of the kind, an observe with a read grant sees the staged state of the
+    /// caller, told the set when the channel is addressed by group.
+    ReadSeesStaged(Kind),
+    /// An observe with a read grant sees the staged state of another writer.
+    ReadSeesOthersStaged,
+    /// A stub that is lax in one way on one kind of channel.
+    Lax(Lax),
 }
 
 /// The siblings the rig names, whatever the rig it wraps names.
@@ -151,8 +174,8 @@ enum Siblings {
 pub struct MoreRig {
     base: FakePublisherRig,
     flaw: More,
-    /// The stub is behind the channels that do not stage only.
-    only_unstaged: bool,
+    /// The stub is behind the channels of this kind only, when the rig says.
+    behind: Option<Behind>,
     siblings: Siblings,
 }
 
@@ -184,27 +207,27 @@ impl MoreRig {
         Self {
             base,
             flaw,
-            only_unstaged: false,
+            behind: None,
             siblings: Siblings::Base,
         }
     }
 
-    /// The stub of `flaw` around the rig `base`, behind the channels that do not stage only: the
+    /// The stub of `flaw` around the rig `base`, behind the channels of one kind only: the
     /// channels of the other shapes are the conforming fake.
-    pub fn flawed_only_unstaged(base: FakePublisherRig, flaw: More) -> Self {
+    pub fn flawed_behind(base: FakePublisherRig, flaw: More, behind: Behind) -> Self {
         Self {
-            only_unstaged: true,
+            behind: Some(behind),
             ..Self::flawed_on(base, flaw)
         }
     }
 }
 
 pub struct Wrapped {
-    base: Flawed,
-    flaw: More,
+    pub(super) base: Flawed,
+    pub(super) flaw: More,
     /// The stub is in force on this channel.
     active: bool,
-    shape: ChannelShape,
+    pub(super) shape: ChannelShape,
     /// The digest each coordinate was declared with, and how many coordinates the set had.
     declared: Vec<(Coordinate, String, usize)>,
     /// The coordinates of each commit that landed.
@@ -214,7 +237,7 @@ pub struct Wrapped {
     /// The stamp the last commit answered `Duplicate` declared for a coordinate.
     restamped: Vec<(Coordinate, Option<Stamped>)>,
     /// Coordinates another writer committed.
-    others: Vec<Coordinate>,
+    pub(super) others: Vec<Coordinate>,
     /// The listing lags.
     lagging: bool,
     /// A commit was raced.
@@ -227,9 +250,11 @@ pub struct Wrapped {
     rewritten: Vec<(Coordinate, Option<Stamped>, bool)>,
     /// The coordinates of every call that went through, before the call that is running.
     known: Vec<Coordinate>,
-    committed: Vec<Coordinate>,
-    staged: Vec<(Coordinate, Vec<u8>)>,
+    pub(super) committed: Vec<Coordinate>,
+    pub(super) staged: Vec<(Coordinate, Vec<u8>)>,
     aborted: Vec<Coordinate>,
+    /// Coordinates another writer staged, with the bytes it staged.
+    pub(super) staged_by_others: Vec<(Coordinate, Vec<u8>)>,
 }
 
 impl PublisherRig for MoreRig {
@@ -243,7 +268,7 @@ impl PublisherRig for MoreRig {
         Wrapped {
             base: self.base.publisher(shape),
             flaw: self.flaw,
-            active: !(self.only_unstaged && shape.stages),
+            active: self.behind.is_none_or(|behind| behind.holds(shape)),
             shape: *shape,
             declared: Vec::new(),
             sets: Vec::new(),
@@ -259,6 +284,7 @@ impl PublisherRig for MoreRig {
             committed: Vec::new(),
             staged: Vec::new(),
             aborted: Vec::new(),
+            staged_by_others: Vec::new(),
         }
     }
 
@@ -271,6 +297,9 @@ impl PublisherRig for MoreRig {
             Arrangement::LoseStagedState => p.vanished = true,
             Arrangement::CommitVisibleAfter(_) => p.becoming = true,
             Arrangement::HeldByAnother { coordinate, .. } => p.others.push(coordinate.clone()),
+            Arrangement::StagedByAnother { coordinate, bytes } => {
+                p.staged_by_others.push((coordinate.clone(), bytes.clone()));
+            }
             _ => {}
         }
         if self.flaw == More::NonStagingSetCommitIsTorn
@@ -298,6 +327,10 @@ impl PublisherRig for MoreRig {
 
     fn reads(&self, p: &Wrapped) -> Vec<ReadStep> {
         self.base.reads(&p.base)
+    }
+
+    fn sent(&self, p: &Wrapped) -> usize {
+        self.base.sent(&p.base)
     }
 
     fn coordinate(&self, label: &str) -> Coordinate {
@@ -335,7 +368,7 @@ impl PublisherRig for MoreRig {
 }
 
 /// Whether `a` and `b` are two coordinates of one name that differ in `field` and in no other.
-fn differs_only_in(a: &Coordinate, b: &Coordinate, field: Field) -> bool {
+pub(super) fn differs_only_in(a: &Coordinate, b: &Coordinate, field: Field) -> bool {
     let agree = |same: bool, of: Field| if field == of { !same } else { same };
     a.name == b.name
         && agree(a.channel == b.channel, Field::Channel)
@@ -359,7 +392,7 @@ fn deduped<'a>(items: &[StageItem<'a>]) -> Vec<StageItem<'a>> {
 }
 
 /// Whether `g` is a stage or a commit grant.
-fn is_writer(g: &Grant) -> bool {
+pub(super) fn is_writer(g: &Grant) -> bool {
     matches!(
         texts(g.secret()).first().map(String::as_str),
         Some("stage" | "commit")
@@ -372,7 +405,7 @@ impl Wrapped {
     }
 
     /// The flaw of the stub, when it is in force on this channel.
-    fn flaw(&self) -> Option<More> {
+    pub(super) fn flaw(&self) -> Option<More> {
         self.active.then_some(self.flaw)
     }
 
@@ -419,7 +452,7 @@ impl Wrapped {
         }
     }
 
-    fn internal(&self, phase: GrantPhase, coordinates: &[Coordinate]) -> Grant {
+    pub(super) fn internal(&self, phase: GrantPhase, coordinates: &[Coordinate]) -> Grant {
         issue(
             &self.base.clock,
             &federated_repository(),
@@ -497,6 +530,10 @@ impl Publisher for Wrapped {
             return Ok(Presence::Absent);
         }
         let mut result = self.base.observe(g, k, set);
+        let retry = self.lenient(Verb::Observe, g, std::slice::from_ref(k), &result);
+        if let Some(grant) = retry {
+            result = self.base.observe(&grant, k, set);
+        }
         if self.is(More::DupObserveSetAccepted) && result.is_err() {
             let once = deduped(set);
             if once.len() != set.len() {
@@ -550,7 +587,12 @@ impl Publisher for Wrapped {
         {
             result = Ok(Presence::Staged(Held::default()));
         }
-        result
+        if matches!(result, Ok(Presence::Absent))
+            && self.read_grant_sees_staged(g, k, !set.is_empty())
+        {
+            result = Ok(Presence::Staged(Held::default()));
+        }
+        self.lax_observe(g, k, set, result)
     }
 
     fn stage(&mut self, g: &Grant, items: &[StageItem<'_>]) -> Result<StageAnswer, SeamError> {
@@ -562,6 +604,10 @@ impl Publisher for Wrapped {
         };
         self.remember_declared(items);
         let mut result = self.base.stage(g, &used);
+        let retry = self.lenient(Verb::Stage, g, &coordinates, &result);
+        if let Some(grant) = retry {
+            result = self.base.stage(&grant, &used);
+        }
         if self.is(More::StagePartialOnRefusal)
             && items.len() > 1
             && Self::refused_for_a_member(&result)
@@ -614,7 +660,18 @@ impl Publisher for Wrapped {
     }
 
     fn abort(&mut self, g: &Grant, ks: &[Coordinate]) -> Result<(), SeamError> {
-        let result = self.base.abort(g, ks);
+        let mut result = self.base.abort(g, ks);
+        let mut retry = self.lenient(Verb::Abort, g, ks, &result);
+        if retry.is_none()
+            && self.is(More::AbortTakesCommitGrant)
+            && result.is_err()
+            && texts(g.secret()).first().map(String::as_str) == Some("commit")
+        {
+            retry = Some(self.internal(GrantPhase::Stage, ks));
+        }
+        if let Some(grant) = retry {
+            result = self.base.abort(&grant, ks);
+        }
         if result.is_ok() {
             self.aborted.extend(ks.iter().cloned());
             if self.is(More::AbortDropsUnnamedCommitted) {
@@ -668,6 +725,10 @@ impl Publisher for Wrapped {
             .is_some_and(|item| self.base.inner.is_yanked(item.coordinate));
         self.remember_declared(items);
         let mut result = self.base.commit(g, &used);
+        let retry = self.lenient(Verb::Commit, g, &coordinates, &result);
+        if let Some(grant) = retry {
+            result = self.base.commit(&grant, &used);
+        }
         if self.is(More::CommitPartialOnRefusal)
             && items.len() > 1
             && Self::refused_for_a_member(&result)
@@ -798,6 +859,10 @@ impl Publisher for Wrapped {
 
     fn yank(&mut self, g: &Grant, k: &Coordinate, reason: &str) -> Result<(), SeamError> {
         let mut result = self.base.yank(g, k, reason);
+        let retry = self.lenient(Verb::Yank, g, std::slice::from_ref(k), &result);
+        if let Some(grant) = retry {
+            result = self.base.yank(&grant, k, reason);
+        }
         if self.is(More::YankAbsentOk)
             && let Err(SeamError::Permanent(why)) = &result
             && why.contains("is not held")
@@ -850,13 +915,17 @@ impl Publisher for Wrapped {
             return Ok(None);
         }
         let mut result = self.base.fetch(g, k);
+        let retry = self.lenient(Verb::Fetch, g, std::slice::from_ref(k), &result);
+        if let Some(grant) = retry {
+            result = self.base.fetch(&grant, k);
+        }
         if self.is(More::FetchByNamePrefix)
             && matches!(result, Ok(None))
             && let Some(longer) = self.extending(k)
         {
             result = self.base.fetch(&Grant::none(), &longer);
         }
-        if self.is(More::FetchWithWriterGrantSeesStaged)
+        if (self.is(More::FetchWithWriterGrantSeesStaged) || self.writer_sees_staged(Verb::Fetch))
             && matches!(result, Ok(None))
             && is_writer(g)
             && self.base.inner.is_staged(k)
@@ -864,7 +933,7 @@ impl Publisher for Wrapped {
         {
             result = Ok(Some(bytes.clone()));
         }
-        result
+        self.lax_fetch(g, k, result)
     }
 
     fn newest(
@@ -873,30 +942,44 @@ impl Publisher for Wrapped {
         ch: &str,
         name: &str,
     ) -> Result<Vec<(Coordinate, Held)>, SeamError> {
-        let mut found = self.base.newest(g, ch, name)?;
-        if self.is(More::NewestWithWriterGrantIncludesStaged) && is_writer(g) {
+        let mut result = self.base.newest(g, ch, name);
+        let retry = self.lenient(Verb::Newest, g, &[], &result);
+        if let Some(grant) = retry {
+            result = self.base.newest(&grant, ch, name);
+        }
+        let mut found = result?;
+        if (self.is(More::NewestWithWriterGrantIncludesStaged)
+            || self.writer_sees_staged(Verb::Newest))
+            && is_writer(g)
+        {
             for (c, _) in self.staged.clone() {
-                if c.channel == ch
-                    && c.name == name
-                    && self.base.inner.is_staged(&c)
-                    && let Some(held) = self.base.held_now(&c)
-                {
+                if c.channel == ch && c.name == name && self.base.inner.is_staged(&c) {
+                    // A channel addressed by group shows no staged state to an observe that is
+                    // told no set: what the stub makes up has no digest.
+                    let held = self.base.held_now(&c).unwrap_or_default();
                     found.push((c, held));
                 }
             }
         }
-        Ok(found)
+        Ok(self.lax_newest(g, ch, name, found))
     }
 
     fn list(&mut self, g: &Grant, scope: &ListScope) -> Result<Vec<Listed>, SeamError> {
-        let mut listed = self.base.list(g, scope)?;
-        if self.is(More::ListWithWriterGrantIncludesStaged) && is_writer(g) {
+        let mut result = self.base.list(g, scope);
+        let retry = self.lenient(Verb::List, g, &[], &result);
+        if let Some(grant) = retry {
+            result = self.base.list(&grant, scope);
+        }
+        let mut listed = result?;
+        if (self.is(More::ListWithWriterGrantIncludesStaged) || self.writer_sees_staged(Verb::List))
+            && is_writer(g)
+        {
             for (c, _) in self.staged.clone() {
                 if c.channel == scope.channel
                     && c.name.starts_with(&scope.prefix)
                     && self.base.inner.is_staged(&c)
-                    && let Some(held) = self.base.held_now(&c)
                 {
+                    let held = self.base.held_now(&c).unwrap_or_default();
                     listed.push(Listed {
                         coordinate: c,
                         held,
@@ -904,6 +987,6 @@ impl Publisher for Wrapped {
                 }
             }
         }
-        Ok(listed)
+        Ok(self.lax_list(g, scope, listed))
     }
 }

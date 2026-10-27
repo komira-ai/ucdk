@@ -17,10 +17,13 @@ kit_tests!(
         FakePublisherRig::sealing(),
         FakePublisherRig::sealing().with_shapes(vec![ChannelShape::without_staging()]),
         FakePublisherRig::narrow(),
+        FakePublisherRig::narrow_yanking_a_version(),
         FakePublisherRig::per_coordinate(),
         FakePublisherRig::yanking_a_version(),
         FakePublisherRig::unconditional(),
         FakePublisherRig::restricted(),
+        FakePublisherRig::pairing(),
+        FakePublisherRig::refusing_writer_reads(),
     ],
     publisher_scenarios;
     observe_absent_is_not_an_error,
@@ -39,6 +42,22 @@ kit_tests!(
     yanked_coordinate_cannot_be_committed_again,
     lost_answer_is_resolvable_by_observe,
     list_may_lag_but_observe_is_exact,
+    public_read_needs_no_grant,
+    a_grant_for_another_repository_sends_nothing,
+    a_grant_of_the_wrong_phase_is_denied_and_nothing_happens,
+    an_expired_grant_is_refused_and_nothing_happens,
+    newest_lists_every_held_coordinate_of_the_name,
+    observe_returns_the_stamp_it_was_given,
+    a_granted_observe_sees_a_coordinate_committed_by_another_writer,
+    a_private_observe_reads_the_group_then_the_index,
+    a_coordinate_committed_in_another_group_reads_as_present_never_absent,
+    a_failed_group_read_or_index_read_fails_the_observe_and_is_not_absent,
+    observe_with_the_declared_set_finds_staged_state_addressed_by_the_group_of_that_set,
+    observe_with_an_empty_set_cannot_see_staged_state_and_still_sees_committed_coordinates,
+    a_read_grant_observes_committed_coordinates_and_can_neither_stage_nor_commit,
+    commit_is_atomic_when_the_coordinate_appears_between_observe_and_commit,
+    transient_after_commit_is_observed_before_retry,
+    duplicate_over_other_bytes_leaves_the_old_bytes,
     a_second_commit_of_the_same_bytes_is_duplicate,
     a_stage_over_ones_own_staged_coordinate_is_duplicate,
     a_commit_carries_exactly_what_was_staged,
@@ -65,7 +84,7 @@ fn the_whole_kit_passes_on_the_fake() {
 }
 
 /// The conforming fake does not seal a version, so it skips the scenario about one, says why, and
-/// passes the other twenty-nine.
+/// passes the other forty-five.
 #[test]
 fn the_fake_that_does_not_seal_a_version_skips_that_scenario_and_passes_the_rest() {
     let report = run_publisher_kit(&FakePublisherRig::conforming());
@@ -79,7 +98,7 @@ fn the_fake_that_does_not_seal_a_version_skips_that_scenario_and_passes_the_rest
 
 /// A rig that takes every default of the kit's hooks has the literal coordinates and bytes of the
 /// kit, holds every coordinate, seals no version and burns no number, so the three scenarios
-/// about those are skipped for it, with the reason, and it passes the other twenty-seven.
+/// about those are skipped for it, with the reason, and it passes the other forty-three.
 #[test]
 fn a_rig_that_takes_the_default_of_every_hook_passes_what_it_can_run() {
     let report = run_publisher_kit(&PlainRig::new());
