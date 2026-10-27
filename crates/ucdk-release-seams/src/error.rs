@@ -15,6 +15,24 @@ pub struct Backoff {
     pub ticks: u32,
 }
 
+impl Backoff {
+    /// The backoff for a wait of `ms` milliseconds, rounded up to whole ticks of
+    /// [`crate::PAUSE_TICK_MS`] so that a registry never asks for less than it was told, and
+    /// saturating at `u32::MAX` ticks. A registry that is told to wait in seconds or
+    /// milliseconds states its backoff with this and keeps no conversion of its own.
+    pub fn after_millis(ms: u64) -> Self {
+        let tick = u64::from(crate::PAUSE_TICK_MS);
+        Self {
+            ticks: u32::try_from(ms.div_ceil(tick)).unwrap_or(u32::MAX),
+        }
+    }
+
+    /// The backoff for a wait of `seconds` seconds, as [`Backoff::after_millis`].
+    pub fn after_seconds(seconds: u32) -> Self {
+        Self::after_millis(u64::from(seconds) * 1000)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SeamError {
     /// Nothing happened; do not retry as is.

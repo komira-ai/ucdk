@@ -80,13 +80,29 @@ fn a_failed_observe_after_an_effect_may_have_landed_is_always_indeterminate() {
 }
 
 #[test]
-fn a_pause_tick_is_one_second_and_a_registry_wait_in_seconds_is_the_same_count_of_ticks() {
-    // The one definition of the tick: a publisher that is told to wait `n` seconds states
-    // `n * 1000 / PAUSE_TICK_MS` ticks, so changing the constant changes every wait with it.
+fn a_pause_tick_is_one_second_and_a_backoff_converts_a_wait_through_it() {
+    // The documented value of the tick, and the one conversion every registry uses: a wait told
+    // in milliseconds or seconds becomes whole ticks of `PAUSE_TICK_MS`, rounded up so a
+    // registry never asks for less than it was told, and saturating.
     assert_eq!(PAUSE_TICK_MS, 1000);
-    let seconds = 7;
-    let ticks = seconds * 1000 / PAUSE_TICK_MS;
-    assert_eq!(Backoff { ticks }, Backoff { ticks: 7 });
+    let tick = u64::from(PAUSE_TICK_MS);
+    for (ms, ticks) in [
+        (0, 0),
+        (1, 1),
+        (tick - 1, 1),
+        (tick, 1),
+        (tick + 1, 2),
+        (7 * tick, 7),
+        (u64::MAX, u32::MAX),
+    ] {
+        assert_eq!(Backoff::after_millis(ms), Backoff { ticks }, "{ms} ms");
+    }
+    assert_eq!(Backoff::after_seconds(0), Backoff { ticks: 0 });
+    assert_eq!(Backoff::after_seconds(7), Backoff { ticks: 7 });
+    assert_eq!(
+        Backoff::after_seconds(u32::MAX),
+        Backoff { ticks: u32::MAX }
+    );
 }
 
 fn every_variant() -> Vec<SeamError> {
