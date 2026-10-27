@@ -180,9 +180,8 @@ fn layered<B: BuildSystem>(bs: &B, case: &Case, verb: Verb) -> Command {
 fn contract(case: &Case, verb: Verb) -> Command {
     let report = case.report();
     let report = (verb == Verb::Test).then_some(report.as_str());
-    must(
-        ucdk_release::invocation::command(&case.inv(verb, report))
-            .map_err(|e| SeamError::Permanent(e.to_string())),
+    must_some(
+        ucdk_release::invocation::command(&case.inv(verb, report)).ok(),
         &format!("the contract's command of the {verb} verb"),
     )
 }
