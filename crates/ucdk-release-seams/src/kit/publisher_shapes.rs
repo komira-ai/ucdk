@@ -5,13 +5,12 @@
 //! burned number, and a registry that echoes the digest a writer declared.
 
 use ucdk_release::codec::GrantPhase;
-use ucdk_release::publish::Presence;
+use ucdk_release::publish::{Held, Presence};
 use ucdk_release_proto::v1::{Coordinate, Reason};
 
 use super::publisher_rig::{
     Arrangement, ChannelShape, PublisherRig, Set, built, fetched, needs_a_plain_channel, observed,
     plain_shapes, present_held, publish, sha, stage, staged_held, staging_publisher, stranger,
-    yanked_held,
 };
 use super::{must, must_err, must_some, same};
 use crate::{
@@ -408,9 +407,12 @@ pub(super) fn a_registry_that_echoes_the_declared_digest_fails_readback<R: Publi
     let grant = rig.grant(&p, GrantPhase::Commit, std::slice::from_ref(a));
     must(p.yank(&grant, a, "a reason"), "yank");
     same(
-        yanked_held(stranger(&mut p, a)).digest,
-        set.digest(0),
-        "the digest a yanked coordinate is observed with, from the bytes that were sent",
+        stranger(&mut p, a),
+        Presence::Yanked(Held {
+            digest: set.digest(0),
+            ..set.held.clone()
+        }),
+        "what a yanked coordinate is observed with: the digest from the bytes that were sent",
     );
 }
 

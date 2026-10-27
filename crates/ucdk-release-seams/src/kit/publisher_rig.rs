@@ -486,13 +486,6 @@ pub(super) fn present_held(presence: Presence) -> Held {
     }
 }
 
-pub(super) fn yanked_held(presence: Presence) -> Held {
-    match presence {
-        Presence::Yanked(held) => held,
-        other => fail(format!("expected Yanked, got {other:?}")),
-    }
-}
-
 pub(super) fn is_yanked(presence: &Presence) -> bool {
     matches!(presence, Presence::Yanked(_))
 }
