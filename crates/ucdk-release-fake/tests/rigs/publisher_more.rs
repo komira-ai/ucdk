@@ -9,7 +9,7 @@ use ucdk_release_seams::kit::{
     Arrangement, ChannelShape, Payload, PublisherRig, ReadStep, Sibling, federated_repository,
 };
 use ucdk_release_seams::{
-    CommitAnswer, CommitUnit, Grant, ListScope, Listed, Publisher, SeamError, StageAnswer,
+    Backoff, CommitAnswer, CommitUnit, Grant, ListScope, Listed, Publisher, SeamError, StageAnswer,
     StageItem, YankUnit,
 };
 
@@ -32,6 +32,23 @@ impl Field {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum More {
+    /// The conforming fake, wrapped and changed in no way.
+    Conforming,
+    /// On a channel that stages, a commit that lost a race replaces the bytes that won.
+    StagedRaceOverwrites,
+    /// On a channel that does not stage, a commit that names one coordinate twice commits the last
+    /// of them.
+    NonStagingDupCommitDeduped,
+    /// A commit of staged state that vanished is answered `RateLimited`, which promises no effect
+    /// and is retried, and not `Refused` or `Permanent`.
+    VanishedCommitIsRateLimited,
+    /// A commit repeated while the first is becoming readable is written again with the stamp of
+    /// the repeat, and answered `Committed`.
+    RetryWhileBecomingReplacesTheStamp,
+    /// The same, with the exceptional mark of the repeat.
+    RetryWhileBecomingReplacesTheMark,
+    /// A fetch by a stranger finds nothing, whatever the channel holds.
+    FetchOfAStrangerFindsNothing,
     /// A commit of other bytes or another `Held` than was staged replaces the staged state.
     CommitReplacesStaged,
     /// A commit of a coordinate nobody staged, on a channel that stages, stages it first.
@@ -119,14 +136,45 @@ pub enum More {
     AbortWithdrawsCommittedSibling,
 }
 
+/// The siblings the rig names, whatever the rig it wraps names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Siblings {
+    /// Those of the rig it wraps.
+    Base,
+    /// None.
+    Nobody,
+    /// Only the later platform of the base, which a registry that seals a version cannot publish
+    /// beside it.
+    OnlyAPlatform,
+}
+
 pub struct MoreRig {
     base: FakePublisherRig,
     flaw: More,
     /// The stub is behind the channels that do not stage only.
     only_unstaged: bool,
+    siblings: Siblings,
 }
 
 impl MoreRig {
+    /// The same rig naming no sibling of a coordinate.
+    #[must_use]
+    pub fn naming_no_sibling(self) -> Self {
+        Self {
+            siblings: Siblings::Nobody,
+            ..self
+        }
+    }
+
+    /// The same rig naming one sibling, a later platform, in a set of its own.
+    #[must_use]
+    pub fn naming_only_a_platform(self) -> Self {
+        Self {
+            siblings: Siblings::OnlyAPlatform,
+            ..self
+        }
+    }
+
     pub fn flawed(flaw: More) -> Self {
         Self::flawed_on(FakePublisherRig::conforming(), flaw)
     }
@@ -137,6 +185,7 @@ impl MoreRig {
             base,
             flaw,
             only_unstaged: false,
+            siblings: Siblings::Base,
         }
     }
 
@@ -170,6 +219,12 @@ pub struct Wrapped {
     lagging: bool,
     /// A commit was raced.
     raced: bool,
+    /// The staged state was arranged to vanish.
+    vanished: bool,
+    /// A commit was arranged to become readable late.
+    becoming: bool,
+    /// The stamp and the mark of the last repeat of a commit that was written again.
+    rewritten: Vec<(Coordinate, Option<Stamped>, bool)>,
     /// The coordinates of every call that went through, before the call that is running.
     known: Vec<Coordinate>,
     committed: Vec<Coordinate>,
@@ -197,6 +252,9 @@ impl PublisherRig for MoreRig {
             others: Vec::new(),
             lagging: false,
             raced: false,
+            vanished: false,
+            becoming: false,
+            rewritten: Vec::new(),
             known: Vec::new(),
             committed: Vec::new(),
             staged: Vec::new(),
@@ -210,6 +268,8 @@ impl PublisherRig for MoreRig {
         }
         match what {
             Arrangement::ListLags => p.lagging = true,
+            Arrangement::LoseStagedState => p.vanished = true,
+            Arrangement::CommitVisibleAfter(_) => p.becoming = true,
             Arrangement::HeldByAnother { coordinate, .. } => p.others.push(coordinate.clone()),
             _ => {}
         }
@@ -249,7 +309,16 @@ impl PublisherRig for MoreRig {
     }
 
     fn siblings(&self, base: &Coordinate) -> Vec<Sibling> {
-        self.base.siblings(base)
+        match self.siblings {
+            Siblings::Base => self.base.siblings(base),
+            Siblings::Nobody => Vec::new(),
+            Siblings::OnlyAPlatform => self
+                .base
+                .siblings(base)
+                .into_iter()
+                .filter(|s| s.field == "platform")
+                .collect(),
+        }
     }
 
     fn unrepresentable(&self) -> Vec<Coordinate> {
@@ -446,6 +515,16 @@ impl Publisher for Wrapped {
         {
             held.stamp.clone_from(stamp);
         }
+        if let Ok(Presence::Present(held)) = &mut result
+            && let Some((_, stamp, mark)) = self.rewritten.iter().rev().find(|(c, _, _)| c == k)
+        {
+            if self.is(More::RetryWhileBecomingReplacesTheStamp) {
+                held.stamp.clone_from(stamp);
+            }
+            if self.is(More::RetryWhileBecomingReplacesTheMark) {
+                held.exceptional = *mark;
+            }
+        }
         let echoes = match (&result, self.declared_for(k)) {
             (Ok(Presence::Present(_) | Presence::Staged(_)), Some((_, digest, members))) => {
                 (self.is(More::EchoesOnAMultiMemberSet) && *members > 1).then(|| digest.clone())
@@ -577,7 +656,9 @@ impl Publisher for Wrapped {
 
     fn commit(&mut self, g: &Grant, items: &[StageItem<'_>]) -> Result<CommitAnswer, SeamError> {
         let coordinates: Vec<Coordinate> = items.iter().map(|i| i.coordinate.clone()).collect();
-        let used = if self.is(More::DupCommitDeduped) {
+        let used = if self.is(More::DupCommitDeduped)
+            || (self.is(More::NonStagingDupCommitDeduped) && !self.shape.stages)
+        {
             deduped(items)
         } else {
             items.to_vec()
@@ -643,6 +724,32 @@ impl Publisher for Wrapped {
             if !self.shape.stages && self.is(More::NonStagingCommitOverYanked) && yanked_first {
                 result = Ok(CommitAnswer::Committed);
             }
+            if self.shape.stages && self.is(More::StagedRaceOverwrites) && self.raced {
+                for item in items {
+                    self.base
+                        .inner
+                        .present_different(item.coordinate, item.file.bytes);
+                }
+                result = Ok(CommitAnswer::Committed);
+            }
+            let rewrites = self.is(More::RetryWhileBecomingReplacesTheStamp)
+                || self.is(More::RetryWhileBecomingReplacesTheMark);
+            if self.becoming && rewrites {
+                for item in items {
+                    self.rewritten.push((
+                        item.coordinate.clone(),
+                        item.held.stamp.clone(),
+                        item.held.exceptional,
+                    ));
+                }
+                result = Ok(CommitAnswer::Committed);
+            }
+        }
+        if self.is(More::VanishedCommitIsRateLimited)
+            && self.vanished
+            && matches!(&result, Err(SeamError::Permanent(why)) if why.contains("is not staged"))
+        {
+            result = Err(SeamError::RateLimited(Backoff { ticks: 1 }));
         }
         if !self.shape.stages
             && self.is(More::NonStagingTransientIsPermanent)
@@ -737,6 +844,9 @@ impl Publisher for Wrapped {
 
     fn fetch(&mut self, g: &Grant, k: &Coordinate) -> Result<Option<Vec<u8>>, SeamError> {
         if self.is(More::AbortDropsUnnamedCommitted) && self.dropped.contains(k) {
+            return Ok(None);
+        }
+        if self.is(More::FetchOfAStrangerFindsNothing) && g.is_none() {
             return Ok(None);
         }
         let mut result = self.base.fetch(g, k);
