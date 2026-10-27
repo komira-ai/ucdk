@@ -84,11 +84,38 @@ pub enum Flaw {
     StickyRepository,
     /// The expiry of a grant is rounded down to a whole second.
     ExpiryRoundedToSecond,
+    /// The subject of the job need only end with the declared subject.
+    SubjectMatchedBySuffix,
+    /// The audience of the job need only contain the declared audience.
+    AudienceMatchedByContainment,
+    /// The environment of the job need only start with the declared environment.
+    EnvironmentMatchedByPrefix,
+    /// The value of a pinned claim of the job need only contain the declared value.
+    PinnedValueMatchedByContainment,
+    /// The claims are compared after folding full-width letters, the Kelvin sign and the long s
+    /// to the letters they resemble.
+    ClaimsMatchedAfterFolding,
+    /// The claims are compared after trimming white space.
+    ClaimsMatchedAfterTrimming,
+    /// An anonymous identity is answered with a grant for a stage or a read grant.
+    AnonymousStageOrReadGetsAGrant,
+    /// A commit grant and a read grant never expire.
+    NonStageGrantsNeverExpire,
+    /// The limit counts the coordinates of every grant a source has issued.
+    CumulativeLimit,
+    /// A request for no coordinate is issued a grant that covers one named `*`.
+    EmptyRequestCoversAnything,
+    /// The secret of a grant is written into the log reversed.
+    LogsTheSecretReversed,
+    /// The secret of a grant is written into the log without its first and last two bytes.
+    LogsTheMiddleOfTheSecret,
+    /// The secret of a grant is written into the log in hex.
+    LogsTheSecretInHex,
 }
 
 impl Flaw {
     /// Every stub of the issuer.
-    pub const ALL: [Self; 31] = [
+    pub const ALL: [Self; 44] = [
         Self::AnonymousGetsAGrant,
         Self::DropsTheLastCoordinate,
         Self::IgnoresPinnedClaims,
@@ -120,7 +147,44 @@ impl Flaw {
         Self::ScopeStickyToFirstRequest,
         Self::StickyRepository,
         Self::ExpiryRoundedToSecond,
+        Self::SubjectMatchedBySuffix,
+        Self::AudienceMatchedByContainment,
+        Self::EnvironmentMatchedByPrefix,
+        Self::PinnedValueMatchedByContainment,
+        Self::ClaimsMatchedAfterFolding,
+        Self::ClaimsMatchedAfterTrimming,
+        Self::AnonymousStageOrReadGetsAGrant,
+        Self::NonStageGrantsNeverExpire,
+        Self::CumulativeLimit,
+        Self::EmptyRequestCoversAnything,
+        Self::LogsTheSecretReversed,
+        Self::LogsTheMiddleOfTheSecret,
+        Self::LogsTheSecretInHex,
     ];
+}
+
+/// The claim of a job a stub compares.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Field {
+    Subject,
+    Audience,
+    Environment,
+    PinnedName,
+    PinnedValue,
+}
+
+/// A text as a lax issuer folds it before it compares: full-width letters, the Kelvin sign and
+/// the long s become the letters they resemble.
+fn folded(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '\u{212a}' => 'k',
+            '\u{17f}' => 's',
+            c => char::from_u32(u32::from(c).wrapping_sub(0xFEE0))
+                .filter(char::is_ascii_graphic)
+                .unwrap_or(c),
+        })
+        .collect()
 }
 
 pub struct FakeGrantRig {
@@ -157,6 +221,7 @@ pub struct Flawed {
     sticky_exceptional: bool,
     first_phase: Option<GrantPhase>,
     first_repository: Option<Repository>,
+    covered: usize,
 }
 
 /// The coordinate a registry reads out of the text a grant keeps it under: the channel, the
@@ -204,6 +269,7 @@ impl GrantSourceRig for FakeGrantRig {
             sticky_exceptional: false,
             first_phase: None,
             first_repository: None,
+            covered: 0,
         }
     }
 
@@ -333,7 +399,56 @@ impl Flawed {
                 declared.pinned_claims.clone_from(&job.pinned);
             }
         }
+        let (subject, environment) = if req.exceptional {
+            (
+                &mut declared.exceptional_subject,
+                &mut declared.exceptional_environment,
+            )
+        } else {
+            (&mut declared.subject, &mut declared.environment)
+        };
+        if self.admits(Field::Subject, subject, &job.subject) {
+            subject.clone_from(&job.subject);
+        }
+        if self.admits(Field::Environment, environment, &job.environment) {
+            environment.clone_from(&job.environment);
+        }
+        if self.admits(Field::Audience, &declared.audience, &job.audience) {
+            declared.audience.clone_from(&job.audience);
+        }
+        let alike = declared.pinned_claims.len() == job.pinned.len()
+            && declared.pinned_claims.iter().all(|(key, value)| {
+                job.pinned.iter().any(|(job_key, job_value)| {
+                    self.admits(Field::PinnedName, key, job_key)
+                        && self.admits(Field::PinnedValue, value, job_value)
+                })
+            });
+        if alike {
+            declared.pinned_claims.clone_from(&job.pinned);
+        }
         repository
+    }
+
+    /// Whether this stub takes the `claimed` text of a job for the `declared` one.
+    fn admits(&self, field: Field, declared: &str, claimed: &str) -> bool {
+        declared == claimed
+            || match self.flaw {
+                Some(Flaw::SubjectMatchedBySuffix) => {
+                    field == Field::Subject && claimed.ends_with(declared)
+                }
+                Some(Flaw::AudienceMatchedByContainment) => {
+                    field == Field::Audience && claimed.contains(declared)
+                }
+                Some(Flaw::EnvironmentMatchedByPrefix) => {
+                    field == Field::Environment && claimed.starts_with(declared)
+                }
+                Some(Flaw::PinnedValueMatchedByContainment) => {
+                    field == Field::PinnedValue && claimed.contains(declared)
+                }
+                Some(Flaw::ClaimsMatchedAfterFolding) => folded(claimed) == folded(declared),
+                Some(Flaw::ClaimsMatchedAfterTrimming) => claimed.trim() == declared.trim(),
+                _ => false,
+            }
     }
 }
 
@@ -362,17 +477,26 @@ impl GrantSource for Flawed {
         if self.is(Flaw::ReadIsIssuedAsStage) && phase == GrantPhase::Read {
             phase = GrantPhase::Stage;
         }
+        if self.is(Flaw::CumulativeLimit)
+            && self.covered.saturating_add(req.coordinates.len()) > self.limit
+        {
+            return Err(SeamError::Refused(Reason::Credential));
+        }
+        let anything = [coordinate("*")];
         let normalized: Vec<Coordinate>;
-        let mut coordinates = if self.is(Flaw::NormalizesCoordinateFields) {
-            normalized = req
-                .coordinates
-                .iter()
-                .map(|c| coordinate(&c.name))
-                .collect();
-            normalized.as_slice()
-        } else {
-            req.coordinates
-        };
+        let mut coordinates =
+            if self.is(Flaw::EmptyRequestCoversAnything) && req.coordinates.is_empty() {
+                &anything[..]
+            } else if self.is(Flaw::NormalizesCoordinateFields) {
+                normalized = req
+                    .coordinates
+                    .iter()
+                    .map(|c| coordinate(&c.name))
+                    .collect();
+                normalized.as_slice()
+            } else {
+                req.coordinates
+            };
         if self.is(Flaw::EqualScopesCommitDenied)
             && phase == GrantPhase::Commit
             && let Some(Kind::Federated(declared)) =
@@ -424,7 +548,20 @@ impl GrantSource for Flawed {
         if self.is(Flaw::StickyExceptional) && req.exceptional && result.is_ok() {
             self.sticky_exceptional = true;
         }
+        if result.is_ok() {
+            self.covered += coordinates.len();
+        }
         match (self.flaw, result) {
+            (Some(Flaw::AnonymousStageOrReadGetsAGrant), Ok(grant))
+                if grant.is_none() && phase != GrantPhase::Commit =>
+            {
+                Ok(Grant::issued(b"x".to_vec(), 1))
+            }
+            (Some(Flaw::NonStageGrantsNeverExpire), Ok(grant))
+                if phase != GrantPhase::Stage && !grant.is_none() =>
+            {
+                Ok(Grant::issued(grant.secret().to_vec(), u64::MAX))
+            }
             (Some(Flaw::ExpiryRoundedToSecond), Ok(grant)) if !grant.is_none() => {
                 Ok(Grant::issued(
                     grant.secret().to_vec(),
@@ -488,6 +625,22 @@ impl GrantSource for Flawed {
             )),
             (Some(Flaw::LogsTheSecret), Ok(grant)) => {
                 self.log.extend_from_slice(grant.secret());
+                Ok(grant)
+            }
+            (Some(Flaw::LogsTheSecretReversed), Ok(grant)) => {
+                self.log.extend(grant.secret().iter().rev());
+                Ok(grant)
+            }
+            (Some(Flaw::LogsTheMiddleOfTheSecret), Ok(grant)) => {
+                let secret = grant.secret();
+                self.log.extend_from_slice(
+                    &secret[2.min(secret.len())..secret.len().saturating_sub(2)],
+                );
+                Ok(grant)
+            }
+            (Some(Flaw::LogsTheSecretInHex), Ok(grant)) => {
+                let hex: String = grant.secret().iter().map(|b| format!("{b:02x}")).collect();
+                self.log.extend_from_slice(hex.as_bytes());
                 Ok(grant)
             }
             (Some(Flaw::ReissuesTheExpiredGrant), Ok(grant)) => {

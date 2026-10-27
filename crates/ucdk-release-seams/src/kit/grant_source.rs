@@ -3,8 +3,6 @@
 //! covers one phase of one action.
 
 use std::collections::BTreeMap;
-use std::fmt::{Debug, Display};
-use std::marker::PhantomData;
 
 use ucdk_release::codec::{GrantFault, GrantPhase};
 use ucdk_release_proto::v1::push_identity::Kind;
@@ -12,6 +10,11 @@ use ucdk_release_proto::v1::{
     Anonymous, ArtifactType, Coordinate, Federated, PushIdentity, Reason, Repository, Visibility,
 };
 
+use super::grant_claims::{
+    claims_that_only_resemble_the_declared_are_refused,
+    several_pinned_claims_are_each_compared_and_none_may_be_added,
+};
+use super::grant_secret::a_grant_is_never_printed_cloned_or_logged;
 use super::{Report, Scenario, coordinate, must, must_err, run_scenarios, same};
 use crate::{Grant, GrantRequest, GrantSource, SeamError};
 
@@ -88,7 +91,7 @@ pub fn federated_repository() -> Repository {
 }
 
 /// The repository of [`federated_repository`] at `location`, its declaration changed by `change`.
-fn declaration(location: &str, change: impl FnOnce(&mut Federated)) -> Repository {
+pub(super) fn declaration(location: &str, change: impl FnOnce(&mut Federated)) -> Repository {
     let mut declared = Federated {
         subject: "release".to_owned(),
         audience: "registry".to_owned(),
@@ -130,7 +133,7 @@ pub fn exceptional_job() -> JobClaims {
     }
 }
 
-fn setup(job: JobClaims) -> GrantSetup {
+pub(super) fn setup(job: JobClaims) -> GrantSetup {
     GrantSetup {
         job,
         limit: usize::MAX,
@@ -139,7 +142,7 @@ fn setup(job: JobClaims) -> GrantSetup {
     }
 }
 
-fn request<'a>(
+pub(super) fn request<'a>(
     repository: &'a Repository,
     phase: GrantPhase,
     coordinates: &'a [Coordinate],
@@ -152,7 +155,7 @@ fn request<'a>(
     }
 }
 
-fn denied(error: &SeamError) -> bool {
+pub(super) fn denied(error: &SeamError) -> bool {
     *error == SeamError::GrantRefused(GrantFault::Denied)
 }
 
@@ -217,26 +220,42 @@ fn an_anonymous_identity_needs_no_exchange<R: GrantSourceRig>(rig: &R) {
         }),
         ..federated_repository()
     };
-    let mut source = rig.source(&setup(matching_job()));
     let coords = [coordinate("a")];
-    let grant = must(
-        source.grant(&request(&anonymous, GrantPhase::Commit, &coords)),
-        "grant",
-    );
-    same(
-        grant.is_none(),
-        true,
-        "an anonymous identity is answered with no grant",
-    );
-    same(
-        rig.exchanges(&source),
-        0,
-        "the exchanges an anonymous identity made",
-    );
+    let elsewhere = JobClaims {
+        subject: "someone".to_owned(),
+        ..matching_job()
+    };
+    // For every phase, as an ordinary or an exceptional run, whatever the job claims: there is
+    // nothing to exchange.
+    for phase in PHASES {
+        for exceptional in [false, true] {
+            for job in [matching_job(), elsewhere.clone()] {
+                let mut source = rig.source(&setup(job));
+                let grant = must(
+                    source.grant(&GrantRequest {
+                        exceptional,
+                        ..request(&anonymous, phase, &coords)
+                    }),
+                    &format!("a {phase:?} grant, exceptional {exceptional}"),
+                );
+                same(
+                    grant.is_none(),
+                    true,
+                    &format!("an anonymous identity is answered with no {phase:?} grant"),
+                );
+                same(
+                    rig.exchanges(&source),
+                    0,
+                    &format!("the exchanges an anonymous identity made for a {phase:?} grant"),
+                );
+            }
+        }
+    }
 }
 
 /// Every phase a grant is asked for.
-const PHASES: [GrantPhase; 3] = [GrantPhase::Stage, GrantPhase::Commit, GrantPhase::Read];
+pub(super) const PHASES: [GrantPhase; 3] =
+    [GrantPhase::Stage, GrantPhase::Commit, GrantPhase::Read];
 
 /// Two coordinates that differ from the kits' default in every field but the name: a grant
 /// covers the version, platform, channel and type it is asked for.
@@ -314,6 +333,19 @@ fn one_source_serves_every_request_as_asked<R: GrantSourceRig>(rig: &R) {
 fn a_grant_covers_exactly_the_coordinates_asked<R: GrantSourceRig>(rig: &R) {
     one_source_serves_every_request_as_asked(rig);
     let repository = federated_repository();
+    // A request for nothing is refused or covers nothing: never more than was asked.
+    for phase in PHASES {
+        let mut source = rig.source(&setup(matching_job()));
+        let covered = source
+            .grant(&request(&repository, phase, &[]))
+            .ok()
+            .map(|grant| rig.content(&source, &grant).coordinates);
+        same(
+            covered.unwrap_or_default(),
+            Vec::new(),
+            &format!("what a {phase:?} grant for no coordinate covers"),
+        );
+    }
     let coords = mixed_coordinates();
     for (phase, scope) in [
         (GrantPhase::Stage, STAGE_SCOPE),
@@ -547,77 +579,7 @@ fn a_differing_claim_is_refused_before_any_exchange<R: GrantSourceRig>(rig: &R) 
         }
     }
     several_pinned_claims_are_each_compared_and_none_may_be_added(rig);
-}
-
-/// Every pinned claim of the declaration is compared, the last as the first, and a job that
-/// presents a claim the declaration does not pin is not the job it declares.
-fn several_pinned_claims_are_each_compared_and_none_may_be_added<R: GrantSourceRig>(rig: &R) {
-    let coords = [coordinate("a")];
-    let pinned = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
-        pairs
-            .iter()
-            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
-            .collect()
-    };
-    let pins = |pairs: &[(&str, &str)]| JobClaims {
-        pinned: pinned(pairs),
-        ..matching_job()
-    };
-    let two = declaration(LOCATION, |declared| {
-        declared.pinned_claims = pinned(&[("ref", "main"), ("workflow", "release")]);
-    });
-    let one = federated_repository();
-    for phase in PHASES {
-        let mut source = rig.source(&setup(pins(&[("ref", "main"), ("workflow", "release")])));
-        must(
-            source.grant(&request(&two, phase, &coords)),
-            &format!("a {phase:?} grant for a job that presents both pinned claims"),
-        );
-        let differing = [
-            (
-                &two,
-                "the second of two pinned claims",
-                pins(&[("ref", "main"), ("workflow", "other")]),
-            ),
-            (
-                &two,
-                "the first of two pinned claims",
-                pins(&[("ref", "topic"), ("workflow", "release")]),
-            ),
-            (
-                &two,
-                "one of two pinned claims missing",
-                pins(&[("ref", "main")]),
-            ),
-            (
-                &two,
-                "a third claim the declaration does not pin",
-                pins(&[("ref", "main"), ("workflow", "release"), ("extra", "x")]),
-            ),
-            (
-                &one,
-                "a second claim the declaration does not pin",
-                pins(&[("ref", "main"), ("extra", "x")]),
-            ),
-        ];
-        for (repository, which, job) in differing {
-            let mut source = rig.source(&setup(job));
-            let refusal = must_err(
-                source.grant(&request(repository, phase, &coords)),
-                &format!("a {phase:?} grant for a job with {which}"),
-            );
-            same(
-                denied(&refusal),
-                true,
-                &format!("a job with {which} is Denied for a {phase:?} grant"),
-            );
-            same(
-                rig.exchanges(&source),
-                0,
-                &format!("the exchanges a job with {which} spent on a {phase:?} grant"),
-            );
-        }
-    }
+    claims_that_only_resemble_the_declared_are_refused(rig);
 }
 
 fn an_exceptional_run_presents_the_exceptional_subject<R: GrantSourceRig>(rig: &R) {
@@ -726,29 +688,36 @@ fn a_used_identity_token_is_refused_the_second_time<R: GrantSourceRig>(rig: &R) 
 fn an_exchange_after_expiry_gives_a_new_grant<R: GrantSourceRig>(rig: &R) {
     let repository = federated_repository();
     let coords = [coordinate("a")];
-    let mut source = rig.source(&setup(matching_job()));
-    let first = must(
-        source.grant(&request(&repository, GrantPhase::Stage, &coords)),
-        "grant",
-    );
-    let first_expiry = first.expires_ms().unwrap_or_default();
-    rig.advance(600_001);
-    let second = must(
-        source.grant(&request(&repository, GrantPhase::Stage, &coords)),
-        "grant",
-    );
-    let second_expiry = second.expires_ms().unwrap_or_default();
-    same(
-        second_expiry > first_expiry,
-        true,
-        "the new grant expires later than the old",
-    );
-    same(
-        second_expiry > rig.now_ms(),
-        true,
-        "the new grant has not expired",
-    );
-    same(rig.exchanges(&source), 2, "the exchanges for two grants");
+    // Nothing is standing: a grant of any phase expires, and the next exchange gives a new one.
+    for phase in PHASES {
+        let mut source = rig.source(&setup(matching_job()));
+        let first = must(
+            source.grant(&request(&repository, phase, &coords)),
+            &format!("a {phase:?} grant"),
+        );
+        let first_expiry = first.expires_ms().unwrap_or_default();
+        rig.advance(600_001);
+        let second = must(
+            source.grant(&request(&repository, phase, &coords)),
+            &format!("a {phase:?} grant after the first expired"),
+        );
+        let second_expiry = second.expires_ms().unwrap_or_default();
+        same(
+            second_expiry > first_expiry,
+            true,
+            &format!("the new {phase:?} grant expires later than the old"),
+        );
+        same(
+            second_expiry > rig.now_ms(),
+            true,
+            &format!("the new {phase:?} grant has not expired"),
+        );
+        same(
+            rig.exchanges(&source),
+            2,
+            &format!("the exchanges for two {phase:?} grants"),
+        );
+    }
 }
 
 fn a_missing_scope_is_denied<R: GrantSourceRig>(rig: &R) {
@@ -832,22 +801,24 @@ fn an_expiry_is_reported_as_the_issuer_stated_it<R: GrantSourceRig>(rig: &R) {
     // The clock is not at a whole second, as it is not once anything has run: an expiry that is
     // rounded to a second is not the one stated.
     rig.advance(437);
-    for offset in [30_000_i64, -30_000] {
-        let mut source = rig.source(&GrantSetup {
-            lifetime_ms: 60_000,
-            issuer_offset_ms: offset,
-            ..setup(matching_job())
-        });
-        let grant = must(
-            source.grant(&request(&repository, GrantPhase::Stage, &coords)),
-            "grant",
-        );
-        let stated = rig.now_ms().saturating_add_signed(60_000 + offset);
-        same(
-            grant.expires_ms(),
-            Some(stated),
-            &format!("the expiry of a grant from an issuer {offset} ms off"),
-        );
+    for phase in PHASES {
+        for offset in [30_000_i64, -30_000] {
+            let mut source = rig.source(&GrantSetup {
+                lifetime_ms: 60_000,
+                issuer_offset_ms: offset,
+                ..setup(matching_job())
+            });
+            let grant = must(
+                source.grant(&request(&repository, phase, &coords)),
+                &format!("a {phase:?} grant"),
+            );
+            let stated = rig.now_ms().saturating_add_signed(60_000 + offset);
+            same(
+                grant.expires_ms(),
+                Some(stated),
+                &format!("the expiry of a {phase:?} grant from an issuer {offset} ms off"),
+            );
+        }
     }
 }
 
@@ -878,69 +849,17 @@ fn more_coordinates_than_the_limit_are_refused_before_the_exchange<R: GrantSourc
             1,
             &format!("the exchanges of {phase:?} grants: only the one at the limit"),
         );
+        // The limit is of one grant, not of the source: what was granted before does not count.
+        for later in [&two[..1], &two[..]] {
+            must(
+                source.grant(&request(&repository, phase, later)),
+                &format!("a {phase:?} grant within the limit after others"),
+            );
+        }
+        same(
+            rig.exchanges(&source),
+            3,
+            &format!("the exchanges of {phase:?} grants within the limit"),
+        );
     }
-}
-
-/// Whether a type has a trait, found without naming it as a bound: the inherent constant is
-/// there only when the bound holds, and the trait's default stands in when it does not.
-struct Probe<T>(PhantomData<T>);
-
-trait Lacks {
-    const HAS: bool = false;
-}
-
-impl<T> Lacks for Probe<T> {}
-
-// The constants below are read only for a type that has the trait; `Grant` has none of them,
-// which is what the scenario holds, so they are never read here.
-#[allow(dead_code)]
-impl<T: Debug> Probe<T> {
-    const HAS: bool = true;
-}
-
-struct DisplayProbe<T>(PhantomData<T>);
-
-impl<T> Lacks for DisplayProbe<T> {}
-
-#[allow(dead_code)]
-impl<T: Display> DisplayProbe<T> {
-    const HAS: bool = true;
-}
-
-struct CloneProbe<T>(PhantomData<T>);
-
-impl<T> Lacks for CloneProbe<T> {}
-
-#[allow(dead_code)]
-impl<T: Clone> CloneProbe<T> {
-    const HAS: bool = true;
-}
-
-fn a_grant_is_never_printed_cloned_or_logged<R: GrantSourceRig>(rig: &R) {
-    same(<Probe<Grant>>::HAS, false, "Grant implements Debug");
-    same(
-        <DisplayProbe<Grant>>::HAS,
-        false,
-        "Grant implements Display",
-    );
-    same(<CloneProbe<Grant>>::HAS, false, "Grant implements Clone");
-    let repository = federated_repository();
-    let coords = [coordinate("a")];
-    let mut source = rig.source(&setup(matching_job()));
-    let grant = must(
-        source.grant(&request(&repository, GrantPhase::Stage, &coords)),
-        "grant",
-    );
-    let secret = grant.secret();
-    same(
-        secret.is_empty(),
-        false,
-        "a grant with no secret proves nothing",
-    );
-    let log = rig.log(&source);
-    same(
-        log.windows(secret.len()).any(|window| window == secret),
-        false,
-        "the secret of a grant in what the issuer recorded",
-    );
 }

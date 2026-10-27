@@ -28,6 +28,8 @@ use ucdk_release_proto::v1::{ArtifactType, Coordinate};
 use crate::{EntryWriter, Heartbeat, SeamError, Stop, valid_rel};
 
 mod build_system;
+mod grant_claims;
+mod grant_secret;
 mod grant_source;
 mod output_files;
 mod process_runner;

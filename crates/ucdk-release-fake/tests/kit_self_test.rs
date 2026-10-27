@@ -56,6 +56,9 @@ fn further_grant_source() {
     const READ: &str =
         "a_read_grant_carries_the_read_scope_and_covers_exactly_the_coordinates_asked";
     const EXPIRY: &str = "an_expiry_is_reported_as_the_issuer_stated_it";
+    const ANONYMOUS: &str = "an_anonymous_identity_needs_no_exchange";
+    const RENEWAL: &str = "an_exchange_after_expiry_gives_a_new_grant";
+    const LOGGED: &str = "a_grant_is_never_printed_cloned_or_logged";
     further_stubs_fail_exactly(
         "grant source",
         &names(&grant_source_scenarios::<FakeGrantRig>()),
@@ -79,6 +82,19 @@ fn further_grant_source() {
             (Grants::ScopeStickyToFirstRequest, &[COVERS]),
             (Grants::StickyRepository, &[COVERS]),
             (Grants::ExpiryRoundedToSecond, &[EXPIRY]),
+            (Grants::SubjectMatchedBySuffix, &[DIFFERING]),
+            (Grants::AudienceMatchedByContainment, &[DIFFERING]),
+            (Grants::EnvironmentMatchedByPrefix, &[DIFFERING]),
+            (Grants::PinnedValueMatchedByContainment, &[DIFFERING]),
+            (Grants::ClaimsMatchedAfterFolding, &[DIFFERING]),
+            (Grants::ClaimsMatchedAfterTrimming, &[DIFFERING]),
+            (Grants::AnonymousStageOrReadGetsAGrant, &[ANONYMOUS]),
+            (Grants::NonStageGrantsNeverExpire, &[RENEWAL, EXPIRY]),
+            (Grants::CumulativeLimit, &[LIMIT]),
+            (Grants::EmptyRequestCoversAnything, &[COVERS]),
+            (Grants::LogsTheSecretReversed, &[LOGGED]),
+            (Grants::LogsTheMiddleOfTheSecret, &[LOGGED]),
+            (Grants::LogsTheSecretInHex, &[LOGGED]),
         ],
         |flaw| run_grant_source_kit(&FakeGrantRig::flawed(flaw)),
     );
