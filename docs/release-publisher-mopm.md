@@ -843,9 +843,9 @@ Error mapping (the code is `error.code` of the mopm body; the HTTP status alone 
 | 409 `group_commit_refused` | by section 7's table, after the group status read |
 | group `rejected` during commit | `Permanent` (nothing landed) |
 | group `failed` during commit | `Transient` (numbers burned) |
-| 409 `invalid_transition` on yank; 400 `invalid_request` on yank; 404 `version_not_found` on yank; a coordinate not held (yank); a well-formed body that violates the response schema; an invalid archive or archives that disagree on the manifest (until M8) | `Permanent` |
+| 409 `invalid_transition` on yank; 400 `invalid_request` on yank; 404 `version_not_found` on yank; a coordinate not held (yank); a well-formed body that violates the response schema before a commit or yank is sent; an invalid archive or archives that disagree on the manifest (until M8) | `Permanent` |
 | 503 `unavailable` on create | `Transient` |
-| any transport failure, 5xx, or unreadable answer on a mutating call after commit or yank was sent | `Unknown` |
+| any transport failure, 5xx, unreadable answer, or a well-formed body that violates the response schema, on a mutating call after commit or yank was sent | `Unknown` |
 | failure before commit is sent that changed nothing visible | `Transient` |
 | any failure of a read, an unparsable or truncated body included | `Transient` |
 
