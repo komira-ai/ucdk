@@ -5,7 +5,7 @@
 
 #![allow(dead_code)]
 
-use ucdk_release_seams::kit::{Report, Scenario};
+use ucdk_release_seams::kit::{Report, Scenario, Verdict};
 
 pub mod build_system;
 pub mod grant_source;
@@ -13,6 +13,10 @@ pub mod hostile;
 pub mod loose;
 pub mod output_files;
 pub mod process_runner;
+pub mod publisher;
+pub mod publisher_flaw;
+pub mod publisher_more;
+pub mod publisher_plain;
 pub mod secret;
 pub mod store;
 
@@ -78,13 +82,15 @@ pub fn further_stubs_fail_exactly<F: Copy + std::fmt::Debug>(
 }
 
 /// Runs the scenario called `name` against `rig`, and fails the test with its reason if it
-/// fails.
-pub fn run_named<R>(scenarios: &[Scenario<R>], name: &str, rig: &R) {
+/// fails. Answers whether it ran: a scenario the rig skips ran nowhere, and is not a pass.
+pub fn run_named<R>(scenarios: &[Scenario<R>], name: &str, rig: &R) -> bool {
     let Some(scenario) = scenarios.iter().find(|s| s.name == name) else {
         panic!("the kit has no scenario called {name}");
     };
-    if let Err(why) = scenario.run_on(rig) {
-        panic!("{name} failed: {why}");
+    match scenario.verdict_on(rig) {
+        Verdict::Passed => true,
+        Verdict::Skipped(_) => false,
+        Verdict::Failed(why) => panic!("{name} failed: {why}"),
     }
 }
 
@@ -96,9 +102,11 @@ macro_rules! kit_tests {
         $(
             #[test]
             fn $name() {
+                let mut ran = false;
                 for rig in $rigs {
-                    $crate::rigs::run_named(&$scenarios::<$rig>(), stringify!($name), &rig);
+                    ran |= $crate::rigs::run_named(&$scenarios::<$rig>(), stringify!($name), &rig);
                 }
+                assert!(ran, "{} ran on none of the rigs", stringify!($name));
             }
         )+
 
