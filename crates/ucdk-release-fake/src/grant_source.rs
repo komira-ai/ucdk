@@ -105,6 +105,11 @@ impl GrantSource for FakeGrantSource {
         if req.coordinates.len() > self.limit {
             return Err(SeamError::Refused(Reason::Credential));
         }
+        // A declaration that names no exceptional subject admits no exceptional run, not even a
+        // job whose own subject is empty.
+        if req.exceptional && declared.exceptional_subject.is_empty() {
+            return Err(SeamError::GrantRefused(GrantFault::Denied));
+        }
         let (subject, environment) = if req.exceptional {
             (
                 &declared.exceptional_subject,

@@ -8,6 +8,7 @@
 use ucdk_release_seams::kit::{Report, Scenario};
 
 pub mod build_system;
+pub mod grant_lax;
 pub mod grant_source;
 pub mod hostile;
 pub mod loose;

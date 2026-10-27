@@ -10,11 +10,15 @@ use ucdk_release_proto::v1::Coordinate;
 use ucdk_release_proto::v1::push_identity::Kind;
 use ucdk_release_proto::v1::{Reason, Repository};
 use ucdk_release_seams::kit::{
-    COMMIT_SCOPE, GrantContent, GrantSetup, GrantSourceRig, JobClaims, LOCATION, READ_SCOPE,
-    STAGE_SCOPE, coordinate,
+    COMMIT_SCOPE, GrantContent, GrantSetup, GrantSourceRig, IdentityTokens, JobClaims, LOCATION,
+    READ_SCOPE, STAGE_SCOPE, coordinate,
 };
 use ucdk_release_seams::{Grant, GrantRequest, GrantSource, SeamError};
 
+use super::grant_lax::{
+    base64, covered_in_place_of, folded, has_the_stage_scope, lax_expiry, lax_limit_is_exceeded,
+    reported_as_denied, up_to_nul, without_invisible,
+};
 use super::secret::{framed, texts};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,11 +143,63 @@ pub enum Flaw {
     LogsTheSecretFromTheSecondGrant,
     /// The secret of every grant after a refusal is written into the log.
     LogsTheSecretAfterARefusal,
+    /// An exceptional commit grant is issued with the stage scope.
+    ExceptionalCommitHasTheStageScope,
+    /// An exceptional grant covers one coordinate more than was asked.
+    ExceptionalCoversWiderCoordinates,
+    /// An exceptional grant states an expiry that never comes.
+    ExceptionalGrantNeverExpires,
+    /// The limit is not enforced for an exceptional run.
+    ExceptionalIgnoresTheLimit,
+    /// The coordinates of a grant are covered in lower case.
+    CoordinatesLowerCased,
+    /// The coordinates of a grant are covered with their white space trimmed.
+    CoordinatesTrimmed,
+    /// Every field of a coordinate is cut at its first `/`.
+    CoordinatesCutAtASlash,
+    /// Every field of a coordinate is cut at its first newline.
+    CoordinatesCutAtANewline,
+    /// A name that holds a comma is covered as one coordinate for each part.
+    NamesSplitAtAComma,
+    /// A name that holds a newline is covered as one coordinate for each line.
+    NamesSplitAtANewline,
+    /// Every exchange presents the one identity token the source first asked for.
+    ReusesOneIdentityToken,
+    /// A request identical to the last, while its grant has not expired, is answered with that
+    /// grant and no exchange.
+    ReusesAnUnexpiredGrant,
+    /// The limit counts the distinct names of the coordinates.
+    LimitCountsDistinctNames,
+    /// The limit counts the coordinates left once the equal ones are taken together.
+    LimitCountsDistinctCoordinates,
+    /// The environment of an exceptional run is compared without regard to case.
+    ExceptionalEnvironmentIgnoresCase,
+    /// The audience of an exceptional run is compared without regard to case.
+    ExceptionalAudienceIgnoresCase,
+    /// The pinned claims of an exceptional run are compared without regard to case.
+    ExceptionalPinnedClaimIgnoresCase,
+    /// A used identity token is refused as `Denied` for a commit grant.
+    UsedIsDeniedForCommit,
+    /// A used identity token is refused as `Denied` for a read grant.
+    UsedIsDeniedForRead,
+    /// An expired identity token is refused as `Denied`.
+    ExpiredIsDenied,
+    /// An issuer that cannot be reached is reported as `Denied` for a commit or a read grant.
+    UnreachableIsDeniedOutsideStage,
+    /// An expiry less than a second ahead of the clock is stated as a second ahead.
+    ExpiryFlooredAtASecondAhead,
+    /// A grant whose stated expiry has passed is reported as expiring a second ahead.
+    ExpiredGrantReportedLive,
+    /// No grant is stated to live longer than an hour.
+    LifetimeCappedAtAnHour,
+    /// A job with an empty subject and an empty environment is admitted as an exceptional run
+    /// where the declaration names no exceptional subject.
+    EmptyClaimsMatchAnUndeclaredExceptionalPair,
 }
 
 impl Flaw {
     /// Every stub of the issuer.
-    pub const ALL: [Self; 58] = [
+    pub const ALL: [Self; 83] = [
         Self::AnonymousGetsAGrant,
         Self::DropsTheLastCoordinate,
         Self::IgnoresPinnedClaims,
@@ -202,6 +258,31 @@ impl Flaw {
         Self::LogsThePrefixOfTheSecret,
         Self::LogsTheSecretFromTheSecondGrant,
         Self::LogsTheSecretAfterARefusal,
+        Self::ExceptionalCommitHasTheStageScope,
+        Self::ExceptionalCoversWiderCoordinates,
+        Self::ExceptionalGrantNeverExpires,
+        Self::ExceptionalIgnoresTheLimit,
+        Self::CoordinatesLowerCased,
+        Self::CoordinatesTrimmed,
+        Self::CoordinatesCutAtASlash,
+        Self::CoordinatesCutAtANewline,
+        Self::NamesSplitAtAComma,
+        Self::NamesSplitAtANewline,
+        Self::ReusesOneIdentityToken,
+        Self::ReusesAnUnexpiredGrant,
+        Self::LimitCountsDistinctNames,
+        Self::LimitCountsDistinctCoordinates,
+        Self::ExceptionalEnvironmentIgnoresCase,
+        Self::ExceptionalAudienceIgnoresCase,
+        Self::ExceptionalPinnedClaimIgnoresCase,
+        Self::UsedIsDeniedForCommit,
+        Self::UsedIsDeniedForRead,
+        Self::ExpiredIsDenied,
+        Self::UnreachableIsDeniedOutsideStage,
+        Self::ExpiryFlooredAtASecondAhead,
+        Self::ExpiredGrantReportedLive,
+        Self::LifetimeCappedAtAnHour,
+        Self::EmptyClaimsMatchAnUndeclaredExceptionalPair,
     ];
 }
 
@@ -213,57 +294,6 @@ enum Field {
     Environment,
     PinnedName,
     PinnedValue,
-}
-
-/// A text as a lax issuer folds it before it compares: full-width letters, the Kelvin sign and
-/// the long s become the letters they resemble.
-fn folded(text: &str) -> String {
-    text.chars()
-        .map(|c| match c {
-            '\u{212a}' => 'k',
-            '\u{17f}' => 's',
-            c => char::from_u32(u32::from(c).wrapping_sub(0xFEE0))
-                .filter(char::is_ascii_graphic)
-                .unwrap_or(c),
-        })
-        .collect()
-}
-
-/// A text without its zero-width characters.
-fn without_invisible(text: &str) -> String {
-    text.chars()
-        .filter(|c| {
-            !matches!(
-                c,
-                '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{feff}' | '\u{2060}'
-            )
-        })
-        .collect()
-}
-
-/// A text up to its first NUL.
-fn up_to_nul(text: &str) -> &str {
-    text.split('\0').next().unwrap_or_default()
-}
-
-/// Standard base64 with padding.
-fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    bytes
-        .chunks(3)
-        .flat_map(|chunk| {
-            let word = chunk.iter().enumerate().fold(0u32, |word, (at, byte)| {
-                word | (u32::from(*byte) << (16 - 8 * at))
-            });
-            (0..4).map(move |at| {
-                if at <= chunk.len() {
-                    ALPHABET[((word >> (18 - 6 * at)) & 63) as usize] as char
-                } else {
-                    '='
-                }
-            })
-        })
-        .collect()
 }
 
 /// What a source was asked when it refused: the repository, the phase, whether the run is
@@ -309,6 +339,10 @@ pub struct Flawed {
     refused_request: Option<Asked>,
     issued: usize,
     refused: bool,
+    standing: Option<(Asked, Vec<u8>, u64)>,
+    tokens_requested: usize,
+    tokens_spent: usize,
+    token_held: bool,
 }
 
 /// The coordinate a registry reads out of the text a grant keeps it under: the channel, the
@@ -335,7 +369,15 @@ impl GrantSourceRig for FakeGrantRig {
             environment: setup.job.environment.clone(),
             pinned: setup.job.pinned.clone(),
         };
-        let inner_limit = if self.flaw == Some(Flaw::LimitIsCheckedForStageOnly) {
+        let inner_limit = if matches!(
+            self.flaw,
+            Some(
+                Flaw::LimitIsCheckedForStageOnly
+                    | Flaw::LimitCountsDistinctNames
+                    | Flaw::LimitCountsDistinctCoordinates
+                    | Flaw::ExceptionalIgnoresTheLimit
+            )
+        ) {
             usize::MAX
         } else {
             setup.limit
@@ -361,6 +403,10 @@ impl GrantSourceRig for FakeGrantRig {
             refused_request: None,
             issued: 0,
             refused: false,
+            standing: None,
+            tokens_requested: 0,
+            tokens_spent: 0,
+            token_held: false,
         }
     }
 
@@ -374,6 +420,13 @@ impl GrantSourceRig for FakeGrantRig {
 
     fn exchanges(&self, source: &Flawed) -> usize {
         source.inner.exchanges().len()
+    }
+
+    fn identity_tokens(&self, source: &Flawed) -> IdentityTokens {
+        IdentityTokens {
+            requested: source.tokens_requested,
+            spent: source.tokens_spent,
+        }
     }
 
     fn content(&self, _source: &Flawed, grant: &Grant) -> GrantContent {
@@ -403,6 +456,21 @@ impl Flawed {
         self.flaw == Some(flaw)
     }
 
+    /// Records the identity token of an exchange that reached the issuer. A source asks for a
+    /// fresh token unless it holds one that nothing spent; the issuer spends the token of every
+    /// exchange it answers, and an issuer that cannot be reached receives none.
+    fn account_for_the_token(&mut self, unreachable: bool) {
+        let reused =
+            self.token_held || (self.is(Flaw::ReusesOneIdentityToken) && self.tokens_requested > 0);
+        if !reused {
+            self.tokens_requested += 1;
+        }
+        self.token_held = unreachable && !self.is(Flaw::UnreachableSpendsTheToken);
+        if !self.token_held {
+            self.tokens_spent += 1;
+        }
+    }
+
     /// The repository as a lax issuer reads it: the declaration with each claim the stub does
     /// not compare made equal to the job's.
     fn as_a_lax_issuer_reads(&self, req: &GrantRequest<'_>) -> Repository {
@@ -413,6 +481,10 @@ impl Flawed {
             return repository;
         };
         let job = &self.job;
+        if self.admits_an_empty_exceptional_pair(req) {
+            declared.subject.clone_from(&job.subject);
+            declared.environment.clone_from(&job.environment);
+        }
         let repeated = self.is(Flaw::RepeatOfRefusedIssues)
             && self.refused_request.as_ref().is_some_and(|(r, p, e, c)| {
                 r == req.repository
@@ -530,20 +602,31 @@ impl Flawed {
         } else {
             (&mut declared.subject, &mut declared.environment)
         };
-        if self.admits(Field::Subject, subject, &job.subject) {
+        let exceptional = req.exceptional;
+        if self.admits(Field::Subject, exceptional, subject, &job.subject) {
             subject.clone_from(&job.subject);
         }
-        if self.admits(Field::Environment, environment, &job.environment) {
+        if self.admits(
+            Field::Environment,
+            exceptional,
+            environment,
+            &job.environment,
+        ) {
             environment.clone_from(&job.environment);
         }
-        if self.admits(Field::Audience, &declared.audience, &job.audience) {
+        if self.admits(
+            Field::Audience,
+            exceptional,
+            &declared.audience,
+            &job.audience,
+        ) {
             declared.audience.clone_from(&job.audience);
         }
         let alike = declared.pinned_claims.len() == job.pinned.len()
             && declared.pinned_claims.iter().all(|(key, value)| {
                 job.pinned.iter().any(|(job_key, job_value)| {
-                    self.admits(Field::PinnedName, key, job_key)
-                        && self.admits(Field::PinnedValue, value, job_value)
+                    self.admits(Field::PinnedName, exceptional, key, job_key)
+                        && self.admits(Field::PinnedValue, exceptional, value, job_value)
                 })
             });
         if alike {
@@ -552,10 +635,39 @@ impl Flawed {
         repository
     }
 
-    /// Whether this stub takes the `claimed` text of a job for the `declared` one.
-    fn admits(&self, field: Field, declared: &str, claimed: &str) -> bool {
+    /// Whether this stub takes an exceptional request of a job with no subject and no environment
+    /// for the run of a declaration that names no exceptional subject.
+    fn admits_an_empty_exceptional_pair(&self, req: &GrantRequest<'_>) -> bool {
+        let undeclared = matches!(
+            req.repository.push.as_ref().and_then(|p| p.kind.as_ref()),
+            Some(Kind::Federated(declared)) if declared.exceptional_subject.is_empty()
+        );
+        self.is(Flaw::EmptyClaimsMatchAnUndeclaredExceptionalPair)
+            && req.exceptional
+            && undeclared
+            && self.job.subject.is_empty()
+    }
+
+    /// Whether this stub takes the `claimed` text of a job for the `declared` one, for the run
+    /// that is exceptional or not.
+    fn admits(&self, field: Field, exceptional: bool, declared: &str, claimed: &str) -> bool {
         declared == claimed
             || match self.flaw {
+                Some(Flaw::ExceptionalEnvironmentIgnoresCase) => {
+                    exceptional
+                        && field == Field::Environment
+                        && declared.eq_ignore_ascii_case(claimed)
+                }
+                Some(Flaw::ExceptionalAudienceIgnoresCase) => {
+                    exceptional
+                        && field == Field::Audience
+                        && declared.eq_ignore_ascii_case(claimed)
+                }
+                Some(Flaw::ExceptionalPinnedClaimIgnoresCase) => {
+                    exceptional
+                        && matches!(field, Field::PinnedName | Field::PinnedValue)
+                        && declared.eq_ignore_ascii_case(claimed)
+                }
                 Some(Flaw::SubjectMatchedBySuffix) => {
                     field == Field::Subject && claimed.ends_with(declared)
                 }
@@ -587,6 +699,17 @@ impl GrantSource for Flawed {
         {
             return Ok(Grant::issued(secret.clone(), *expires));
         }
+        if self.is(Flaw::ReusesAnUnexpiredGrant)
+            && let Some(((repository, phase, exceptional, coordinates), secret, expires)) =
+                &self.standing
+            && *repository == *req.repository
+            && *phase == req.phase
+            && *exceptional == req.exceptional
+            && coordinates.as_slice() == req.coordinates
+            && *expires > self.clock.now_millis()
+        {
+            return Ok(Grant::issued(secret.clone(), *expires));
+        }
         if self.unreachable_seen {
             self.unreachable_seen = false;
             return Err(SeamError::GrantRefused(GrantFault::Used));
@@ -597,12 +720,12 @@ impl GrantSource for Flawed {
         {
             return Err(SeamError::Refused(Reason::Credential));
         }
+        if lax_limit_is_exceeded(self.flaw, req.exceptional, self.limit, req.coordinates) {
+            return Err(SeamError::Refused(Reason::Credential));
+        }
         let mut phase = req.phase;
         if self.is(Flaw::ScopeStickyToFirstRequest) {
             phase = *self.first_phase.get_or_insert(req.phase);
-        }
-        if self.is(Flaw::ReadIsIssuedAsStage) && phase == GrantPhase::Read {
-            phase = GrantPhase::Stage;
         }
         if self.is(Flaw::CumulativeLimit)
             && self.covered.saturating_add(req.coordinates.len()) > self.limit
@@ -610,20 +733,18 @@ impl GrantSource for Flawed {
             return Err(SeamError::Refused(Reason::Credential));
         }
         let anything = [coordinate("*")];
-        let normalized: Vec<Coordinate>;
-        let mut coordinates =
-            if self.is(Flaw::EmptyRequestCoversAnything) && req.coordinates.is_empty() {
-                &anything[..]
-            } else if self.is(Flaw::NormalizesCoordinateFields) {
-                normalized = req
-                    .coordinates
-                    .iter()
-                    .map(|c| coordinate(&c.name))
-                    .collect();
-                normalized.as_slice()
-            } else {
-                req.coordinates
-            };
+        let rewritten: Vec<Coordinate>;
+        let mut coordinates = if self.is(Flaw::EmptyRequestCoversAnything)
+            && req.coordinates.is_empty()
+        {
+            &anything[..]
+        } else if let Some(other) = covered_in_place_of(self.flaw, req.exceptional, req.coordinates)
+        {
+            rewritten = other;
+            rewritten.as_slice()
+        } else {
+            req.coordinates
+        };
         if self.is(Flaw::EqualScopesCommitDenied)
             && phase == GrantPhase::Commit
             && let Some(Kind::Federated(declared)) =
@@ -639,12 +760,14 @@ impl GrantSource for Flawed {
             coordinates = &coordinates[..1];
         }
         if self.is(Flaw::DropsTheLastCoordinate)
+            && !req.exceptional
             && phase == GrantPhase::Stage
             && coordinates.len() == 2
         {
             coordinates = &coordinates[..1];
         }
         if self.is(Flaw::AllowsOneOverTheLimit)
+            && !req.exceptional
             && Some(coordinates.len()) == self.limit.checked_add(1)
         {
             coordinates = &coordinates[..self.limit];
@@ -668,14 +791,21 @@ impl GrantSource for Flawed {
         }
         let repository = self.as_a_lax_issuer_reads(&asked);
         let exchanged = self.inner.exchanges().len();
-        let exceptional =
-            (req.exceptional || self.sticky_exceptional) && !self.is(Flaw::IgnoresExceptional);
+        let exceptional = (req.exceptional || self.sticky_exceptional)
+            && !self.is(Flaw::IgnoresExceptional)
+            && !self.admits_an_empty_exceptional_pair(req);
         let result = self.inner.grant(&GrantRequest {
             repository: &repository,
             phase,
             coordinates,
             exceptional,
         });
+        if self.inner.exchanges().len() > exchanged {
+            self.account_for_the_token(matches!(
+                result,
+                Err(SeamError::GrantRefused(GrantFault::Unreachable))
+            ));
+        }
         if self.is(Flaw::StickyExceptional) && req.exceptional && result.is_ok() {
             self.sticky_exceptional = true;
         }
@@ -696,6 +826,7 @@ impl GrantSource for Flawed {
                 req.coordinates.to_vec(),
             ));
         }
+        let now = self.clock.now_millis();
         match (self.flaw, result) {
             (Some(Flaw::AnonymousStageOrReadGetsAGrant), Ok(grant))
                 if grant.is_none() && phase != GrantPhase::Commit =>
@@ -716,8 +847,8 @@ impl GrantSource for Flawed {
             (Some(Flaw::AnonymousGetsAGrant), Ok(grant)) if grant.is_none() => {
                 Ok(Grant::issued(b"x".to_vec(), 1))
             }
-            (Some(Flaw::CommitGrantHasTheStageScope), Ok(grant))
-                if phase == GrantPhase::Commit && !grant.is_none() =>
+            (Some(flaw), Ok(grant))
+                if !grant.is_none() && has_the_stage_scope(flaw, phase, req.exceptional) =>
             {
                 let mut all = texts(grant.secret());
                 if let Some(scope) = all.first_mut() {
@@ -761,13 +892,15 @@ impl GrantSource for Flawed {
                 self.unreachable_seen = true;
                 Err(SeamError::GrantRefused(GrantFault::Unreachable))
             }
-            (Some(Flaw::CorrectsTheSkew), Ok(grant)) if self.offset_ms != 0 => Ok(Grant::issued(
-                grant.secret().to_vec(),
-                grant
-                    .expires_ms()
-                    .unwrap_or_default()
-                    .saturating_add_signed(-self.offset_ms),
-            )),
+            (Some(Flaw::CorrectsTheSkew), Ok(grant)) if self.offset_ms != 0 && !req.exceptional => {
+                Ok(Grant::issued(
+                    grant.secret().to_vec(),
+                    grant
+                        .expires_ms()
+                        .unwrap_or_default()
+                        .saturating_add_signed(-self.offset_ms),
+                ))
+            }
             (Some(Flaw::LogsTheSecret), Ok(grant)) => {
                 self.log.extend_from_slice(grant.secret());
                 Ok(grant)
@@ -820,6 +953,26 @@ impl GrantSource for Flawed {
                 self.log.extend_from_slice(grant.secret());
                 Ok(grant)
             }
+            (Some(Flaw::ReusesAnUnexpiredGrant), Ok(grant)) if !grant.is_none() => {
+                self.standing = Some((
+                    (
+                        req.repository.clone(),
+                        req.phase,
+                        req.exceptional,
+                        req.coordinates.to_vec(),
+                    ),
+                    grant.secret().to_vec(),
+                    grant.expires_ms().unwrap_or_default(),
+                ));
+                Ok(grant)
+            }
+            (flaw, Ok(grant))
+                if !grant.is_none()
+                    && lax_expiry(flaw, req.exceptional, stated(&grant), now) != stated(&grant) =>
+            {
+                let expires = lax_expiry(flaw, req.exceptional, stated(&grant), now);
+                Ok(Grant::issued(grant.secret().to_vec(), expires))
+            }
             (Some(Flaw::ReissuesTheExpiredGrant), Ok(grant)) => {
                 self.cached = Some((
                     grant.secret().to_vec(),
@@ -827,7 +980,17 @@ impl GrantSource for Flawed {
                 ));
                 Ok(grant)
             }
+            (Some(flaw), Err(SeamError::GrantRefused(fault)))
+                if reported_as_denied(flaw, fault, req.phase) =>
+            {
+                Err(SeamError::GrantRefused(GrantFault::Denied))
+            }
             (_, result) => result,
         }
     }
+}
+
+/// The expiry a grant states.
+fn stated(grant: &Grant) -> u64 {
+    grant.expires_ms().unwrap_or_default()
 }

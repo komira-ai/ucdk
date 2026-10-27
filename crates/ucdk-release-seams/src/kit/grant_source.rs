@@ -7,14 +7,19 @@ use std::collections::BTreeMap;
 use ucdk_release::codec::{GrantFault, GrantPhase};
 use ucdk_release_proto::v1::push_identity::Kind;
 use ucdk_release_proto::v1::{
-    Anonymous, ArtifactType, Coordinate, Federated, PushIdentity, Reason, Repository, Visibility,
+    Anonymous, ArtifactType, Coordinate, Federated, PushIdentity, Repository, Visibility,
 };
 
+use super::grant_bounds::{
+    an_expiry_is_reported_as_the_issuer_stated_it,
+    more_coordinates_than_the_limit_are_refused_before_the_exchange,
+};
 use super::grant_claims::{
     an_earlier_request_does_not_decide_the_next,
     claims_that_only_resemble_the_declared_are_refused,
     several_pinned_claims_are_each_compared_and_none_may_be_added,
 };
+use super::grant_exceptional::an_exceptional_run_presents_the_exceptional_subject;
 use super::grant_secret::a_grant_is_never_printed_cloned_or_logged;
 use super::{Report, Scenario, coordinate, must, must_err, run_scenarios, same};
 use crate::{Grant, GrantRequest, GrantSource, SeamError};
@@ -51,6 +56,17 @@ pub struct GrantContent {
     pub coordinates: Vec<Coordinate>,
 }
 
+/// The identity tokens of a source, as its rig counts them: the CI platform gives a new token on
+/// every request, and the issuer accepts each token once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdentityTokens {
+    /// The tokens the source asked the CI platform for.
+    pub requested: usize,
+    /// The tokens the issuer received in an exchange it answered, whether it granted or refused;
+    /// an issuer that could not be reached received none.
+    pub spent: usize,
+}
+
 /// What an implementation provides: an issuer for a job, the clock it shares with the scenarios,
 /// and the few things only the implementation can see or arrange.
 pub trait GrantSourceRig {
@@ -65,8 +81,13 @@ pub trait GrantSourceRig {
     /// Moves that clock forward.
     fn advance(&self, ms: u64);
 
-    /// How many exchanges reached the issuer, refused ones included.
+    /// How many exchanges the source attempted at the issuer, refused ones and ones the issuer
+    /// could not be reached for included. A request the source refused itself, before it asked
+    /// the issuer anything, is not one.
     fn exchanges(&self, source: &Self::Source) -> usize;
+
+    /// The identity tokens the source asked the CI platform for and the issuer received.
+    fn identity_tokens(&self, source: &Self::Source) -> IdentityTokens;
 
     /// What `grant` covers, read the way a registry reads it.
     fn content(&self, source: &Self::Source, grant: &Grant) -> GrantContent;
@@ -260,7 +281,7 @@ pub(super) const PHASES: [GrantPhase; 3] =
 
 /// Two coordinates that differ from the kits' default in every field but the name: a grant
 /// covers the version, platform, channel and type it is asked for.
-fn mixed_coordinates() -> [Coordinate; 2] {
+pub(super) fn mixed_coordinates() -> [Coordinate; 2] {
     [
         coordinate("a"),
         Coordinate {
@@ -269,6 +290,32 @@ fn mixed_coordinates() -> [Coordinate; 2] {
             version: "9.9.9".to_owned(),
             platform: "darwin-arm64".to_owned(),
             ..coordinate("b")
+        },
+    ]
+}
+
+/// Coordinates whose texts a careless source would change or cut: upper-case letters, a `/`, a
+/// newline, a comma, blanks around a name, and a name that reads as another coordinate once a
+/// list is split at a newline. A grant covers each of them exactly as it was asked.
+pub(super) fn hostile_coordinates() -> Vec<Coordinate> {
+    let text = |text: &str| text.to_owned();
+    vec![
+        Coordinate {
+            channel: text("Stable"),
+            version: text("1.0.0-RC1"),
+            platform: text("Linux-X86_64"),
+            ..coordinate("Tool")
+        },
+        coordinate("dir/tool"),
+        coordinate(" tool "),
+        coordinate("tool\nrelease"),
+        coordinate("a\nread:*"),
+        coordinate("a,b"),
+        Coordinate {
+            channel: text("beta/x"),
+            version: text(" 1.0\n"),
+            platform: text("linux x86/64"),
+            ..coordinate("t")
         },
     ]
 }
@@ -352,17 +399,25 @@ fn a_grant_covers_exactly_the_coordinates_asked<R: GrantSourceRig>(rig: &R) {
         (GrantPhase::Stage, STAGE_SCOPE),
         (GrantPhase::Commit, COMMIT_SCOPE),
     ] {
-        let mut source = rig.source(&setup(matching_job()));
-        let grant = must(source.grant(&request(&repository, phase, &coords)), "grant");
-        same(
-            rig.content(&source, &grant),
-            GrantContent {
-                scope: scope.to_owned(),
-                repository: LOCATION.to_owned(),
-                coordinates: coords.to_vec(),
-            },
-            &format!("what a {phase:?} grant covers"),
-        );
+        for (which, asked) in [
+            ("two coordinates", coords.to_vec()),
+            ("hostile coordinates", hostile_coordinates()),
+        ] {
+            let mut source = rig.source(&setup(matching_job()));
+            let grant = must(
+                source.grant(&request(&repository, phase, &asked)),
+                &format!("a {phase:?} grant for {which}"),
+            );
+            same(
+                rig.content(&source, &grant),
+                GrantContent {
+                    scope: scope.to_owned(),
+                    repository: LOCATION.to_owned(),
+                    coordinates: asked,
+                },
+                &format!("what a {phase:?} grant for {which} covers"),
+            );
+        }
     }
     // A declaration that shares no name with the one above: the grant follows the request.
     let (custom, job) = custom_declaration();
@@ -584,138 +639,50 @@ fn a_differing_claim_is_refused_before_any_exchange<R: GrantSourceRig>(rig: &R) 
     claims_that_only_resemble_the_declared_are_refused(rig);
 }
 
-fn an_exceptional_run_presents_the_exceptional_subject<R: GrantSourceRig>(rig: &R) {
+/// An exchange the issuer refuses with `fault` is reported as that refusal, in every phase, and the
+/// next request of the source is exchanged again, with an identity token of its own: a token is
+/// accepted once, whether the issuer granted or refused on it.
+fn a_used_identity_token_is_refused_the_second_time<R: GrantSourceRig>(rig: &R) {
     let repository = federated_repository();
     let coords = [coordinate("a")];
-    let ask = |job: JobClaims, as_exceptional: bool, phase: GrantPhase| {
-        let mut source = rig.source(&setup(job));
-        let req = GrantRequest {
-            exceptional: as_exceptional,
-            ..request(&repository, phase, &coords)
-        };
-        let answer = source.grant(&req);
-        (answer.map(|g| g.is_none()), rig.exchanges(&source))
-    };
-    let refused = (Err(SeamError::GrantRefused(GrantFault::Denied)), 0);
-    let exceptional = exceptional_job();
     for phase in PHASES {
-        same(
-            ask(exceptional.clone(), true, phase),
-            (Ok(false), 1),
-            &format!("an exceptional job asking as exceptional for a {phase:?} grant"),
-        );
-        same(
-            ask(matching_job(), true, phase),
-            refused.clone(),
-            &format!("an ordinary job asking as exceptional for a {phase:?} grant"),
-        );
-        same(
-            ask(exceptional.clone(), false, phase),
-            refused.clone(),
-            &format!("an exceptional job asking as ordinary for a {phase:?} grant"),
-        );
-    }
-    // The subject and the environment of the two pairs are not interchangeable: a job that
-    // presents one of each is neither run, whichever it is asked as.
-    let crossed = [
-        (
-            "the ordinary subject and the exceptional environment",
-            JobClaims {
-                environment: exceptional.environment.clone(),
-                ..matching_job()
-            },
-        ),
-        (
-            "the exceptional subject and the ordinary environment",
-            JobClaims {
-                environment: matching_job().environment,
-                ..exceptional.clone()
-            },
-        ),
-    ];
-    for phase in PHASES {
-        for (which, job) in &crossed {
-            for as_exceptional in [false, true] {
-                same(
-                    ask(job.clone(), as_exceptional, phase),
-                    refused.clone(),
-                    &format!(
-                        "a job with {which} asking as exceptional {as_exceptional} for a {phase:?} grant"
-                    ),
-                );
-            }
-        }
-    }
-    // A declaration that names no exceptional subject and no exceptional environment admits no
-    // exceptional run, whoever asks: an exceptional run is not an ordinary one in that case.
-    let undeclared = declaration(LOCATION, |declared| {
-        declared.exceptional_subject.clear();
-        declared.exceptional_environment.clear();
-    });
-    for phase in PHASES {
-        let mut source = rig.source(&setup(matching_job()));
-        let req = GrantRequest {
-            exceptional: true,
-            ..request(&undeclared, phase, &coords)
-        };
-        let refusal = must_err(
-            source.grant(&req),
-            &format!("an exceptional {phase:?} grant where none is declared"),
-        );
-        same(
-            denied(&refusal),
-            true,
-            &format!("an exceptional {phase:?} grant is Denied where none is declared"),
-        );
-        same(rig.exchanges(&source), 0, "the exchanges of that refusal");
-    }
-    // One source serves an exceptional run and an ordinary request one after the other, and
-    // having been asked as exceptional does not make the next request exceptional.
-    let mut source = rig.source(&setup(exceptional.clone()));
-    for phase in PHASES {
-        for (as_exceptional, want) in [
-            (true, Ok(false)),
-            (false, refused.0.clone()),
-            (true, Ok(false)),
-        ] {
-            let req = GrantRequest {
-                exceptional: as_exceptional,
-                ..request(&repository, phase, &coords)
-            };
+        for fault in [GrantFault::Used, GrantFault::Expired] {
+            let mut source = rig.source(&setup(matching_job()));
+            must(
+                source.grant(&request(&repository, phase, &coords)),
+                &format!("the first {phase:?} grant"),
+            );
+            rig.refuse_next(&mut source, phase, fault);
+            let second = must_err(
+                source.grant(&request(&repository, phase, &coords)),
+                &format!("a {phase:?} grant on an identity token refused as {fault:?}"),
+            );
             same(
-                source.grant(&req).map(|g| g.is_none()),
-                want,
+                second,
+                SeamError::GrantRefused(fault),
+                &format!("the second {phase:?} exchange, refused as {fault:?}"),
+            );
+            must(
+                source.grant(&request(&repository, phase, &coords)),
+                &format!("a {phase:?} grant after a refusal as {fault:?}"),
+            );
+            same(
+                rig.exchanges(&source),
+                3,
+                &format!("the exchanges of three {phase:?} requests, one refused as {fault:?}"),
+            );
+            same(
+                rig.identity_tokens(&source),
+                IdentityTokens {
+                    requested: 3,
+                    spent: 3,
+                },
                 &format!(
-                    "a {phase:?} grant of an exceptional job asked as exceptional {as_exceptional}, one source throughout"
+                    "the identity tokens of three {phase:?} exchanges, one refused as {fault:?}"
                 ),
             );
         }
     }
-    same(
-        rig.exchanges(&source),
-        6,
-        "the exchanges of two grants each phase",
-    );
-}
-
-fn a_used_identity_token_is_refused_the_second_time<R: GrantSourceRig>(rig: &R) {
-    let repository = federated_repository();
-    let coords = [coordinate("a")];
-    let mut source = rig.source(&setup(matching_job()));
-    must(
-        source.grant(&request(&repository, GrantPhase::Stage, &coords)),
-        "the first grant",
-    );
-    rig.refuse_next(&mut source, GrantPhase::Stage, GrantFault::Used);
-    let second = must_err(
-        source.grant(&request(&repository, GrantPhase::Stage, &coords)),
-        "a grant on a used identity token",
-    );
-    same(
-        second,
-        SeamError::GrantRefused(GrantFault::Used),
-        "the second exchange",
-    );
 }
 
 fn an_exchange_after_expiry_gives_a_new_grant<R: GrantSourceRig>(rig: &R) {
@@ -729,6 +696,16 @@ fn an_exchange_after_expiry_gives_a_new_grant<R: GrantSourceRig>(rig: &R) {
             &format!("a {phase:?} grant"),
         );
         let first_expiry = first.expires_ms().unwrap_or_default();
+        // A grant that has not expired is not reused: the same request is a new exchange.
+        must(
+            source.grant(&request(&repository, phase, &coords)),
+            &format!("the same {phase:?} request again, while the grant is good"),
+        );
+        same(
+            rig.exchanges(&source),
+            2,
+            &format!("the exchanges for a {phase:?} request asked twice"),
+        );
         rig.advance(600_001);
         let second = must(
             source.grant(&request(&repository, phase, &coords)),
@@ -747,8 +724,8 @@ fn an_exchange_after_expiry_gives_a_new_grant<R: GrantSourceRig>(rig: &R) {
         );
         same(
             rig.exchanges(&source),
-            2,
-            &format!("the exchanges for two {phase:?} grants"),
+            3,
+            &format!("the exchanges for three {phase:?} grants"),
         );
     }
 }
@@ -756,17 +733,25 @@ fn an_exchange_after_expiry_gives_a_new_grant<R: GrantSourceRig>(rig: &R) {
 fn a_missing_scope_is_denied<R: GrantSourceRig>(rig: &R) {
     let repository = federated_repository();
     let coords = [coordinate("a")];
-    let mut source = rig.source(&setup(matching_job()));
-    rig.refuse_next(&mut source, GrantPhase::Commit, GrantFault::Denied);
-    let refusal = must_err(
-        source.grant(&request(&repository, GrantPhase::Commit, &coords)),
-        "a commit grant for an identity without the commit scope",
-    );
-    same(denied(&refusal), true, "a missing scope is Denied");
-    must(
-        source.grant(&request(&repository, GrantPhase::Stage, &coords)),
-        "a stage grant for the same identity",
-    );
+    for phase in PHASES {
+        let mut source = rig.source(&setup(matching_job()));
+        rig.refuse_next(&mut source, phase, GrantFault::Denied);
+        let refusal = must_err(
+            source.grant(&request(&repository, phase, &coords)),
+            &format!("a {phase:?} grant for an identity without the scope"),
+        );
+        same(
+            refusal,
+            SeamError::GrantRefused(GrantFault::Denied),
+            &format!("a missing {phase:?} scope"),
+        );
+        for other in PHASES {
+            must(
+                source.grant(&request(&repository, other, &coords)),
+                &format!("a {other:?} grant for the same identity after a missing {phase:?} scope"),
+            );
+        }
+    }
 }
 
 fn a_read_grant_carries_the_read_scope_and_covers_exactly_the_coordinates_asked<
@@ -790,6 +775,21 @@ fn a_read_grant_carries_the_read_scope_and_covers_exactly_the_coordinates_asked<
         },
         "what a read grant covers",
     );
+    let hostile = hostile_coordinates();
+    let mut source = rig.source(&setup(matching_job()));
+    let grant = must(
+        source.grant(&request(&repository, GrantPhase::Read, &hostile)),
+        "a read grant for hostile coordinates",
+    );
+    same(
+        rig.content(&source, &grant),
+        GrantContent {
+            scope: READ_SCOPE.to_owned(),
+            repository: LOCATION.to_owned(),
+            coordinates: hostile,
+        },
+        "what a read grant for hostile coordinates covers",
+    );
     // The scope and the location are those of the declaration the request carries.
     let (custom, job) = custom_declaration();
     let mut source = rig.source(&setup(job));
@@ -811,88 +811,41 @@ fn a_read_grant_carries_the_read_scope_and_covers_exactly_the_coordinates_asked<
 fn an_unreachable_issuer_is_unreachable_and_spends_nothing<R: GrantSourceRig>(rig: &R) {
     let repository = federated_repository();
     let coords = [coordinate("a")];
-    let mut source = rig.source(&setup(matching_job()));
-    rig.refuse_next(&mut source, GrantPhase::Stage, GrantFault::Unreachable);
-    let first = must_err(
-        source.grant(&request(&repository, GrantPhase::Stage, &coords)),
-        "a grant from an issuer that cannot be reached",
-    );
-    same(
-        first,
-        SeamError::GrantRefused(GrantFault::Unreachable),
-        "the unreachable issuer",
-    );
-    must(
-        source.grant(&request(&repository, GrantPhase::Stage, &coords)),
-        "the grant once the issuer answers, on an identity token nothing spent",
-    );
-}
-
-fn an_expiry_is_reported_as_the_issuer_stated_it<R: GrantSourceRig>(rig: &R) {
-    let repository = federated_repository();
-    let coords = [coordinate("a")];
-    // The clock is not at a whole second, as it is not once anything has run: an expiry that is
-    // rounded to a second is not the one stated.
-    rig.advance(437);
     for phase in PHASES {
-        for offset in [30_000_i64, -30_000] {
-            let mut source = rig.source(&GrantSetup {
-                lifetime_ms: 60_000,
-                issuer_offset_ms: offset,
-                ..setup(matching_job())
-            });
-            let grant = must(
-                source.grant(&request(&repository, phase, &coords)),
-                &format!("a {phase:?} grant"),
-            );
-            let stated = rig.now_ms().saturating_add_signed(60_000 + offset);
-            same(
-                grant.expires_ms(),
-                Some(stated),
-                &format!("the expiry of a {phase:?} grant from an issuer {offset} ms off"),
-            );
-        }
-    }
-}
-
-fn more_coordinates_than_the_limit_are_refused_before_the_exchange<R: GrantSourceRig>(rig: &R) {
-    let repository = federated_repository();
-    for phase in PHASES {
-        let mut source = rig.source(&GrantSetup {
-            limit: 2,
-            ..setup(matching_job())
-        });
-        let two = [coordinate("a"), coordinate("b")];
-        must(
-            source.grant(&request(&repository, phase, &two)),
-            &format!("a {phase:?} grant at the limit"),
-        );
-        let three = [coordinate("a"), coordinate("b"), coordinate("c")];
-        let refusal = must_err(
-            source.grant(&request(&repository, phase, &three)),
-            &format!("a {phase:?} grant over the limit"),
+        let mut source = rig.source(&setup(matching_job()));
+        rig.refuse_next(&mut source, phase, GrantFault::Unreachable);
+        let first = must_err(
+            source.grant(&request(&repository, phase, &coords)),
+            &format!("a {phase:?} grant from an issuer that cannot be reached"),
         );
         same(
-            refusal,
-            SeamError::Refused(Reason::Credential),
-            &format!("the refusal of a {phase:?} grant over the limit"),
+            first,
+            SeamError::GrantRefused(GrantFault::Unreachable),
+            &format!("the unreachable issuer, for a {phase:?} grant"),
         );
         same(
             rig.exchanges(&source),
             1,
-            &format!("the exchanges of {phase:?} grants: only the one at the limit"),
+            &format!("the exchanges of a {phase:?} grant the issuer could not be reached for"),
         );
-        // The limit is of one grant, not of the source: what was granted before does not count.
-        for later in [&two[..1], &two[..]] {
-            must(
-                source.grant(&request(&repository, phase, later)),
-                &format!("a {phase:?} grant within the limit after others"),
-            );
-        }
+        same(
+            rig.identity_tokens(&source).spent,
+            0,
+            &format!("the identity tokens an unreachable issuer received for a {phase:?} grant"),
+        );
+        must(
+            source.grant(&request(&repository, phase, &coords)),
+            &format!("the {phase:?} grant once the issuer answers, on a token nothing spent"),
+        );
         same(
             rig.exchanges(&source),
-            3,
-            &format!("the exchanges of {phase:?} grants within the limit"),
+            2,
+            &format!("the exchanges of a {phase:?} grant asked again once the issuer answers"),
+        );
+        same(
+            rig.identity_tokens(&source).spent,
+            1,
+            &format!("the identity tokens spent on a {phase:?} grant once the issuer answers"),
         );
     }
 }
