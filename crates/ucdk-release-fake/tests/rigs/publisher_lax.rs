@@ -5,12 +5,13 @@
 
 use ucdk_core::Clock;
 use ucdk_release::codec::{GrantFault, GrantPhase};
+use ucdk_release::publish::{Held, Presence};
 use ucdk_release_fake::coordinate_key;
 use ucdk_release_proto::v1::Coordinate;
 use ucdk_release_seams::kit::LOCATION;
-use ucdk_release_seams::{Grant, SeamError};
+use ucdk_release_seams::{Grant, Publisher, SeamError, StageItem};
 
-use super::publisher_more::{Field, More, Wrapped, differs_only_in};
+use super::publisher_more::{Field, More, Wrapped, differs_only_in, is_writer};
 use super::secret::texts;
 
 /// A call of a registry.
@@ -103,6 +104,63 @@ pub enum Kind {
     Grouped,
     /// A channel that does not stage.
     NonStaging,
+}
+
+/// A stub that is lax in one way on one kind of channel, and is the conforming fake otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lax {
+    /// A stage, a commit or an abort whose grant names some of the coordinates of the call and
+    /// not all of them is taken for one that names them all.
+    PartialCoverage(Kind, Verb),
+    /// A read, an `observe`, a `fetch`, a `newest` or a `list`, with a stage or a commit grant
+    /// that is bad in the way is taken for one with a good grant.
+    WriterGrantOnRead(Kind, Defect, Verb),
+    /// An observe by a stranger of a coordinate that is staged answers `Staged`.
+    StrangerSeesStaged(Kind),
+    /// An observe by a stranger of a coordinate another writer committed answers `Present`.
+    StrangerSeesOthers(Kind),
+}
+
+/// Every stub that takes a grant for some of the coordinates of a call for a grant for all of them.
+pub fn partial_coverage() -> Vec<More> {
+    let mut all = Vec::new();
+    for kind in [Kind::Public, Kind::Private, Kind::Grouped, Kind::NonStaging] {
+        for verb in [Verb::Stage, Verb::Commit, Verb::Abort] {
+            // A channel that does not stage is never asked to stage or to abort.
+            if kind != Kind::NonStaging || verb == Verb::Commit {
+                all.push(More::Lax(Lax::PartialCoverage(kind, verb)));
+            }
+        }
+    }
+    all
+}
+
+/// Every stub that takes a bad stage or commit grant for a good one on a read of a private
+/// channel, on a kind of channel.
+pub fn writer_grants_on_reads() -> Vec<More> {
+    let mut all = Vec::new();
+    for kind in [Kind::Private, Kind::Grouped, Kind::NonStaging] {
+        for defect in [Defect::Foreign, Defect::Expired, Defect::Uncovered] {
+            for verb in [Verb::Observe, Verb::Fetch, Verb::Newest, Verb::List] {
+                // `newest` and `list` name no coordinate for a grant to leave out.
+                if defect != Defect::Uncovered || matches!(verb, Verb::Observe | Verb::Fetch) {
+                    all.push(More::Lax(Lax::WriterGrantOnRead(kind, defect, verb)));
+                }
+            }
+        }
+    }
+    all
+}
+
+/// Every stub that lets a stranger observe what a private channel holds or has staged.
+pub fn strangers_let_in() -> Vec<More> {
+    vec![
+        More::Lax(Lax::StrangerSeesStaged(Kind::Private)),
+        More::Lax(Lax::StrangerSeesStaged(Kind::Grouped)),
+        More::Lax(Lax::StrangerSeesOthers(Kind::Private)),
+        More::Lax(Lax::StrangerSeesOthers(Kind::Grouped)),
+        More::Lax(Lax::StrangerSeesOthers(Kind::NonStaging)),
+    ]
 }
 
 /// Every stub that takes a grant naming a coordinate that differs in one field.
@@ -282,6 +340,58 @@ impl Wrapped {
         })
     }
 
+    /// Whether the stub `lax` takes the grant `g` for a good one on `verb` over `coordinates`.
+    fn lax_takes(&self, lax: Lax, verb: Verb, g: &Grant, coordinates: &[Coordinate]) -> bool {
+        match lax {
+            Lax::PartialCoverage(kind, v) => {
+                let named = texts(g.secret());
+                v == verb
+                    && self.on(kind)
+                    && self.defect(g, verb, coordinates) == Some(Defect::Uncovered)
+                    && coordinates
+                        .iter()
+                        .any(|c| named.iter().skip(2).any(|text| *text == coordinate_key(c)))
+            }
+            Lax::WriterGrantOnRead(kind, defect, v) => {
+                v == verb
+                    && self.on(kind)
+                    && is_writer(g)
+                    && self.defect(g, verb, coordinates) == Some(defect)
+            }
+            Lax::StrangerSeesStaged(_) | Lax::StrangerSeesOthers(_) => false,
+        }
+    }
+
+    /// What an observe by `g` of `k` answers when `result` is what the conforming fake answered:
+    /// a stub that lets a stranger in answers it as a grant would.
+    pub(super) fn let_a_stranger_in(
+        &mut self,
+        g: &Grant,
+        k: &Coordinate,
+        set: &[StageItem<'_>],
+        result: Result<Presence, SeamError>,
+    ) -> Result<Presence, SeamError> {
+        if !g.is_none() || !matches!(result, Err(SeamError::GrantRefused(GrantFault::Denied))) {
+            return result;
+        }
+        match self.flaw() {
+            Some(More::Lax(Lax::StrangerSeesStaged(kind)))
+                if self.on(kind)
+                    && self.staged.iter().any(|(c, _)| c == k)
+                    && self.base.inner.is_staged(k) =>
+            {
+                Ok(Presence::Staged(Held::default()))
+            }
+            Some(More::Lax(Lax::StrangerSeesOthers(kind)))
+                if self.on(kind) && self.others.contains(k) =>
+            {
+                let grant = self.internal(GrantPhase::Read, std::slice::from_ref(k));
+                self.base.observe(&grant, k, set)
+            }
+            _ => result,
+        }
+    }
+
     /// Whether a stub shows a coordinate staged to `verb` when the grant is a stage or a commit
     /// grant.
     pub(super) fn writer_sees_staged(&self, verb: Verb) -> bool {
@@ -330,6 +440,7 @@ impl Wrapped {
             Some(More::BadGrantTakenOnShape(kind, defect, v)) => {
                 v == verb && self.on(kind) && self.defect(g, verb, coordinates) == Some(defect)
             }
+            Some(More::Lax(lax)) => self.lax_takes(lax, verb, g, coordinates),
             Some(More::CoverageOfTwo(v, pair)) => {
                 v == verb
                     && self.defect(g, verb, coordinates) == Some(Defect::Uncovered)

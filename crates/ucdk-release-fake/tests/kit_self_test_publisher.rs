@@ -11,8 +11,9 @@ mod rigs;
 use rigs::publisher::{FakePublisherRig, Flaw};
 use rigs::publisher_flaw::{Bad, Call, Hook};
 use rigs::publisher_lax::{
-    Defect, Kind, Verb, coverage_of_two, field_blind, on_shapes, read_grant_writes,
-    read_grants_see_staged, writers_see_staged,
+    Defect, Kind, Lax, Verb, coverage_of_two, field_blind, on_shapes, partial_coverage,
+    read_grant_writes, read_grants_see_staged, strangers_let_in, writer_grants_on_reads,
+    writers_see_staged,
 };
 use rigs::publisher_more::{Field, More, MoreRig};
 use rigs::{further_stubs_fail_exactly, names};
@@ -238,6 +239,11 @@ fn held_by_the_lax_stub(stub: More) -> &'static [&'static str] {
         More::ReadGrantWrites(..) => &[PHASE, READ_GRANT],
         More::WriterSeesStaged(..) | More::ReadSeesStaged(_) => &[WRITER_READS],
         More::ReadSeesOthersStaged => &[DUP_OTHER],
+        // A grant that names some of the coordinates of a call is refused for each of them.
+        More::Lax(Lax::PartialCoverage(..)) => &[PHASE],
+        // What a private channel lets a stage or a commit grant read, and a stranger, is held with
+        // the reads of a read grant.
+        More::Lax(_) => &[READ_GRANT],
         More::BadGrantTakenOnShape(_, defect, verb) => match (verb, defect) {
             // A grant that names the base and not the coordinate read is also held by the
             // scenario about the fields of a coordinate, which reads the sibling of a base.
@@ -616,7 +622,10 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
         .chain(read_grant_writes())
         .chain(writers_see_staged())
         .chain(read_grants_see_staged())
-        .chain([More::ReadSeesOthersStaged]);
+        .chain([More::ReadSeesOthersStaged])
+        .chain(partial_coverage())
+        .chain(writer_grants_on_reads())
+        .chain(strangers_let_in());
     for stub in lax {
         table.push((Stub::More(stub), held_by_the_lax_stub(stub)));
     }

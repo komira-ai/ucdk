@@ -15,7 +15,7 @@ use ucdk_release_seams::{
 
 use super::publisher::{FakePublisherRig, Flawed};
 use super::publisher_grant::issue;
-use super::publisher_lax::{Defect, Kind, Pair, Verb};
+use super::publisher_lax::{Defect, Kind, Lax, Pair, Verb};
 use super::secret::texts;
 
 /// One field of a coordinate.
@@ -154,6 +154,8 @@ pub enum More {
     ReadSeesStaged(Kind),
     /// An observe with a read grant sees the staged state of another writer.
     ReadSeesOthersStaged,
+    /// A stub that is lax in one way on one kind of channel.
+    Lax(Lax),
 }
 
 /// The siblings the rig names, whatever the rig it wraps names.
@@ -234,7 +236,7 @@ pub struct Wrapped {
     /// The stamp the last commit answered `Duplicate` declared for a coordinate.
     restamped: Vec<(Coordinate, Option<Stamped>)>,
     /// Coordinates another writer committed.
-    others: Vec<Coordinate>,
+    pub(super) others: Vec<Coordinate>,
     /// The listing lags.
     lagging: bool,
     /// A commit was raced.
@@ -385,7 +387,7 @@ fn deduped<'a>(items: &[StageItem<'a>]) -> Vec<StageItem<'a>> {
 }
 
 /// Whether `g` is a stage or a commit grant.
-fn is_writer(g: &Grant) -> bool {
+pub(super) fn is_writer(g: &Grant) -> bool {
     matches!(
         texts(g.secret()).first().map(String::as_str),
         Some("stage" | "commit")
@@ -585,7 +587,7 @@ impl Publisher for Wrapped {
         {
             result = Ok(Presence::Staged(Held::default()));
         }
-        result
+        self.let_a_stranger_in(g, k, set, result)
     }
 
     fn stage(&mut self, g: &Grant, items: &[StageItem<'_>]) -> Result<StageAnswer, SeamError> {
