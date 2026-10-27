@@ -188,6 +188,7 @@ fn further_output_files() {
     const STAT: &str = "stat_tells_a_file_a_directory_a_symlink_and_nothing_apart";
     const DESCENDED: &str = "a_listed_symlink_is_never_descended";
     const SORTED: &str = "a_listing_is_sorted_relative_paths";
+    const CLIMB: &str = "a_path_that_is_relative_or_climbs_is_refused";
     const DOTS: &str =
         "a_dot_part_a_repeated_slash_and_a_trailing_slash_name_the_path_they_stand_in";
     further_stubs_fail_exactly(
@@ -197,15 +198,15 @@ fn further_output_files() {
             (Files::LossyRead, &[READ_THROUGH]),
             (Files::EmptyFileIsMissing, &[READ_THROUGH]),
             (Files::ReadTruncatesAt4k, &[READ_THROUGH]),
-            (Files::DotfilesHidden, &[READ_THROUGH]),
-            (Files::DeepEntriesOmitted, &[READ_THROUGH]),
+            (Files::DotfilesHidden, &[KINDS, READ_THROUGH]),
+            (Files::DeepEntriesOmitted, &[KINDS, READ_THROUGH]),
             (Files::LinkToDirListedAsDirectory, &[KINDS]),
             (Files::DanglingLinkOmitted, &[KINDS]),
             (Files::ListOfSymlinkToDirFollows, &[REFUSED]),
             (Files::TrailingSlashFollowsRead, &[REFUSED]),
             (Files::TrailingSlashFollowsStat, &[STAT]),
             (Files::ReadRefusesDotDotNames, &[READ_THROUGH]),
-            (Files::FollowsNestedLinks, &[DESCENDED]),
+            (Files::FollowsNestedLinks, &[KINDS, DESCENDED]),
             (Files::StatBelowAFileIsAnError, &[STAT]),
             (Files::ListOfAnEmptyDirectoryIsPermanent, &[KINDS]),
             (Files::ReadTruncatesAt64k, &[READ_THROUGH]),
@@ -226,6 +227,23 @@ fn further_output_files() {
             (Files::ReadOfFileWithNewlineNameFails, &[READ_THROUGH]),
             (Files::NaturalSort, &[SORTED]),
             (Files::ReadOfEmptyFileInSubdirIsMissing, &[READ_THROUGH]),
+            (Files::ReadBelowAFileAnswersTheParent, &[REFUSED]),
+            (Files::ListBelowAFileIsEmpty, &[REFUSED]),
+            (Files::ReadNormalisesCrlf, &[READ_THROUGH]),
+            (Files::ReadStripsBom, &[READ_THROUGH]),
+            (Files::ReadStripsTrailingCrlf, &[READ_THROUGH]),
+            (Files::ReadTrimsTrailingNuls, &[READ_THROUGH]),
+            (Files::ReadDropsTheLastByteAtA4kMultiple, &[READ_THROUGH]),
+            (Files::ListNestedKindsAreFiles, &[KINDS]),
+            (Files::ListDeepEntriesTwice, &[KINDS]),
+            (Files::ListAddsAPhantomEntry, &[KINDS]),
+            (Files::ListOmitsNestedEmptyDirectories, &[KINDS]),
+            (Files::ListDeepDirectoriesHaveATrailingSlash, &[KINDS]),
+            (Files::StatOfASlashedLinkIsNone, &[STAT]),
+            (Files::StatOfASlashedDanglingLinkFails, &[STAT]),
+            (Files::StatRefusesDotDotNames, &[STAT]),
+            (Files::ListRefusesDotDotNames, &[KINDS]),
+            (Files::LeadingClimbIsResolved, &[CLIMB]),
         ],
         |flaw| run_output_files_kit(&FakeFilesRig::flawed(flaw)),
     );

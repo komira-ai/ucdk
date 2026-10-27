@@ -191,19 +191,64 @@ fn a_listing_names_the_kind_of_every_entry<R: OutputFilesRig>(rig: &R) {
         ("k/link", Node::Link("k/file")),
         ("k/link_to_dir", Node::Link("k/dir")),
         ("k/dangling", Node::Link("k/nowhere")),
+        // Below the top: a link, a file and an empty directory three directories down, an empty
+        // directory one down, and directories and files named with two dots.
+        ("k/d/e/f", Node::File(b"f")),
+        ("k/d/e/lnk", Node::Link("k/a..b")),
+        ("k/d/emptyin", Node::Directory),
+        ("k/g/h/i/j/leaf", Node::File(b"l")),
+        ("k/g/h/i/j/lnk", Node::Link("k/dir")),
+        ("k/g/h/i/j/empty", Node::Directory),
+        ("k/p/empty", Node::Directory),
+        ("k/a..b/x", Node::File(b"x")),
+        ("k/..dots", Node::Directory),
+        ("k/dots../y", Node::File(b"y")),
     ]);
     let listing = must(files.list(&at(rig, "k")), "list");
     let kinds: Vec<(&str, FileKind)> = listing.iter().map(|e| (e.rel.as_str(), e.kind)).collect();
+    let (file, dir, link) = (FileKind::File, FileKind::Directory, FileKind::Symlink);
     same(
         kinds,
         vec![
-            ("dangling", FileKind::Symlink),
-            ("dir", FileKind::Directory),
-            ("file", FileKind::File),
-            ("link", FileKind::Symlink),
-            ("link_to_dir", FileKind::Symlink),
+            ("..dots", dir),
+            ("a..b", dir),
+            ("a..b/x", file),
+            ("d", dir),
+            ("d/e", dir),
+            ("d/e/f", file),
+            ("d/e/lnk", link),
+            ("d/emptyin", dir),
+            ("dangling", link),
+            ("dir", dir),
+            ("dots..", dir),
+            ("dots../y", file),
+            ("file", file),
+            ("g", dir),
+            ("g/h", dir),
+            ("g/h/i", dir),
+            ("g/h/i/j", dir),
+            ("g/h/i/j/empty", dir),
+            ("g/h/i/j/leaf", file),
+            ("g/h/i/j/lnk", link),
+            ("link", link),
+            ("link_to_dir", link),
+            ("p", dir),
+            ("p/empty", dir),
         ],
-        "the kind of each entry",
+        "the kind of each entry, once each, at every depth",
+    );
+    // A directory whose name holds two dots lists as any other.
+    let dotted = must(files.list(&at(rig, "k/a..b")), "list of a..b");
+    same(
+        dotted.iter().map(|e| e.rel.as_str()).collect::<Vec<_>>(),
+        vec!["x"],
+        "the listing of a directory named a..b",
+    );
+    let dotted = must(files.list(&at(rig, "k/dots..")), "list of dots..");
+    same(
+        dotted.iter().map(|e| e.rel.as_str()).collect::<Vec<_>>(),
+        vec!["y"],
+        "the listing of a directory named dots..",
     );
     // A directory with nothing in it lists as empty; it is not a fault.
     same(
@@ -236,6 +281,9 @@ fn stat_tells_a_file_a_directory_a_symlink_and_nothing_apart<R: OutputFilesRig>(
         ("s/to_file", Node::Link("s/file")),
         ("s/to_dir", Node::Link("s/dir")),
         ("s/dangling", Node::Link("s/nowhere")),
+        ("s/a..b", Node::File(b"x")),
+        ("s/..dots", Node::Directory),
+        ("s/dots../x", Node::File(b"x")),
     ]);
     let mut stat = |rel: &str| must(files.stat(&at(rig, rel)), "stat");
     same(stat("s/file"), Some(FileKind::File), "a file");
@@ -258,13 +306,31 @@ fn stat_tells_a_file_a_directory_a_symlink_and_nothing_apart<R: OutputFilesRig>(
     same(stat("s/nothing"), None, "nothing");
     // Below a regular file nothing is, and the operating system's answer is no fault.
     same(stat("s/file/child"), None, "a path below a regular file");
-    // A trailing slash makes an operating system follow a symlink; the reader must not.
-    for rel in ["s/to_file/", "s/to_dir/"] {
-        let answer = files.stat(&at(rig, rel));
+    // Two dots inside a part make no `..` part: a file, a directory and a file in a directory
+    // so named are found as any other.
+    same(stat("s/a..b"), Some(FileKind::File), "a file named a..b");
+    same(
+        stat("s/..dots"),
+        Some(FileKind::Directory),
+        "a directory named ..dots",
+    );
+    same(
+        stat("s/dots.."),
+        Some(FileKind::Directory),
+        "a directory named dots..",
+    );
+    same(
+        stat("s/dots../x"),
+        Some(FileKind::File),
+        "a file in a directory named dots..",
+    );
+    // A trailing slash makes an operating system follow a symlink; the reader must not, and the
+    // slash names nothing of its own, so the answer is the symlink, whatever is at its target.
+    for rel in ["s/to_file/", "s/to_dir/", "s/dangling/"] {
         same(
-            matches!(answer, Ok(Some(FileKind::File | FileKind::Directory))),
-            false,
-            &format!("stat of the symlink {rel:?} said what it points at: {answer:?}"),
+            stat(rel),
+            Some(FileKind::Symlink),
+            &format!("what is at the symlink {rel:?} named with a trailing slash"),
         );
     }
 }
@@ -298,7 +364,18 @@ fn listing_a_file_and_reading_a_directory_or_a_symlink_are_refused<R: OutputFile
     let (file, dir, link) = (at(rig, "r/file"), at(rig, "r/dir"), at(rig, "r/link"));
     let (link_to_dir, slashed) = (at(rig, "r/link_to_dir"), at(rig, "r/link/"));
     let dangling = at(rig, "r/dangling");
+    let below = at(rig, "r/file/child");
     let cases = [
+        (
+            "read of a path below a regular file",
+            &below,
+            must_err(files.read(&below), "read"),
+        ),
+        (
+            "list of a path below a regular file",
+            &below,
+            must_err(files.list(&below), "list"),
+        ),
         (
             "read of a symlink to a directory",
             &link_to_dir,
@@ -393,6 +470,9 @@ fn a_path_that_is_relative_or_climbs_is_refused<R: OutputFilesRig>(rig: &R) {
         at(rig, "c/sub/../real"),
         at(rig, "../c/real"),
         at(rig, "c/.."),
+        // A first part that climbs out of the root.
+        format!("/..{}/c/real", rig.root()),
+        "/..".to_owned(),
     ];
     for path in &paths {
         let errors = [
@@ -415,7 +495,26 @@ fn an_entry_of_a_listed_directory_is_read_through_its_joined_path<R: OutputFiles
     // with a space, a newline or a character that is not ASCII, in a file or a directory.
     let binary: &[u8] = &[0xff, 0xfe, 0x00, 0x80, 0xc3, 0x28];
     let big: Vec<u8> = (0..=255u8).cycle().take(2_100_000).collect();
+    // Bytes a reader that treats a file as text, or as whole buffers, would alter: a carriage
+    // return before a line feed, a byte order mark, one carriage return and line feed at the end,
+    // zero bytes at the end, and lengths that are a multiple of 4096 or one past a power of two.
+    let crlf: &[u8] = b"a\r\nb";
+    let bom: &[u8] = &[0xef, 0xbb, 0xbf, b'x'];
+    let ends_crlf: &[u8] = b"x\r\n";
+    let nuls: &[u8] = &[1, 0, 0];
+    let sized = |len: usize| -> Vec<u8> { (1..=251u8).cycle().take(len).collect() };
+    let (k4096, k4097, k8192) = (sized(4096), sized(4097), sized(8192));
+    let (k65536, k65537) = (sized(65_536), sized(65_537));
     let mut files = rig.reader(&[
+        ("e/crlf", Node::File(crlf)),
+        ("e/bom", Node::File(bom)),
+        ("e/ends_crlf", Node::File(ends_crlf)),
+        ("e/nuls", Node::File(nuls)),
+        ("e/k4096", Node::File(&k4096)),
+        ("e/k4097", Node::File(&k4097)),
+        ("e/k8192", Node::File(&k8192)),
+        ("e/k65536", Node::File(&k65536)),
+        ("e/k65537", Node::File(&k65537)),
         ("e/sp ace", Node::File(b"S")),
         ("e/\u{e9}.txt", Node::File(b"E")),
         ("e/new\nline", Node::File(b"N")),
@@ -437,7 +536,16 @@ fn an_entry_of_a_listed_directory_is_read_through_its_joined_path<R: OutputFiles
     ]);
     let dir = at(rig, "e");
     let listing = must(files.list(&dir), "list");
-    let wanted: [(&str, &[u8]); 18] = [
+    let wanted: [(&str, &[u8]); 27] = [
+        ("crlf", crlf),
+        ("bom", bom),
+        ("ends_crlf", ends_crlf),
+        ("nuls", nuls),
+        ("k4096", &k4096),
+        ("k4097", &k4097),
+        ("k8192", &k8192),
+        ("k65536", &k65536),
+        ("k65537", &k65537),
         ("sp ace", b"S"),
         ("\u{e9}.txt", b"E"),
         ("new\nline", b"N"),

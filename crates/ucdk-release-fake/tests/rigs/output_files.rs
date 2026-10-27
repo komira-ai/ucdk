@@ -20,7 +20,7 @@ pub enum Flaw {
     FollowsLinks,
     /// A `stat` that follows a symlink.
     StatFollows,
-    /// A `list` of a path where nothing is that answers an empty listing.
+    /// A `list` of a path where nothing is, in a directory, that answers an empty listing.
     ListOfMissingIsEmpty,
     /// A `read` that follows a symlink.
     ReadFollowsLink,
@@ -109,6 +109,65 @@ pub enum Flaw {
     NaturalSort,
     /// A `read` of an empty file at least two directories down answers `Permanent`.
     ReadOfEmptyFileInSubdirIsMissing,
+    /// A `read` of a path below a regular file that answers the bytes of that file.
+    ReadBelowAFileAnswersTheParent,
+    /// A `list` of a path below a regular file that answers an empty listing.
+    ListBelowAFileIsEmpty,
+    /// A `read` that turns each carriage return and line feed into a line feed.
+    ReadNormalisesCrlf,
+    /// A `read` that drops a UTF-8 byte order mark at the start of a file.
+    ReadStripsBom,
+    /// A `read` that drops a carriage return and line feed at the end of a file.
+    ReadStripsTrailingCrlf,
+    /// A `read` that drops the zero bytes at the end of a file.
+    ReadTrimsTrailingNuls,
+    /// A `read` that drops the last byte of a file whose length is a multiple of 4096.
+    ReadDropsTheLastByteAtA4kMultiple,
+    /// A listing that calls every entry at least two parts deep a file.
+    ListNestedKindsAreFiles,
+    /// A listing that names every entry at least four parts deep twice.
+    ListDeepEntriesTwice,
+    /// A listing that adds a file named `phantom` in each directory four parts deep.
+    ListAddsAPhantomEntry,
+    /// A listing that leaves out every directory at least two parts deep that has nothing in it.
+    ListOmitsNestedEmptyDirectories,
+    /// A listing that writes a `/` after the `rel` of each directory at least three parts deep.
+    ListDeepDirectoriesHaveATrailingSlash,
+    /// A `stat` of a symlink named with a trailing slash that answers `None`.
+    StatOfASlashedLinkIsNone,
+    /// A `stat` of a symlink with nothing at its target, named with a trailing slash, that fails
+    /// with `Unknown`.
+    StatOfASlashedDanglingLinkFails,
+    /// A `stat` that refuses a path with a part that holds two dots, such as `a..b`, without
+    /// being a `..` part.
+    StatRefusesDotDotNames,
+    /// A `list` that refuses a path with a part that holds two dots without being a `..` part.
+    ListRefusesDotDotNames,
+    /// A `stat`, `list` and `read` that resolve a path whose first part is `..` instead of
+    /// refusing it.
+    LeadingClimbIsResolved,
+}
+
+/// Whether a part of `path` holds two dots without being a `..` part.
+fn has_dot_dot_name(path: &str) -> bool {
+    path.split('/')
+        .any(|part| part != ".." && part.contains(".."))
+}
+
+/// `bytes` with each carriage return before a line feed left out.
+fn without_carriage_returns(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    for (at, byte) in bytes.iter().enumerate() {
+        if !(*byte == b'\r' && bytes.get(at + 1) == Some(&b'\n')) {
+            out.push(*byte);
+        }
+    }
+    out
+}
+
+/// How many parts a `rel` has.
+fn depth(rel: &str) -> usize {
+    rel.split('/').count()
 }
 
 /// `name` with each run of digits padded, so that a sort by it puts `f2` before `f10`.
@@ -255,6 +314,12 @@ impl Flawed {
         ))
     }
 
+    /// The regular file `path` is below, when the part above it is one.
+    fn file_above(&mut self, path: &str) -> Option<String> {
+        let (parent, _) = path.rsplit_once('/')?;
+        (self.inner.stat(parent) == Ok(Some(FileKind::File))).then(|| parent.to_owned())
+    }
+
     /// The target of the symlink that `path` names with a slash after it, when it does.
     fn slashed_target(&self, path: &str) -> Option<String> {
         self.target_of(path.strip_suffix('/')?)
@@ -264,6 +329,24 @@ impl Flawed {
 impl OutputFiles for Flawed {
     fn stat(&mut self, path: &str) -> Result<Option<FileKind>, SeamError> {
         self.last_stat = Some(path.to_owned());
+        if self.is(Flaw::StatRefusesDotDotNames) && has_dot_dot_name(path) {
+            return Err(SeamError::Refused(
+                ucdk_release_proto::v1::Reason::BuildOutput,
+            ));
+        }
+        if self.is(Flaw::LeadingClimbIsResolved) && path.starts_with("/../") {
+            return self.inner.stat(&resolved(path));
+        }
+        if let Some(link) = path.strip_suffix('/')
+            && self.target_of(link).is_some()
+        {
+            if self.is(Flaw::StatOfASlashedLinkIsNone) {
+                return Ok(None);
+            }
+            if self.is(Flaw::StatOfASlashedDanglingLinkFails) && self.target_kind(link).is_none() {
+                return Err(SeamError::Unknown(format!("{path} cannot be read")));
+            }
+        }
         if self.is(Flaw::TrailingSlashFollowsStat)
             && let Some(target) = self.slashed_target(path)
         {
@@ -284,11 +367,25 @@ impl OutputFiles for Flawed {
     }
 
     fn list(&mut self, path: &str) -> Result<Vec<DirEntry>, SeamError> {
-        if self.is(Flaw::ListOfMissingIsEmpty) && self.inner.stat(path) == Ok(None) {
+        if self.is(Flaw::ListOfMissingIsEmpty)
+            && self.inner.stat(path) == Ok(None)
+            && self.file_above(path).is_none()
+        {
             return Ok(Vec::new());
         }
         if let Some(refused) = self.refuses(path) {
             return Err(refused);
+        }
+        if self.is(Flaw::ListRefusesDotDotNames) && has_dot_dot_name(path) {
+            return Err(SeamError::Refused(
+                ucdk_release_proto::v1::Reason::BuildOutput,
+            ));
+        }
+        if self.is(Flaw::LeadingClimbIsResolved) && path.starts_with("/../") {
+            return self.list(&resolved(path));
+        }
+        if self.is(Flaw::ListBelowAFileIsEmpty) && self.file_above(path).is_some() {
+            return Ok(Vec::new());
         }
         if self.is(Flaw::ListTrailingSlashFails) && path.ends_with('/') {
             return Err(SeamError::Permanent(format!("{path} is not a directory")));
@@ -336,6 +433,51 @@ impl OutputFiles for Flawed {
                 }
             }
             entries = kept;
+        }
+        if self.is(Flaw::ListNestedKindsAreFiles) {
+            for entry in &mut entries {
+                if depth(&entry.rel) >= 2 {
+                    entry.kind = FileKind::File;
+                }
+            }
+        }
+        if self.is(Flaw::ListDeepEntriesTwice) {
+            entries = entries
+                .into_iter()
+                .flat_map(|e| {
+                    let times = if depth(&e.rel) >= 4 { 2 } else { 1 };
+                    std::iter::repeat_n(e, times)
+                })
+                .collect();
+        }
+        if self.is(Flaw::ListAddsAPhantomEntry) {
+            let phantoms: Vec<DirEntry> = entries
+                .iter()
+                .filter(|e| depth(&e.rel) == 4 && e.kind == FileKind::Directory)
+                .map(|e| DirEntry {
+                    rel: format!("{}/phantom", e.rel),
+                    kind: FileKind::File,
+                })
+                .collect();
+            entries.extend(phantoms);
+            entries.sort_by(|a, b| a.rel.cmp(&b.rel));
+        }
+        if self.is(Flaw::ListOmitsNestedEmptyDirectories) {
+            let rels: Vec<String> = entries.iter().map(|e| e.rel.clone()).collect();
+            entries.retain(|e| {
+                e.kind != FileKind::Directory
+                    || depth(&e.rel) < 2
+                    || rels
+                        .iter()
+                        .any(|other| other.starts_with(&format!("{}/", e.rel)))
+            });
+        }
+        if self.is(Flaw::ListDeepDirectoriesHaveATrailingSlash) {
+            for entry in &mut entries {
+                if entry.kind == FileKind::Directory && depth(&entry.rel) >= 3 {
+                    entry.rel.push('/');
+                }
+            }
         }
         if self.is(Flaw::ListCappedAt256) {
             entries.truncate(256);
@@ -407,6 +549,14 @@ impl OutputFiles for Flawed {
     fn read(&mut self, path: &str) -> Result<Vec<u8>, SeamError> {
         if let Some(refused) = self.refuses(path) {
             return Err(refused);
+        }
+        if self.is(Flaw::LeadingClimbIsResolved) && path.starts_with("/../") {
+            return self.read(&resolved(path));
+        }
+        if self.is(Flaw::ReadBelowAFileAnswersTheParent)
+            && let Some(parent) = self.file_above(path)
+        {
+            return self.inner.read(&parent);
         }
         if (self.is(Flaw::ReadFailsOnSpaceInPath) && path.contains(' '))
             || (self.is(Flaw::ReadOfFileWithNewlineNameFails) && path.contains('\n'))
@@ -492,6 +642,23 @@ impl OutputFiles for Flawed {
                 Some(Flaw::ReadTruncatesAt64k) => bytes.truncate(65_536),
                 Some(Flaw::ReadTruncatesAt128k) => bytes.truncate(131_072),
                 Some(Flaw::ReadTruncatesAt1M) => bytes.truncate(1_048_576),
+                Some(Flaw::ReadNormalisesCrlf) => *bytes = without_carriage_returns(bytes),
+                Some(Flaw::ReadStripsBom) if bytes.starts_with(&[0xef, 0xbb, 0xbf]) => {
+                    bytes.drain(..3);
+                }
+                Some(Flaw::ReadStripsTrailingCrlf) if bytes.ends_with(b"\r\n") => {
+                    bytes.truncate(bytes.len() - 2);
+                }
+                Some(Flaw::ReadTrimsTrailingNuls) => {
+                    while bytes.last() == Some(&0) {
+                        bytes.pop();
+                    }
+                }
+                Some(Flaw::ReadDropsTheLastByteAtA4kMultiple)
+                    if !bytes.is_empty() && bytes.len() % 4096 == 0 =>
+                {
+                    bytes.pop();
+                }
                 _ => {}
             }
         }
