@@ -264,30 +264,37 @@ fn set_of_another<R: PublisherRig>(rig: &R, k: &Coordinate) -> Vec<u8> {
     rig.payload(k, 1).bytes
 }
 
-/// A set that names one coordinate twice could carry two byte strings for it: a stage, a commit
-/// and an observe refuse it and change nothing.
-pub(super) fn a_set_that_names_a_coordinate_twice_is_refused<R: PublisherRig>(rig: &R) {
-    let mut p = staging_publisher(rig);
+/// A set that names one coordinate twice could carry two byte strings for it: a stage (on a
+/// channel that stages), a commit and an observe refuse it and change nothing. Run on every
+/// declared channel: on one that does not stage, the commit carries both byte strings and is the
+/// only call that can be refused.
+pub(super) fn a_set_that_names_a_coordinate_twice_is_refused<R: PublisherRig>(
+    rig: &R,
+    shape: &ChannelShape,
+) {
+    let mut p = built(rig, shape);
     let a = rig.coordinate("a");
     let mut twice = Set::at(rig, vec![a.clone(), a.clone()]);
     twice.payloads[1] = rig.payload(&a, 1);
     let blobs = twice.blobs();
     let items = twice.items(&blobs);
-    let stage_grant = rig.grant(&p, GrantPhase::Stage, std::slice::from_ref(&a));
-    must_err(
-        p.stage(&stage_grant, &items),
-        "a stage that names a coordinate twice",
-    );
     let once = Set::of(rig, &["a"]);
-    same(
-        observed(rig, &mut p, GrantPhase::Stage, &once, 0),
-        Presence::Absent,
-        "the coordinate after a refused stage of a set that names it twice",
-    );
-    must_err(
-        p.observe(&stage_grant, &a, &items),
-        "an observe told a set that names a coordinate twice",
-    );
+    if p.stages() {
+        let stage_grant = rig.grant(&p, GrantPhase::Stage, std::slice::from_ref(&a));
+        must_err(
+            p.stage(&stage_grant, &items),
+            "a stage that names a coordinate twice",
+        );
+        same(
+            observed(rig, &mut p, GrantPhase::Stage, &once, 0),
+            Presence::Absent,
+            "the coordinate after a refused stage of a set that names it twice",
+        );
+        must_err(
+            p.observe(&stage_grant, &a, &items),
+            "an observe told a set that names a coordinate twice",
+        );
+    }
     // Staged with the bytes of the last of the two, so that a commit that keeps the last of them
     // would be one of what was staged.
     let last = once.reseeded(rig, 1);
@@ -302,7 +309,9 @@ pub(super) fn a_set_that_names_a_coordinate_twice_is_refused<R: PublisherRig>(ri
         None,
         "the bytes after a refused commit of a set that names a coordinate twice",
     );
-    staged_held(observed(rig, &mut p, GrantPhase::Stage, &last, 0));
+    if p.stages() {
+        staged_held(observed(rig, &mut p, GrantPhase::Stage, &last, 0));
+    }
 }
 
 /// Staged state is no more readable to the one who staged it than to a stranger, but for an
