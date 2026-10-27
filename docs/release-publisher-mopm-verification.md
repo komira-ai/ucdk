@@ -1,6 +1,6 @@
 # The mopm release Publisher: the rig, the scenarios and the changes asked of mopm
 
-Status: design, revision 2. This is the second half of [release-publisher-mopm.md](release-publisher-mopm.md),
+Status: design, revision 3. This is the second half of [release-publisher-mopm.md](release-publisher-mopm.md),
 split out to keep both files under the project's size bound. It holds sections 11 to 13; section numbers
 are global, and sections 1 to 10 and 14 to 16 are in the first file. Nothing here is implemented yet.
 
@@ -22,7 +22,9 @@ only, so a TypeScript mopm cannot be a CI dependency. The rig is therefore:
   - `skip_identical` on a repeat create of a past-open group, supersede of an own overlapping open group
     (and, once M14 is modelled, `on_overlap: refuse`), the open-group and supersede caps, the `failed`
     group's `group_conflict`, and a `group_conflict` reason field when M13 is modelled;
-  - 404 kinds, tombstoned version records, signed-checksum PUTs, yank of a whole version, token checks, the
+  - a server that ignores `on_overlap` (supersedes, and omits the response field), and a burned
+    (tombstoned, no files) record reached by a commit race;
+  - 404 kinds (including the index's `not_in_index` and 502), tombstoned version records, signed-checksum PUTs, yank of a whole version, token checks, the
     sparse index (with lag behind the package record), a 429 with `Retry-After`, and the `reserving` answer.
 - **The kit's rig hooks.** The seam owners decided one `PublisherRig` shape, once, in the first publisher kit
   part (4g), with defaults that reproduce today's behaviour so the fake's rig does not change. The mopm rig
@@ -36,7 +38,8 @@ only, so a TypeScript mopm cannot be a CI dependency. The rig is therefore:
     more characters matching the grammar (the label with a fixed suffix, so a label that is a prefix of
     another stays a prefix, which the listing scenario needs, and distinct labels stay distinct; the kit
     checks both once), the configured channel, type `CONDA` (what `types()` returns), version `1.2.3`, and
-    the ucdk platform `linux-x86_64` (the publisher maps it to `linux-64`, section 5). The kit's literal
+    the ucdk platform `linux-x86_64` (the publisher maps it to `linux-64`, section 5). The archives of one
+    version that `payload` builds embed identical manifests. The kit's literal
     one-character names, `ArtifactType::File` and the unmapped platform all fail mopm's grammar, so nothing
     commits without this hook.
   - `payload(k, seed) -> Payload { name, bytes }`: a valid `mojo-<name>-<version>-<build>.conda` archive
@@ -48,7 +51,8 @@ only, so a TypeScript mopm cannot be a CI dependency. The rig is therefore:
     `SameSet` (published with the base) and the version sibling is `OwnSet`; no channel or type sibling
     exists, because mopm cannot hold one.
   - `unrepresentable() -> Vec<Coordinate>`: a foreign channel, a type other than `CONDA`, a name outside
-    the grammar, a prerelease version, an unknown platform, and two coordinates differing only where a `/`
+    the grammar, a prerelease version, an unknown platform (including `darwin-arm64`, so a sibling
+    expectation is not met by accident), and two coordinates differing only where a `/`
     falls. Every verb on them answers `Refused` and `observe` answers `Refused`, not `Absent`.
   - `seals_versions() -> bool`: `true`. Checked both ways: a rig that says `true` must pass
     `a_sealed_version_refuses_a_later_platform_and_observes_it_absent`, and one that says `false` must
@@ -75,8 +79,10 @@ only, so a TypeScript mopm cannot be a CI dependency. The rig is therefore:
     `FailIndexRead`.
   - `grant` and `foreign_grant` build envelopes; `advance` moves the injected clock; `reads` returns the
     request log mapped to Group and Index steps.
-  - **Rig step 1 provisions the identity form under test.** For the configured form there is no claim: the
-    first exchange creates the package, and the rig asserts that. For the `acts_for` form the rig claims
+  - **Rig step 1 provisions the identity form under test.** The operator steps are two: the identity's row in
+    the deployment's CI publishers, and its entry in the groups allow-list (without it every create is 404
+    `route_not_found`). For the configured form there is no claim: the first exchange creates the package,
+    and the rig asserts that. For the `acts_for` form the rig claims
     every package of the scenario for the account first. The emulator does both in process; the manual run
     does the first against a beta deployment and the second only with an operator-supplied claim.
 - **Fidelity.** An emulator can drift from mopm. Three guards: (1) emulator responses are validated against
@@ -87,13 +93,14 @@ only, so a TypeScript mopm cannot be a CI dependency. The rig is therefore:
   only from a protected environment by manual dispatch, never from a fork pull request, and checks before
   any exchange that the registry's index configuration names a non-production stage (the index's `stage`
   value is already the marker; the guard is ours, M5), refusing with nothing sent if it does not. `Config`
-  has no default registry. No production registry is ever a rig target. The manual run's checklist records:
-  that group create accepts a package the configured exchange created unclaimed; the uncached strongly
+  has no default registry. No production registry is ever a rig target. The manual run's checklist confirms what the source says:
+  that group create accepts a package the configured exchange created (owned by the CI identity); the uncached strongly
   consistent version record; `Present` at `committed` with repodata lagging; all members of a 20-member
   group reading `Present` in the same observe round; that `files[].sha256` equals the SHA-256 of the
-  downloaded bytes; whether a burned member keeps a digest; whether the configured exchange applies the
-  reserved-name check; the group id derivation against the documented one (M1); yank retention at the
-  channel host; and the real token exchange and its 10 minute life (section 9.3).
+  downloaded bytes; that a burned member holds no files and a takedown keeps its digest; the group id derivation against the documented one (M1); yank retention at the
+  channel host; and the real token exchange and its 10 minute life (section 9.3). The kit's new checks of
+  `commit_unit()`, `conditional_put()` and `grant_limit()` (4g) and the rig assert the values section 4
+  states.
 - **Transport adapter tests.** The `ureq` adapter is covered by a few tests against a `std::net::TcpListener`
   stub (timeouts, partial bodies, 429 with `Retry-After`, redirects refused, a foreign file origin refused).
   Everything above it runs on the emulator.
@@ -132,7 +139,7 @@ is only the in-process emulator even after the manual run.
 | 10 | a_set_commit_makes_every_coordinate_readable_or_none | met: one group; `rejected` leaves `Absent`; `failed` leaves `Burned`, never `Absent`; emulator models both | met |
 | 11 | a_channel_that_does_not_stage_commits_with_the_bytes | met: the shape itself, with archives from `payload` | skipped |
 | 12 | no_digest_exposed_is_refused | met on the emulator only: real mopm exposes `sha256` for every file, so a 200 without it is `Permanent` ("malformed") and only a broken emulator produces it | same |
-| 13 | yank_keeps_bytes_fetchable | GAP until kit 4g adds the `yank_unit()` branch: the draft scenario says a yank reaches only the coordinate it names, which mopm's `Version` unit cannot pass; with the branch it is met (siblings named and covered: both yanked; one omitted: `GrantRefused(Denied)`, nothing changes). Retention at the channel host is the manual run's. | same |
+| 13 | yank_keeps_bytes_fetchable | met once kit 4g lands (the `yank_unit()` branch is decided; not a mopm gap): the draft scenario says a yank reaches only the coordinate it names, which mopm's `Version` unit cannot pass; with the branch it is met (siblings named and covered: both yanked; one omitted: `GrantRefused(Denied)`, nothing changes). Retention at the channel host is the manual run's. | same |
 | 14 | yanked_coordinate_cannot_be_committed_again | met: `version_exists` gives `Duplicate`, observe reads `Yanked` | met |
 | 15 | lost_answer_is_resolvable_by_observe | met: `Unknown`, then `Present`, or `Absent` (a non-staging channel may observe it), or during `validating` a retry that gives `Committed` or `Duplicate` | met: `Staged` or `Present` |
 | 16 | list_may_lag_but_observe_is_exact | GAP until M3 is widened (question 2): the listing helper compares the whole `Held`, stamp and exceptional mark included; observe is exact from the uncached record | same |
@@ -154,7 +161,7 @@ is only the in-process emulator even after the manual run.
 | 32 | duplicate_over_other_bytes_leaves_the_old_bytes | met: `Duplicate`; platform siblings go `SameSet` | met after M13 and M14: a stage of other bytes over one's own staged coordinate is refused as an overlap, never superseded |
 | 33 | a_second_commit_of_the_same_bytes_is_duplicate | met: 200 `skip_identical` on a `committed` or `visible` group is `Duplicate`; on a `validating` group the retry may give `Committed`, which the kit accepts | met: body status `committed` or `visible` at entry |
 | 34 | a_stage_over_ones_own_staged_coordinate_is_duplicate | skipped | met after M13 and M14 (identical set: group read, `Duplicate`; other bytes: the overlap reason) |
-| 35 | a_commit_carries_exactly_what_was_staged | skipped | met after M1 and M8 for bytes (declared digests read from the group; the server computes the manifest hash); the stamp half is a GAP with row 22 |
+| 35 | a_commit_carries_exactly_what_was_staged | skipped | GAP: bytes are met after M1 and M8 (declared digests read from the group; the server computes the manifest hash), but the kit asserts the "another stamp" refusal and the stamp has no home (row 22) |
 | 36 | a_duplicate_answer_leaves_every_coordinate_of_the_set_as_it_was | met: preflight before reserve; a conflict mid-reservation aborts the group server side | met |
 | 37 | a_set_that_names_a_coordinate_twice_is_refused | met: client check, no I/O | met |
 | 38 | a_stage_or_commit_grant_reads_no_staged_state_but_through_observe | met: `fetch`, `newest`, `list` are public reads and carry no token | met |
@@ -164,19 +171,21 @@ Scenarios the seam owners' answers add to the kit's last two parts, and their st
 
 | Scenario (name as decided) | Status |
 |---|---|
-| a_burned_coordinate_is_neither_absent_nor_present_nor_committable | met on the emulator only (`can_burn`): `observe` `Burned`, stage and commit `Duplicate`, `fetch` `None`, `newest` omits it |
+| a_burned_coordinate_is_neither_absent_nor_present_nor_committable | met on the emulator only (`can_burn`): `observe` `Burned`, stage and commit `Duplicate` (a tombstoned record is checked before the missing-coordinate rule of 5.1), `fetch` `None`, `newest` omits it |
 | a_sealed_version_refuses_a_later_platform_and_observes_it_absent | met (`seals_versions`): `Refused(Channel)`, `Absent` |
 | a_coordinate_the_channel_cannot_hold_is_refused_before_anything_is_sent | met: every verb `Refused`, `observe` `Refused` |
 | a_retry_of_a_commit_that_is_becoming_readable_is_committed_or_duplicate_and_never_a_second_write | met: one landed write, then `Present` with our digest |
 | a_commit_of_staged_state_that_vanished_is_not_committed_and_a_restage_works | skipped in OC; met after M1 in ST (`Permanent` on the status read's evidence, section 7) |
-| a read-back that fails a registry echoing the declared digest (4g, named there) | met: `fetch` returns the bytes served and the engine hashes them |
+| a_registry_that_echoes_the_declared_digest_fails_readback | met: `fetch` returns the bytes served and the engine hashes them |
 | the yank-unit `Version` branch | see row 13 |
 
-Counted from the 39 rows above (a cell that says "same" takes the status of its neighbour): the one-call
-shape has 25 met, 10 skipped and 4 GAP (rows 13, 16, 21, 22); the staged shape has 27 met, 5 met after a
-mopm change (rows 26, 27, 32, 34, 35), 3 skipped (rows 11, 24, 39) and 4 GAP (rows 13, 16, 21, 22). "Met"
-includes row 12 (emulator only) and row 19 (client side only). Row 24 is skipped in both. A skip is reported
-by the kit and is not a pass, so the one-call shape passes 25 of 39 and not 35.
+Counted from the 39 rows above (a cell that says "same" takes the status of its neighbour). One-call shape:
+25 met, 10 skipped, 1 pending the kit (row 13) and 3 GAP (rows 16, 21, 22). Staged shape: 27 met, 4 met after
+a mopm change (rows 26, 27, 32, 34), 3 skipped (rows 11, 24, 39), 1 pending the kit (row 13) and 4 GAP (rows
+16, 21, 22, 35). Row 13 is pending the kit, not a mopm gap, and rows 16, 21 and 35 rest on the draft kit,
+so re-count them when kit part 4g lands; rows 16, 21, 22 and 35 are the real mopm gaps (the stamp). "Met"
+includes row 12 (emulator only) and row 19 (client side only), so the 25 is not 25 passes: no row is a pass
+against real mopm until the manual run. A skip is reported by the kit and is not a pass.
 
 ## 13. Changes asked of mopm, the maintainers' verdicts and the agreed order
 
@@ -186,12 +195,12 @@ none. "Before" says what the publisher does until the change lands, which is wha
 
 **Order requested of the maintainers.** First the client-side re-exchange (M2, no deploy) and the
 documentation items (M11 and the token-form notes); then M13 and M14; then M1, M6 and M8; then M10; then M3.
-Question 2 of section 16 asks to move a widened M3 ahead of M10, because three kit rows depend on it.
+Question 2 of section 16 asks to move a widened M3 ahead of M10, because four kit rows depend on it.
 
 | Id | Verdict | What mopm does | Before it lands the publisher | After |
 |---|---|---|---|---|
-| M13 | take (stage 1) | keep 409 `group_conflict` and add a stable `error.reason` from a closed documented enum | maps every `group_conflict` to `Unknown`: the engine observes and the action ends `INDETERMINATE` after the attempt bound, **never `Duplicate`**; no message is parsed; an operator who hits the open-group cap aborts the stale groups and reruns | maps by reason class (section 6 table) |
-| M14 | take (stage 1) | `POST /groups` takes `on_overlap: supersede` or `refuse`, default `supersede` (today's contract) | sends nothing new; the staged shape is not built, and in the one-call shape the engine's per-channel lease and the rule that exceptional runs share no members (section 9.1) keep overlap rare | sends `refuse` always; rows 32 and 34 in ST become met |
+| M13 | take (stage 1) | keep 409 `group_conflict` (raised by create only) and add a stable `error.reason` from a closed documented enum; the reason on an overlap refusal names the actor's own group ids | maps every `group_conflict` to `Unknown`: the engine goes to its read-back (`Publish.polls`, default 3) and the action ends `INDETERMINATE`, **never `Duplicate`**; no message is parsed; a cap refusal ends the wave `REFUSED`, and the operator aborts the stale groups and reruns | maps by reason class (section 6 table) |
+| M14 | take (stage 1) | `POST /groups` takes `on_overlap: supersede` or `refuse`, default `supersede` (today's contract); the create response lists any superseded groups and gives a reason on a refusal | sends nothing new; the staged shape is not built, and in the one-call shape the engine's per-channel lease and the rule that exceptional runs share no members (section 9.1) keep overlap rare | sends `refuse` always and checks every create response for the superseded list or the new field; an old server that ignored the field is detected and refused (`Refused(Channel)`), never trusted; rows 32 and 34 in ST become met |
 | M1 | take, modified (stage 2) | `GET /groups/{id}` returns per-member `files [{subdir, filename, sha256, size, uploaded}]` (`uploaded` only while open), and the group id derivation (actor plus declared set) becomes a documented, test-pinned interface; the publisher recomputes the id and reads it (404 is no group). Never create to inspect: create on an ended group reopens it and charges the allowance | builds the one-call shape only; no staged shape, no local record of group ids | builds the staged shape; `observe` with a declared set, `stage`, `abort` use the group read |
 | M6 | take (stage 2) | `getVersion` emits `group_id` when the version came from a group | decides whose bytes a version holds by digest alone (the seam's rule); the version record cannot name its group | may tell its own group from a foreign one, and tell a burn from a takedown by the group's status |
 | M8 | take (stage 2) | `manifest_sha256` optional on commit: present is today's check, absent is server computed | extracts it client side from the archive in one small module; an invalid archive is `Permanent` before any I/O | stops sending it and **deletes the module**; an invalid archive is then a `rejected` group, not a pre-check, so no second path survives |
@@ -202,7 +211,7 @@ Question 2 of section 16 asks to move a widened M3 ahead of M10, because three k
 | M5 | take as docs (no config change) | none: the index config's `stage` value is already the non-production marker | the manual run reads it and refuses a registry whose stage is not non-production (ours to enforce) | same |
 | M11 | docs only | state that `getVersion` is `no-store`, and the token forms and `ci_owner` of group create | proven by the manual run at the channel host | the API description says it |
 | M7 | already exists | one anonymous GET of the sparse index gives every file digest | `newest` uses it (section 4), falling back to the record for a version the index lags on | same |
-| M15 | already exists | CI publishers are configured per deployment; the publishing identity needs a row in the deployment's list, which the operators add on request | the identity must be requested before the manual run; rig step 1 documents it | same |
+| M15 | already exists | CI publishers are configured per deployment, and group create is allowed per actor; the identity needs a row in the deployment's list and an entry in the groups allow-list, which the operators add on request | both must be requested before the manual run; rig step 1 documents them | same |
 | M4 | rejected | none; the cost of a conflict mid-reservation is documented instead: a number taken after the preflight aborts the group and the next identical create is charged against the daily file allowance | states that cost (section 3) | same |
 | M12 | rejected | none; on `version_exists` the public `getVersion` `files[]` set is the comparison | compares that set (section 5.1) | same |
 | GAP-S | rejected | none; the publisher decides the full platform set before the first group | refuses a later platform (`Refused(Channel)`), and a multi-platform release needs the engine and machine change of section 5.1 | same |

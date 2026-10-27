@@ -1,12 +1,12 @@
 # The mopm release Publisher
 
-Status: design, revision 2. Nothing in this document is implemented yet. Where it says "the publisher does X"
+Status: design, revision 3. Nothing in this document is implemented yet. Where it says "the publisher does X"
 it describes what the crate will do when the PRs in section 15 land. The document is in two files to stay
 under the size bound: this one holds sections 1 to 10 and 14 to 16 (the design); sections 11 to 13 (the rig,
 the scenario table and the changes asked of mopm) are in
 [release-publisher-mopm-verification.md](release-publisher-mopm-verification.md). Section numbers are global.
 
-Revision 2 folds in the review of revision 1, the answers of the seam owners (the seam changes of
+Revision 3 folds in the review of revision 2 and revision 2 folded in the review of revision 1, the answers of the seam owners (the seam changes of
 ucdk#42, now on `main`), and the verdicts of the mopm maintainers on the gaps. What changed is listed in
 section 16.
 
@@ -26,9 +26,10 @@ Three facts shape everything:
    is a write (it reopens dead groups, charges counters and supersedes overlapping groups). `observe` must be
    a read. So `Staged` cannot be observed today. The maintainers will extend `GET /groups/{id}` (gap M1,
    section 13), and the staged shape is built behind it.
-3. mopm seals a `(name, version)` at its first group. A later set cannot add a platform to a version. So a
-   release for several platforms must declare its whole platform set before the first group is created
-   (section 5.1). The maintainers rejected a change here; the engine and the release machine must adapt.
+3. mopm seals a `(name, version)` once a group commits (and burns it if the group fails). A later set cannot
+   add a platform to a version. So a release for several platforms must declare its whole platform set before
+   the first group that can commit (section 5.1), and every platform archive of one version must agree on one
+   manifest. The maintainers rejected a change here; the engine and the release machine must adapt.
 
 The publisher therefore ships in two shapes:
 
@@ -98,22 +99,27 @@ path says otherwise); not executed. Each bullet names the file and function a re
   name the package's `ci_owner`.
 - The claim route is a user-token route (`http/publish-routes.ts`, `claim.ts`), and a CI token cannot call
   it. But the configured-publisher form of the exchange (`exchangeConfigured` in `auth/oidc.ts`, beta stage)
-  itself creates a package that does not exist, unclaimed, for the publisher. So on the beta stage the first
-  publish of a new name needs no human claim; the exchange is the first effect of a release, and it happens
-  before any group. Two consequences. A misspelled but grammatical name in a set becomes a permanent
-  package, so the grammar and set checks run before the exchange is requested (section 9.2). And whether
-  group create accepts a package created that way without a claim is read from source here and not run: it
-  is the first line of the manual run's checklist.
+  itself creates a package that does not exist, owned by the CI identity and with no account owner, for the
+  publisher. So on the beta stage the first publish of a new name needs no human claim; the exchange is the
+  first effect of a release, and it happens before any group. Two consequences. A misspelled but grammatical
+  name in a set becomes a permanent package, so the grammar and set checks run before the exchange is
+  requested (section 9.2). And group create accepts such a package by its source (`publish/service.ts`
+  `requireOwner`); that is read from source, and the manual run confirms it.
 - On production a configured identity is permitted only with an `acts_for` account, and the package must
   already be claimed by that account. That is an operator step the publisher cannot do.
-- `name_reserved` (403) is an error of the claim route. Group create does not answer it. Whether the
-  configured exchange applies the reserved-name check when it creates a package is a manual-run item; the
-  publisher never sees it at group create.
-- Group publish is off by default on every stage. When it is off, create answers 404 `route_not_found`
-  (`http/publish-routes.ts`, the groups switch).
+- `name_reserved` (403) is an error of the claim route only. The configured exchange creates the package
+  with no reserved-name check (`auth/oidc.ts` calls `createPackage` directly), and group create does not
+  answer it; the publisher never sees it.
+- Group publish is off by default on every stage, and is also gated per actor: an allow-list of actors
+  (`publish/flags.ts`: the groups switch, or on beta a policy naming the CI identity). When the switch is off
+  or the actor is not on the list, create answers 404 `route_not_found` (`http/publish-routes.ts`). That is
+  a second operator step beside the CI publishers list, and the 404 message names both causes (a wrong base
+  URL, or no group publish for this actor).
 - Create can also answer 429, 413 `payload_too_large` (a file above 100,000,000 bytes, decimal), 400
-  `invalid_request` (including more files than the daily file allowance), and `limit_exceeded` (per package
-  size quota). A 503 `unavailable` answers when a queue is down.
+  `invalid_request` (including more files than the daily file allowance, a version over 128 characters, an
+  empty file, and a group over 20 GB in total), and `limit_exceeded` (per package size quota). A 429
+  `rate_limited` carries `Retry-After` as the seconds to the next UTC midnight when the daily counter is
+  spent: up to 86400. A 503 `unavailable` answers when a queue is down.
 - Which identities may publish is a per-deployment setting of mopm (the list of configured CI publishers).
   The publishing identity must be in the deployment's list; that is an operator request, not a code path.
 
@@ -133,7 +139,8 @@ path says otherwise); not executed. Each bullet names the file and function a re
 **Group routes and states**
 
 - Routes: create (`POST /groups`, 201 for created or reopened, 200 for resumed or past that), status
-  (`GET /groups/{id}`), abort (`DELETE /groups/{id}`, only an `open` group), commit
+  (`GET /groups/{id}`, which also lazily expires an open group past its deadline), abort (`DELETE /groups/{id}`,
+  only an `open` group), commit
   (`POST /groups/{id}/commit`), group yank.
 - Create declares every file's `sha256` and `size`; the presigned PUT carries a signed
   `x-amz-checksum-sha256`, an exact length and no bearer token. The upload URL lives at most 300 seconds
@@ -150,7 +157,8 @@ path says otherwise); not executed. Each bullet names the file and function a re
 - Preflight and reservation: a `(name, version)` already published, yanked or tombstoned refuses the whole
   create with 409 `version_exists` and nothing is reserved. A pending row held by another live group, the
   open-group cap (5 per actor), the supersede cap (a create may supersede at most 3 of the actor's own open
-  groups) and a failed group retried are all 409 `group_conflict`. The response body of every error carries
+  groups) and a failed group retried are all 409 `group_conflict`, raised by create only; a refused commit
+  is `group_commit_refused`. The response body of every error carries
   only `{code, message, hint}`. A number taken by another publish after the preflight aborts our group on
   the server and answers `group_conflict`; the group is not left open, its rows are free, and the next
   identical create is a fresh attempt, charged again against the daily file allowance (that is the whole
@@ -160,7 +168,9 @@ path says otherwise); not executed. Each bullet names the file and function a re
 - The group id is a function of the actor and the declared set. Its derivation is not a documented interface
   today (it will become one, M1).
 - Group states: `open`, `validating`, `committed`, `visible`, `rejected`, `failed`, `expired`, `aborted`,
-  `superseded`. `rejected` frees the numbers. `failed` burns them: the validator applies `group_burn`, which
+  `superseded`. `aborted`, `rejected`, `expired` and `superseded` free the numbers; a number is sealed only
+  when a group commits. A group in `validating` cannot be aborted: it proceeds to publish. `failed` burns the
+  numbers: the validator applies `group_burn`, which
   turns each pending member into a `tombstoned` record (`state.ts`, `publish/group-validator.ts`).
 - Commit (`publish/group-commit.ts`): 202 when `started` is true, and `started` is true both for a fresh
   commit and for an identical repeat while the group is still `validating`; 200 for `committed` and
@@ -171,7 +181,9 @@ path says otherwise); not executed. Each bullet names the file and function a re
   what a non-creator receives. All members flip to `committed` in one transaction (`commitGroup` sets
   `committed_at`), so an observer never sees half a set.
 
-**Reads (public, `cache-control: no-store`; `http/router.ts`)**
+**Reads (public; `http/router.ts`). The package and version routes are `cache-control: no-store`; the sparse
+index is `public, max-age=60` (`http/index-reader.ts`), so a cached index can be a minute stale on top of the
+build lag.**
 
 - `GET /packages/{n}`, `GET /packages/{n}/versions` (paged, limit 1 to 100, cursor),
   `GET /packages/{n}/{v}`, `GET /packages` (search: normalised lowercase prefix of at most 64 characters,
@@ -181,13 +193,16 @@ path says otherwise); not executed. Each bullet names the file and function a re
 - Version detail has `state` (`published`, `yanked`, `tombstoned`), `yank_reason`, `tombstone`,
   `files[]` with `sha256` and `size` (and `url` unless the version is tombstoned), and `manifest_sha256`.
   A tombstoned version is returned with 200, never 404: a takedown keeps each file's `sha256`; a version
-  burned by a failed group may have an empty file list. (The two sources of this fact disagree on which of
-  the two a burned member shows; section 8 handles both and the manual run records which.)
+  burned by a failed group has an empty file list (`state.ts` empties the files only of a pending, unpublished
+  tombstone; a takedown keeps them). The manual run confirms it.
 - `GET /packages/{n}` returns the unpaginated `versions` list, tombstoned versions included. The search
   `latest` is the newest published version only, excluding yanked and tombstoned, and is null when there is
   none.
 - 404 comes in kinds: `package_not_found`, `version_not_found` (both genuine absence), `route_not_found`
-  (an unknown path, or the index route not configured) and, from a gateway, a body that is not JSON.
+  (an unknown path, or the index route not configured), `not_in_index` (the sparse index has no entry: index
+  lag, or a package whose versions are all burned) and, from a gateway, a body that is not JSON. The index
+  answers 502 `index_unavailable` when it cannot be built. Reading the per-version record is exact; the
+  index is used for digests only.
 - Digests are lowercase 64-hex SHA-256, the same form as `Hash256::as_str`; no conversion is needed.
   Reads are served from a strongly consistent store as deployed (`ConsistentRead`), so the version record
   is uncached and read-after-write exact at the origin; a gateway layer is not known and is covered by the
@@ -238,18 +253,21 @@ calls that say so and never to a read or a file URL.
 
 | Method | mopm call | Grant used | Error mapping (summary; full table in section 10) | Idempotency and atomicity argument |
 |---|---|---|---|---|
-| `observe(g, k, set)` | One-call shape: `GET /packages/{n}/{v}` (public). Staged shape: the group read of the group id recomputed from the actor and `set` (M1, token), then the same package read. | none needed. A grant that is presented is checked for repository and expiry on every verb, and for coverage where the verb names coordinates (section 9). | A 404 whose parsed body code is `package_not_found` or `version_not_found` gives `Absent`. Any other 404, an unparsable 404, and every read failure is `Transient` (`Refused(Channel)` for `route_not_found`), never `Absent`. A tombstone is `Burned` or `Yanked` (section 8). | A read. Exactness rests on the version record being uncached and strongly consistent (section 3, proven against a deployment by the manual run). Never calls `list`, search or create. Reports the registry's own digest; no verdict rests on it alone (section 8). |
-| `stage(g, items)` (staged shape) | the group read (M1) first: held and uploaded gives `Duplicate`; else `POST /groups` with `on_overlap: refuse` (M14), repeated with the identical body while `reserving`, then `PUT` each file the response says is not held, with the returned headers and no token | stage grant | 409 `version_exists` gives `Duplicate`; every `group_conflict` is classified by section 6 (`Unknown` until M13) | The group id is a function of actor and declared set, so a repeat of the identical set resumes the same group. A different set that shares a member is refused, never superseded (M14). |
-| `commit(g, items)` one-call | create (with `on_overlap: refuse` once M14 exists), upload, `POST /groups/{id}/commit`, poll `GET /groups/{id}` until `visible`; the create answer is classified by section 7 (own group already `validating`, `committed` or `visible` skips upload and commit) | commit grant (covers create, upload, abort of own group, commit, poll) | see sections 7 and 10 | one group is one atomic commit; `version_exists` is the create-if-absent |
+| `observe(g, k, set)` | One-call shape: `GET /packages/{n}/{v}` (public). Staged shape: the group read of the group id recomputed from the actor and `set` (M1, token), then the same package read. | none needed. A grant that is presented is checked for repository and expiry on every verb, and for coverage where the verb names coordinates (section 9). | A 404 whose parsed body code is `package_not_found` or `version_not_found` gives `Absent`. Any other 404, an unparsable 404, and every read failure is `Transient` (`Refused(Channel)` for `route_not_found`), never `Absent`. A tombstone is `Burned` or `Yanked` (section 8). An expired grant that is presented is `GrantRefused(Expired)`, which `SeamError::observe_failure` treats as `INDETERMINATE` even at preflight; the publisher's own expiry check on a read therefore applies only to a grant that was presented. | A read. Exactness rests on the version record being uncached and strongly consistent (section 3, proven against a deployment by the manual run). Never calls `list`, search or create. Reports the registry's own digest; no verdict rests on it alone (section 8). |
+| `stage(g, items)` (staged shape) | the group read (M1) first: held and uploaded gives `Duplicate`; else `POST /groups` with `on_overlap: refuse` (M14), repeated with the identical body while `reserving`, then `PUT` each file the response says is not held, with the returned headers and no token | stage grant | 409 `version_exists` gives `Duplicate` (a burned coordinate too: the engine's observe reads `Burned`); every `group_conflict` is classified by section 6 (`Unknown` until M13) | The group id is a function of actor and declared set, so a repeat of the identical set resumes the same group. A different set that shares a member is refused, never superseded (M14); a create answer that shows it was superseded anyway is "not honoured" (section 6). |
+| `commit(g, items)` one-call | create (with `on_overlap: refuse`, whose honouring is checked, section 6), upload, `POST /groups/{id}/commit`, poll `GET /groups/{id}` until `visible`; the create answer is classified by section 7 (own group already `validating`, `committed` or `visible` skips upload and commit) | commit grant (covers create, upload, abort of own group, commit, poll) | see sections 7 and 10 | one group is one atomic commit; `version_exists` is the create-if-absent |
 | `commit(g, items)` staged | `POST /groups/{id}/commit` with the manifest hashes, poll to `visible`. The answer is decided by the group status in the body, not the HTTP status. | commit grant | body status already `committed` or `visible` gives `Duplicate`; `validating` is polled and gives `Committed` at `visible` | an identical commit body is idempotent server-side; a different body is 409 `group_commit_refused` |
 | `abort(g, ks)` (staged shape) | `DELETE /groups/{id}`; on 409 or 404, `GET /groups/{id}` | stage grant | section 7 table | DELETE is idempotent only for `aborted`; the follow-up read makes the rest idempotent |
-| `yank(g, k, reason)` | read the version record (`k` must be held in it), check the grant covers every held sibling, then `PUT /packages/{n}/{v}/yank` with `{yanked: true, reason}` | commit grant covering `k` and every held sibling of its version | see section 7 | server-side no-op on repeat. Coarser than a coordinate: `yank_unit() == Version`, so the engine names and covers every sibling (section 7). |
+| `yank(g, k, reason)` | read the version record (`k` must be held in it, else `Permanent`), check the grant covers every held sibling, then `PUT /packages/{n}/{v}/yank` with `{yanked: true, reason}` | commit grant covering `k` and every held sibling of its version | see section 7 | server-side no-op on repeat. Coarser than a coordinate: `yank_unit() == Version`, so the engine names and covers every sibling (section 7). |
 | `fetch(g, k)` | `GET /packages/{n}/{v}`, then `GET` the file `url` from that record for `k`'s subdirectory | none | 404 version, no such file, a tombstoned version (no url) give `None` | Returns the bytes as served, and judges nothing: the engine hashes them against the set's digest. Never builds a URL itself, so staged bytes are never returned. The URL's origin is checked against configuration (section 10). |
 | `newest(g, ch, name)` | `GET /packages/{n}` (versions, newest first, yanked and takedown-tombstoned included), one sparse-index read for the digests, and the per-version record for any version the index does not show yet | none | see rules below | A read of committed state; compares nothing. |
 | `list(g, scope)` | `GET /packages?sort=name` paged, stop once names pass the prefix, then the latest version's record per package | none | read failures are `Transient` | Reports only; omitting older versions, yanked-only and tombstoned-only packages (search `latest` is null for them) is the permitted lag. |
 
 `newest` rules. No package (404 `package_not_found`) and a claimed package with no published version give an
-empty list, not an error. A version burned by a failed group holds no `Held` and is skipped (the seam's
+empty list, not an error. The sparse index is a cache of up to 60 seconds on top of the build lag, so it is
+read only for digests; a version whose digest matters is read from its own record, which is exact. An index
+404 `not_in_index` is lag (or an all-burned package) and falls back to the records; a 502 `index_unavailable`
+fails the call (`Transient`). A version burned by a failed group holds no `Held` and is skipped (the seam's
 rule: a burned coordinate is not returned); a takedown tombstone with a digest is listed as `Yanked`. The
 sparse index lags the package record, so a version in the record and not yet in the index is read from its
 record, never omitted. If any one of the reads fails, the whole call fails (`Transient`), and a partial list
@@ -270,20 +288,26 @@ grammars (section 3), and everything outside them is `Refused(Reason::Channel)` 
   `01.2.3` are refused locally.
 - `platform` is ucdk's `<os>-<cpu>` or `any`, mapped to a mopm subdirectory by one table in the crate and
   nothing else: `any` is `noarch`, `linux-x86_64` is `linux-64`, `linux-aarch64` is `linux-aarch64`,
-  `macos-aarch64` is `osx-arm64`. The table is a bijection (a test checks both directions, so a subdirectory
+  `darwin-aarch64` is `osx-arm64`. The table is a bijection (a test checks both directions, so a subdirectory
   read from a record maps back to exactly one ucdk platform), and a test compares its right-hand side with
-  `SUBDIRS_V1` of section 3. Any other platform is `Refused(Reason::Channel)`. The spelling of the macOS os
-  token is not fixed by `release.md` (question 4 in section 16); the table takes `macos-aarch64` until it is.
+  `SUBDIRS_V1` of section 3. Any other platform is `Refused(Reason::Channel)`. The macOS spelling follows the in-tree convention
+  (`darwin-aarch64`, as in the machine tests of `ucdk-release`); `darwin-arm64`, which the build-system kit
+  uses as an unmapped platform, stays unmapped and the rig lists it in `unrepresentable()`. The archive's
+  embedded `info/index.json` subdirectory must equal the mapped subdirectory (mopm answers `subdir_mismatch`),
+  so the check reads the archive as well as the blob name.
 - The file is the `Blob` whose `name` is `mojo-<name>-<version>-<build>.conda` with the coordinate's name and
   version, a build matching `^mojo[0-9]+(?:\.[0-9]+)*_0$`, and at most 255 characters. A mismatch is
   `Refused(Reason::Channel)` before anything is sent. Until M8, a blob that is not a valid package archive
-  (it has no embedded manifest) is `Permanent` before any I/O.
+  (it has no embedded manifest) is `Permanent` before any I/O. Also checked before any I/O, each a
+  `Permanent` or `Refused` so that no daily allowance is spent on a group mopm would reject: a version over
+  128 characters, an empty file, a group over 20 GB in total, and (until M8) that every archive of one member
+  embeds the same `lib/mojo/<name>.mopm.json` bytes and agrees on build and native library (section 5.1).
 
 Consequences, each enforced in code:
 
-- **One file per coordinate.** A registry version may hold several builds in one subdirectory. `observe` of
-  a coordinate whose `(version, platform)` holds more than one file answers `Refused(Reason::Channel)`
-  ("ambiguous"), never an arbitrary one.
+- **One file per coordinate.** All files of one `(name, version)` share one build (the build is in the file
+  name) and mopm refuses a duplicate file, so a version holds at most one file per subdirectory. A record that
+  shows two files for one subdirectory is a broken response: `Permanent` ("malformed").
 - **Byte-exact.** The grammars above make name and version injective with mopm's own spelling (one version
   has one spelling). Each is percent-encoded as one path segment, and the name and version echoed by mopm
   must equal the request byte for byte, else `Permanent`. The publisher never normalizes. Inputs outside the
@@ -302,18 +326,20 @@ Consequences, each enforced in code:
 
 ### 5.1 A version is sealed by its first group: multi-platform releases
 
-mopm seals `(name, version)` when its first group is created. A later set that names another platform of an
-already published version cannot be created: it is `version_exists`, forever. The maintainers rejected a
+mopm seals `(name, version)` when a group commits (and burns it if the group fails). A later set that names
+another platform of a published version cannot be created: it is `version_exists`, forever. The maintainers rejected a
 change to this (gap GAP-S in section 13). It is ucdk's to handle, and today it is not handled:
 
 - `release.md` gives one PUBLISH stage per platform, so the platforms of one release are published by
   separate Publish actions, each its own set. Against mopm the first platform publishes and **every later
   platform of the same version is refused forever**. mopm cannot serve a multi-platform release under that
   stage model. A release for one platform, or for `any` alone, is not affected.
-- The publisher's part is small and total. After a 409 `version_exists` it reads the version record: every
-  requested coordinate present with the same digest gives `Duplicate`; a requested coordinate present with
-  another digest gives `Duplicate` (old bytes stand); any requested coordinate missing gives
-  `Refused(Reason::Channel)` ("the version is sealed with another file set"). `observe` of the missing
+- The publisher's part is small and total. After a 409 `version_exists` it reads the version record. First,
+  a tombstoned record (a burned number: no files) gives `Duplicate`, so that the engine's observe reads
+  `Burned` and refuses `PUBLISH_BURNED`; the missing-coordinate rule below applies only to a published or
+  yanked record. Then every requested coordinate present with the same digest gives `Duplicate`; a requested
+  coordinate present with another digest gives `Duplicate` (old bytes stand); any requested coordinate
+  missing gives `Refused(Reason::Channel)` ("the version is sealed with another file set"). `observe` of the missing
   coordinate answers `Absent`, so the engine cannot loop observe-`Absent`, commit-`Duplicate`. `Refused`
   promises that nothing happened, which is true. The rig declares `seals_versions() == true` and the kit
   holds it to this answer in both directions (section 11).
@@ -326,6 +352,13 @@ change to this (gap GAP-S in section 13). It is ucdk's to handle, and today it i
   with `Reason::Channel`, never half-published. This changes `release.md`'s stage model (one platform per
   stage, `machine.stage_platform`, and question 10 there); the publisher cannot supply it. Until it lands, a
   mopm channel is usable for single-platform releases only, and the doc of the channel says so.
+- **One manifest per member.** mopm checks every file of a member against one declared `manifest_sha256` and
+  rejects the whole group unless all of them agree on build, dependencies and native library (id and soname).
+  Joining platforms into one group therefore works only for a package whose per-platform archives embed the
+  same `lib/mojo/<name>.mopm.json` bytes and the same native soname. A package whose archives differ (a
+  native library named differently on linux and macOS) cannot share a member: it is single-platform on mopm
+  until mopm accepts a manifest per file (a new request, not in section 13's verdicts). The publisher checks
+  agreement client side (section 5) and answers `Permanent` before any I/O.
 - A version that was published with a partial platform set stays partial. The recovery is a new version,
   not a retry. The same holds for a version burned by a failed group (section 7).
 
@@ -340,8 +373,15 @@ Applies to the staged shape.
 - `stage` computes the members (one per `(name, version)`, files sorted), recomputes the group id from the
   actor and the declared set (the derivation M1 documents and pins by test), and reads the group
   (`GET /groups/{id}`, M1). 404 is "no group". A group that is open with every file of the set uploaded is
-  `Duplicate`, with no create sent. Otherwise it sends `POST /groups` with `on_overlap: refuse` (M14) and
+  `Duplicate`, with no create sent.   Otherwise it sends `POST /groups` with `on_overlap: refuse` (M14) and
   repeats the identical request while the answer is `reserving` (bounded by configuration).
+- **Detecting a server that ignores `on_overlap`.** An old mopm ignores the field and supersedes silently,
+  which is the hazard M14 exists for. M14 therefore also puts the superseded groups in the create response
+  (and a reason on a refusal). The staged shape checks every create response: one that lists a superseded
+  group, or that lacks the new response field, means "refuse not honoured", and the shape answers
+  `Refused(Channel)` ("registry does not honour on_overlap") for that stage and for every later one of the
+  same publisher, with the group aborted when it is the actor's own. The same check runs in the one-call
+  shape once the field is sent. The emulator has a server that ignores the field and a case for each.
 - The publisher never uses create to inspect a group: create on an ended group reopens it and charges the
   allowance, and an unrefused create can supersede another open group.
 - States an observer sees while the group is `open`: no read route shows a pending version, so a stranger
@@ -358,9 +398,10 @@ Applies to the staged shape.
     `visible`): nothing to upload. `Duplicate`.
 - **`group_conflict` is one code for unrelated conditions, and the code alone is never enough.** Until M13
   gives it a stable `error.reason` from a closed documented enum, the publisher parses no message (a wording
-  change in a mopm release would silently change the class) and answers every `group_conflict`, on create
-  or on commit, `Unknown`. The engine observes, the action is `INDETERMINATE` once the attempt bound is
-  spent, and `Duplicate` is never answered for a conflict. After M13 the reason decides, by this table (the
+  change in a mopm release would silently change the class) and answers every `group_conflict` (raised by
+  create only) `Unknown`. The engine goes to its read-back, which polls `Publish.polls` times (default 3, one
+  tick apart); the action is `INDETERMINATE` when those are spent, and `Duplicate` is never answered for a
+  conflict. After M13 the reason decides, by this table (the
   reason names are mopm's; the classes are what the publisher needs):
 
 | Reason class | Staged shape | One-call shape |
@@ -382,7 +423,7 @@ Applies to the staged shape.
 - **Same-actor supersede (M14).** Without the `on_overlap` field, a create of a set different from an earlier
   open set of the same actor, sharing a member, answers 201 and discards the earlier group's staged bytes.
   The publisher cannot see that without M1, so it does not build the staged shape before M1 and M14, and
-  sends `refuse` always once they exist. In the one-call shape the earlier group is open only while its own
+  sends `refuse` always once they exist, relying on it only as the previous bullet says. In the one-call shape the earlier group is open only while its own
   call runs, and the engine's per-channel lease serialises publishes to one channel; the exposure is an
   exceptional run and a normal run of the same actor on overlapping members (section 9.1).
 - Create is sent once per attempt and never blindly retried after an `Unknown`; the engine observes first.
@@ -392,7 +433,9 @@ Applies to the staged shape.
   supersede another open group sharing a version. A "read" with those effects would break the seam. Hence M1.
 - Staged state expires (12 hour deadline, lazily). A staged coordinate whose group expired reads `Absent`;
   the engine's observe-then-stage then creates a fresh attempt. Abandoned open groups use one of the 5
-  open-group slots of the actor until then, which is an operational note for the staged shape.
+  open-group slots of the actor until then, which is an operational note for the staged shape. Runbook: a
+  refusal for the open-group or supersede cap ends the wave `REFUSED`; the operator aborts the stale groups
+  and reruns.
 
 ## 7. Commit, lost answers, abort and yank
 
@@ -403,7 +446,8 @@ Common steps, in order:
 1. Validate the call with no I/O: grammar and set checks (section 5), the package archive and its
    `manifest_sha256` (until M8), grant checks (section 9), the call's time budget (section 9.3), member
    grouping.
-2. One-call shape: create, then classify its answer.
+2. One-call shape: create (the identical request repeated while the answer is `reserving`, bounded by
+   configuration, because commit needs every member reserved), then classify its answer.
    - 201, or 200 on an open group: upload every file the response lists, then go to step 3.
    - 200 with every member `skip_identical` on an own group whose body status is `validating`: this is our
      own commit still in flight (the group id is a function of actor and set). Skip upload and commit and go
@@ -469,7 +513,7 @@ retries and expects `Duplicate` and then `Present`.
 | 404 `group_not_found` | `Ok` only if the group read (or the recorded group id) agrees the group is gone; otherwise `Unknown` (a non-creator and an uncovered token also get 404) |
 | 409 `group_not_open`, then `GET`: `expired`, `rejected`, `superseded`, `aborted` | `Ok` |
 | `committed`, `visible` | `Ok`, touches nothing (only yank can undo) |
-| `validating` | `Ok` without effect; a later commit reports it |
+| `validating` | `InFlight`: a validating group cannot be aborted and proceeds to publish; a later observe settles it |
 | `failed` | `Ok` (nothing to give back; numbers are burned) |
 | 401, 403 | `GrantRefused` |
 
@@ -489,10 +533,10 @@ platform. A publisher never widens a yank silently. The rules:
   `yanked` per coordinate. Explicit beats implicit: the operator chooses the reach.
 - **The publisher** keeps its own check as defence in depth, because a publisher that depended on the engine
   alone would exceed its grant on a buggy caller. Before anything is sent it reads the version record. If
-  `k` is not held in it (no file for `k`'s subdirectory), the answer is `Refused(Reason::Channel)` (nothing
-  to yank, nothing sent). If the record holds a coordinate the grant does not cover, the answer is
-  `GrantRefused(Denied)` and nothing is sent. The reason must be 1 to 280 characters, else
-  `Refused(Reason::Channel)`.
+  `k` is not held in it (no file for `k`'s subdirectory), the answer is `Permanent` ("not held"; nothing to
+  yank, nothing sent, the same call fails again, as the conforming fake answers). If the record holds a
+  coordinate the grant does not cover, the answer is `GrantRefused(Denied)` and nothing is sent. The reason
+  must be 1 to 280 characters, else `Refused(Reason::Channel)` (a grammar failure).
 - A pending or tombstoned version (409 `invalid_transition`) and a missing one (404 `version_not_found`) are
   `Permanent` (nothing happened, the same call fails again). A transport failure after the request was
   written is `Unknown`.
@@ -523,10 +567,11 @@ verifies the token); the guard catches our own mistakes. What the kit's private 
 - **Version states.** `published` is `Present`. `yanked` is `Yanked(Held{sha256})`. A `tombstoned` record is
   never `Absent` and never `Present`. One with an empty file list is a number burned by a failed group:
   `Burned`, a presence of its own since ucdk#42 (it holds no bytes, so there is no digest to compare, and the
-  engine refuses it as `PUBLISH_BURNED`, never retried). One that kept a file `sha256` (a takedown, or a
-  burned member that kept it) is `Yanked(Held{sha256})`, which the engine refuses as `PUBLISH_YANKED`; the
-  two refusals are both terminal, and only the reason differs. The manual run records which of the two a
-  burned member shows. With M6 the version record names its group, and the group's status can tell the two
+  engine refuses it as `PUBLISH_BURNED`, never retried). One that kept a file `sha256` (a takedown) is
+  `Yanked(Held{sha256})`, which the engine refuses as `PUBLISH_YANKED`. By the source a burned member holds
+  no files (section 3), so the two do not meet; the manual run confirms it. If a deployment ever showed a
+  burned member with a digest, it would read as a takedown, carry no stamp, and make the supersede decision
+  of that channel `INDETERMINATE`: a known gap until M6 names the group, whose `failed` status tells the two
   apart. `fetch` of a tombstoned version is `None` (the record has no url). `newest` follows section 4. A
   200 whose body lacks `sha256` for a published or yanked file is `Permanent` ("malformed"); the registry's
   own response schema requires it, so only a broken emulator or gateway produces it. The publisher never
@@ -661,7 +706,8 @@ Two clocks therefore bound the call, and the call must not outlive either:
   another holder may already have taken over.
 
 The call's budget is the sum of what it may spend: `upload_budget + commit_request_timeout + poll_deadline +
-cleanup_timeout`, from `Config`. **Construction-time check:** `MopmPublisher::new` takes `Config.lease_ttl`
+cleanup_timeout`, from `Config`, where `upload_budget` includes the create request and every `PUT` retry,
+and `poll_deadline` is the in-call wait for visibility. **Construction-time check:** `MopmPublisher::new` takes `Config.lease_ttl`
 (required, no default, set by the caller from the TTL the engine's lease guard uses, because a default here
 could silently differ from the engine's) and fails with a configuration error, before anything is sent, unless
 
@@ -678,9 +724,10 @@ Per call, with the injected clock: at entry the remaining life of the grant must
 `GrantRefused(Expired)` with nothing sent; the call computes one deadline from the entry time and checks it
 before every request. Out of budget before `POST /commit` is written: stop, abort nothing that landed,
 `Transient` (the group stays open and a rerun resumes it). Out of budget after it is written, or a 401 on a
-poll: `Unknown`. The engine's observe and read-back settle it; `commit_wait` may be set to zero, which
-returns `Unknown` as soon as the commit is accepted and leaves all waiting to the engine's own polls, which
-have a `Pause` and renew the lease.
+poll: `Unknown`. The engine's observe and read-back settle it. `poll_deadline` may be set to zero, which
+returns `Unknown` as soon as the commit is accepted, but then only the engine's read-back waits: it polls
+`Publish.polls` times (default 3, one tick apart), so a group still validating after that ends
+`INDETERMINATE`. The default stays above zero (240 s) and the design asks nothing of the engine here.
 
 **Stale-holder outcome.** If the lease lapses despite the bound (a stalled host, a clock step), the stale
 call's commit may still land. That is safe, not harmless-by-luck: the group id is a function of actor and set,
@@ -702,7 +749,8 @@ rustls. Constraints from `deny.toml`: no `openssl-sys`, no `native-tls`, permiss
 wildcards. The crypto provider is `ring` (Apache-2.0 AND ISC) and `webpki-roots` is not used because its
 licence is not on the allow list. Both are checked by the licence and ban step of `cargo xtask check` in
 PR 1; if `ring` is refused the fallback is to ask for an allow-list change, not to add a C TLS stack.
-Archive handling (until M8) uses the pure Rust `zip`, `tar` and `ruzstd` crates.
+Archive handling (until M8) uses the pure Rust `zip` (default features off, only the codecs a `.conda`
+needs, checked by `cargo deny` in PR 1), `tar` and `ruzstd` crates.
 
 **Trust roots.** `Config.roots` is `Roots::Bundle(path)` and nothing else: one PEM file named by a flag (on a
 CI image, the system bundle, passed explicitly). The platform certificate loader is not used, because it can
@@ -738,7 +786,8 @@ call that failed at transport is `Unknown` in both cases; the distinction is kep
 Configuration (a plain struct built by the caller from flags; no environment variables, and no
 `MOPM_TOKEN`: the only credential is the grant), with no default registry: registry base URL, file-host
 origins, roots bundle path, proxy, request timeout, connect timeout, retry count for idempotent calls, poll
-interval, `lease_ttl`, upload budget, commit request timeout, commit wait, cleanup timeout, margin,
+interval, `lease_ttl`, `upload_budget`, `commit_request_timeout`, `poll_deadline`, `cleanup_timeout`, `margin`,
+a `Retry-After` ceiling,
 reserving-repeat bound, `newest` page and version caps. `Retry-After` is converted with the seam's
 `Backoff::after_seconds` (one tick is `PAUSE_TICK_MS`, one second): rounded up, saturating, and a missing or
 unparsable header is a fixed small default, never a retry storm. There is no "ticks per second" setting.
@@ -750,7 +799,10 @@ seconds, and a storage 403 from an expired URL cannot be retried with the same U
 identical create (200, fresh URLs for the files not yet stored) once and retries the `PUT`. To avoid it, a
 file's `PUT` starts only if the create answer is younger than half the URL lifetime, else the create is
 repeated first. `429` is never retried inside the publisher: it answers `RateLimited` and counts against the
-engine's attempt bound.
+engine's attempt bound. Group create charges a daily counter, so its `Retry-After` can be the seconds to
+the next UTC midnight (up to 86400), and the engine waits the stated ticks. Above the configured ceiling
+the answer is `Refused(Channel)` ("daily file allowance spent, retry after <time>"; nothing landed), never a
+`Pause` of a day; a transcript test pins both sides of the ceiling.
 
 Error mapping (the code is `error.code` of the mopm body; the HTTP status alone is never used to decide).
 `Transient` means "failed, and it may have landed" in the seam, so it is used wherever an effect might exist:
@@ -763,20 +815,20 @@ Error mapping (the code is `error.code` of the mopm body; the HTTP status alone 
 | exchange: identity token already used | `GrantRefused(Used)` (never retried with the same identity token) |
 | exchange: could not be reached | `GrantRefused(Unreachable)` |
 | 429 | `RateLimited(Backoff{ticks})` from `Retry-After` |
-| 503 `read_only_mode`; 404 `route_not_found` (create or read: no group publish, wrong base URL); a group-create refusal on a deployment with groups off; name, version, platform, file name, type or channel outside what mopm can hold (client check); a yank of a coordinate not held | `Refused(Reason::Channel)` |
+| 503 `read_only_mode`; 404 `route_not_found` (create or read; the message names both causes: wrong base URL, or no group publish for this actor); a 429 above the `Retry-After` ceiling; name, version, platform, file name, type, channel or yank reason outside what mopm can hold (client grammar check) | `Refused(Reason::Channel)` |
 | 404 `package_not_found` or 403 `not_owner` on create or yank (the package is not created or not owned by the identity); `limit_exceeded`; 413 `payload_too_large`; 400 `invalid_request` for the daily allowance | `Refused(Reason::Channel)` with a message that names the setup step; nothing landed |
 | 404 `package_not_found` or `version_not_found` on a read | `Absent` (observe), `None` (fetch), empty (newest) |
 | any other 404, a 404 with an unparsable body, 400 `invalid_name`, `invalid_version`, `upload_invalid` on create | read: `Transient`; create: `Permanent` (the client grammar drifted from mopm; fix the check) |
 | 409 `version_exists` on create | `Duplicate` (section 5.1's rule for a sealed version) |
-| 409 `group_conflict`, on create or commit | `Unknown` until M13; then section 6's table |
+| 409 `group_conflict` (create only) | `Unknown` until M13; then section 6's table |
 | 409 `group_commit_refused` | by section 7's table, after the group status read |
 | group `rejected` during commit | `Permanent` (nothing landed) |
 | group `failed` during commit | `Transient` (numbers burned) |
-| 409 `invalid_transition` on yank; 404 `version_not_found` on yank; malformed or unexpected body; an invalid archive (until M8) | `Permanent` |
+| 409 `invalid_transition` on yank; 404 `version_not_found` on yank; a coordinate not held (yank); a well-formed body that violates the response schema; an invalid archive or archives that disagree on the manifest (until M8) | `Permanent` |
 | 503 `unavailable` on create | `Transient` |
 | any transport failure, 5xx, or unreadable answer on a mutating call after commit or yank was sent | `Unknown` |
 | failure before commit is sent that changed nothing visible | `Transient` |
-| any failure of a read | `Transient` |
+| any failure of a read, an unparsable or truncated body included | `Transient` |
 
 `Permanent` and `Refused` are never used after a request that may have landed, except where a status read
 proves that nothing did (section 7); the tests prove this with an emulator that applies the commit and then
@@ -798,7 +850,8 @@ drops the response, and one that fails the group.
    hashes.** Why: seam rule; the record is the authoritative per-version read, and a registry's own digest
    proves only what the registry says.
 5. **A version sealed with another file set is `Refused(Channel)` on write and `Absent` on observe, never
-   `Duplicate`; a multi-platform release must publish all platforms in one set (section 5.1).** Why: avoids
+   `Duplicate`, except a burned (tombstoned) record, which is `Duplicate` and reads `Burned`; a
+   multi-platform release must publish all platforms in one set with one manifest (section 5.1).** Why: avoids
    an observe-`Absent`, commit-`Duplicate` loop; mopm will not change. Alternative: widen `Present` to the
    whole version (lies about a coordinate not held).
 6. **`Committed` is returned at `visible`.** Why: the seam's "readable" then holds on every mopm read path.
@@ -835,6 +888,8 @@ drops the response, and one that fails the group.
     observe reads `Burned` and refuses. `Permanent` is allowed only where a status read proves nothing landed.
 19. **A call is bounded below the lease and the token, checked at construction (section 9.3).** Why: the
     seam has no heartbeat inside a call and the engine renews only before it.
+20. **`on_overlap: refuse` is relied on only when the create response shows it was honoured (section 6).**
+    Why: an old server ignores the field and supersedes silently.
 
 ## 15. PR plan
 
@@ -848,9 +903,11 @@ touches, and ships tests that failed first for any fix.
    mapping and injectivity (coordinates differing only where a `/` falls), the platform table both ways,
    grammar refusal for observe too, an invalid-grammar version never produces a request, every row of the
    error table, the budget check one second over and at the bound, a bogus certificate variable changing
-   nothing.
+   nothing, the version length, empty file, 20 GB and per-member manifest agreement refusals, the archive's
+   subdirectory against the table, and the `Retry-After` ceiling.
 2. **One-call `commit`, `fetch`, `yank`.** Create, upload, commit, poll; the create-answer classification
-   (including 200 `skip_identical`, every `group_conflict` as `Unknown`, and the sealed-version rule);
+   (including 200 `skip_identical`, every `group_conflict` as `Unknown`, the sealed-version rule and the
+   tombstoned `version_exists` as `Duplicate`);
    manifest hash extraction module; the commit status table; `Unknown` after send. Tests on a hand-built
    fake `Transport`, including apply-then-drop, the `validating` window with `observe` giving `Absent`, a
    failed group answering `Transient`, and the yank refusals (not held, uncovered sibling).
@@ -864,7 +921,8 @@ touches, and ships tests that failed first for any fix.
    `run_publisher_kit` for the one-call shape, plus the TCP-stub adapter tests. Lands after kit parts 6 and
    7 (4g, 4h).
 6. **Staged shape** (after M1, M13, M14): the group read, `stage`, `abort`, staged `commit`, `observe`
-   with a declared set, `on_overlap: refuse`; extends the emulator and runs the staged shape through the kit.
+   with a declared set, `on_overlap: refuse` and its honoured check (a server that ignores the field is
+   refused); extends the emulator and runs the staged shape through the kit.
 7. **Manual non-production conformance job** script and its documentation: protected environment, manual
    dispatch, the non-production marker check, and the checklist of section 11. Scenarios are marked proven
    against real mopm only after this run.
@@ -886,6 +944,13 @@ scenario is reported and never counted as a pass; the rig supplies `shapes()`, `
 from the bytes it gave; `Roots::Bundle(path)` is the only v1 trust source; the seam counts coordinates and
 100 is safe.
 
+**What revision 3 changed.** A burned coordinate reached by commit is `Duplicate` (5.1); `on_overlap` is
+trusted only on evidence (6); one manifest per member, and the client checks for it (5.1, 5); the `Retry-After`
+ceiling (10); the engine's own poll bound stated as it is (9.3, 6); `darwin-aarch64` is the macOS token; a
+yank of an unheld coordinate and an unparsable read body are `Permanent` and `Transient` as the table says;
+abort of a validating group is `InFlight`; group-allow-list, cache, index and sealing facts corrected to the
+source (3); budget terms named once (9.3); the scenario counts are split (12).
+
 **What revision 2 changed.** Multi-platform releases are stated as impossible under the current stage model
 (5.1) with the engine's part named; the platform mapping is specified; error classes follow the burn (failed
 is `Transient`, a burned coordinate is `Burned`, every `group_conflict` is `Unknown` until M13, never
@@ -906,7 +971,11 @@ agreed order.
    stores no stamp, with the engine refusing a monotonic rule on it.
 3. **Re-exchange inside a call** needs a renewer handed to the publisher (a seam addition). Recommend not
    adding it in v1; the budget check suffices.
-4. **The macOS os token** of ucdk's platform grammar (`macos-aarch64` is assumed).
+4. **Burned handling after a `Transient` stage, and a poll bound for validation (engine owners).**
+   `release.md` states the observe that reads `Burned` after a `Duplicate` and in the commit steps, not after
+   a `Transient` in the stage phase, which the staged shape relies on for a failed group. And the read-back
+   bound (3 polls) is shorter than a minutes-long validation if `poll_deadline` is zero. Recommend stating the
+   first and leaving the second as the construction check in 9.3.
 5. **A staged commit on a dead group whose version is not held answers `Permanent`**, on the evidence of the
    status read (the kit's lost-staged-state scenario requires an error that promises no effect). The review
    asked for `Transient`; the difference is whether the engine retries the same commit or restages.
