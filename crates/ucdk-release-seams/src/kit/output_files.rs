@@ -2,7 +2,7 @@
 //! The `OutputFiles` kit: thirteen scenarios over the three questions a build system asks of a
 //! tree it did not make (what is at a path, what is below a directory, what a file holds).
 
-use super::{Report, Scenario, must, must_err, permanent_naming, run_scenarios, same};
+use super::{Report, Scenario, must, must_err, must_some, permanent_naming, run_scenarios, same};
 use crate::{FileKind, OutputFiles, SeamError, entry_path};
 
 /// One node of a tree a scenario asks its rig to build.
@@ -126,15 +126,19 @@ fn a_listing_names_the_kind_of_every_entry<R: OutputFilesRig>(rig: &R) {
         ("k/file", Node::File(b"x")),
         ("k/dir", Node::Directory),
         ("k/link", Node::Link("k/file")),
+        ("k/link_to_dir", Node::Link("k/dir")),
+        ("k/dangling", Node::Link("k/nowhere")),
     ]);
     let listing = must(files.list(&at(rig, "k")), "list");
     let kinds: Vec<(&str, FileKind)> = listing.iter().map(|e| (e.rel.as_str(), e.kind)).collect();
     same(
         kinds,
         vec![
+            ("dangling", FileKind::Symlink),
             ("dir", FileKind::Directory),
             ("file", FileKind::File),
             ("link", FileKind::Symlink),
+            ("link_to_dir", FileKind::Symlink),
         ],
         "the kind of each entry",
     );
@@ -186,6 +190,15 @@ fn stat_tells_a_file_a_directory_a_symlink_and_nothing_apart<R: OutputFilesRig>(
         "a dangling link",
     );
     same(stat("s/nothing"), None, "nothing");
+    // A trailing slash makes an operating system follow a symlink; the reader must not.
+    for rel in ["s/to_file/", "s/to_dir/"] {
+        let answer = files.stat(&at(rig, rel));
+        same(
+            matches!(answer, Ok(Some(FileKind::File | FileKind::Directory))),
+            false,
+            &format!("stat of the symlink {rel:?} said what it points at: {answer:?}"),
+        );
+    }
 }
 
 fn a_missing_path_is_none_from_stat_and_permanent_from_list_and_read<R: OutputFilesRig>(rig: &R) {
@@ -209,12 +222,24 @@ fn a_missing_path_is_none_from_stat_and_permanent_from_list_and_read<R: OutputFi
 fn listing_a_file_and_reading_a_directory_or_a_symlink_are_refused<R: OutputFilesRig>(rig: &R) {
     let mut files = rig.reader(&[
         ("r/file", Node::File(b"x")),
-        ("r/dir", Node::Directory),
+        ("r/dir/inside", Node::File(b"y")),
         ("r/link", Node::Link("r/file")),
+        ("r/link_to_dir", Node::Link("r/dir")),
     ]);
     let (file, dir, link) = (at(rig, "r/file"), at(rig, "r/dir"), at(rig, "r/link"));
+    let (link_to_dir, slashed) = (at(rig, "r/link_to_dir"), at(rig, "r/link/"));
     let cases = [
         ("list of a file", &file, must_err(files.list(&file), "list")),
+        (
+            "list of a symlink to a directory",
+            &link_to_dir,
+            must_err(files.list(&link_to_dir), "list"),
+        ),
+        (
+            "read of a symlink named with a trailing slash",
+            &slashed,
+            must_err(files.read(&slashed), "read"),
+        ),
         (
             "read of a directory",
             &dir,
@@ -299,24 +324,39 @@ fn a_path_that_is_relative_or_climbs_is_refused<R: OutputFilesRig>(rig: &R) {
 }
 
 fn an_entry_of_a_listed_directory_is_read_through_its_joined_path<R: OutputFilesRig>(rig: &R) {
+    // Bytes that are not text, a file past any buffer a reader might size at a few kilobytes,
+    // an empty file, a hidden one and one three directories down.
+    let binary: &[u8] = &[0xff, 0xfe, 0x00, 0x80, 0xc3, 0x28];
+    let big: Vec<u8> = (0..=255u8).cycle().take(10_000).collect();
     let mut files = rig.reader(&[
         ("e/a", Node::File(b"A")),
         ("e/n/b", Node::File(b"B")),
         ("e/n/c", Node::File(b"C")),
+        ("e/binary", Node::File(binary)),
+        ("e/big", Node::File(&big)),
+        ("e/empty", Node::File(b"")),
+        ("e/.hidden", Node::File(b"H")),
+        ("e/n/.hidden", Node::File(b"I")),
+        ("e/p/q/r/deep", Node::File(b"D")),
     ]);
     let dir = at(rig, "e");
     let listing = must(files.list(&dir), "list");
-    let wanted = [("a", b"A"), ("n/b", b"B"), ("n/c", b"C")];
+    let wanted: [(&str, &[u8]); 9] = [
+        (".hidden", b"H"),
+        ("a", b"A"),
+        ("big", &big),
+        ("binary", binary),
+        ("empty", b""),
+        ("n/.hidden", b"I"),
+        ("n/b", b"B"),
+        ("n/c", b"C"),
+        ("p/q/r/deep", b"D"),
+    ];
     let mut read = Vec::new();
-    for entry in listing
-        .iter()
-        .filter(|e| wanted.iter().any(|(rel, _)| *rel == e.rel))
-    {
+    for (rel, _) in &wanted {
+        let entry = must_some(listing.iter().find(|e| e.rel == *rel), rel);
         let path = must(entry_path(&dir, &entry.rel), "entry_path");
-        read.push((
-            entry.rel.as_str(),
-            must(files.read(&path), "read of an entry"),
-        ));
+        read.push((*rel, must(files.read(&path), "read of an entry")));
     }
     same(
         read,

@@ -21,7 +21,8 @@ pub enum Behavior {
     },
     /// Ends by the signal `n`.
     Killed(i32),
-    /// Writes one line `arg <text>` for each argument after its own name, then one line
+    /// Writes one line `cwd <dir>` with its working directory as the system reports it, then
+    /// one line `arg <text>` for each argument after its own name, then one line
     /// `env <key>=<value>` for each variable of its environment, sorted by key, then ends with
     /// code 0.
     Reports,
@@ -39,6 +40,7 @@ pub trait ProcessRig {
     fn runner(&self) -> Self::Runner;
 
     /// An absolute path of an existing directory that scenarios may run in and install under.
+    /// No part of it is a symlink, so that a child reports it as it is given here.
     fn scratch(&self) -> String;
 
     /// A directory on the runner's own `PATH`, where a decoy can be installed.
@@ -175,6 +177,21 @@ fn a_name_found_nowhere_on_the_childs_path_is_unstartable<R: ProcessRig>(rig: &R
         true,
         "a name found nowhere is Unknown",
     );
+    // With no `PATH` at all the child has nowhere to look, and the runner's own is not one.
+    rig.install(
+        &mut runner,
+        &format!("{}/decoy", rig.own_path_dir()),
+        prints("decoy"),
+    );
+    let error = must_err(
+        run_plain(rig, &mut runner, &command(&["decoy"], &[])),
+        "run of a bare name by a child that has no PATH",
+    );
+    same(
+        matches!(error, SeamError::Unknown(_)),
+        true,
+        "a bare name with no PATH in the environment is Unknown",
+    );
 }
 
 fn argv_and_environment_are_exactly_what_was_given<R: ProcessRig>(rig: &R) {
@@ -196,10 +213,12 @@ fn argv_and_environment_are_exactly_what_was_given<R: ProcessRig>(rig: &R) {
     same(result.exit, Exit::Code(0), "the exit of the report");
     same(
         text(&result.stdout),
-        "arg plain\narg with space\narg \narg --flag=value\narg \u{e9}\n\
-         env A=1\nenv B=\nenv PATH=/nowhere\n"
-            .to_owned(),
-        "the arguments and the whole environment the child saw",
+        format!(
+            "cwd {}\narg plain\narg with space\narg \narg --flag=value\narg \u{e9}\n\
+             env A=1\nenv B=\nenv PATH=/nowhere\n",
+            rig.scratch()
+        ),
+        "the working directory, the arguments and the whole environment the child saw",
     );
 }
 

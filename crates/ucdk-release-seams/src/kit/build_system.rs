@@ -52,6 +52,12 @@ pub trait BuildSystemRig {
     /// Time passes (a different run, a different day): nothing built before may show in what
     /// is built after.
     fn later(&self);
+
+    /// The files the output of [`BUILD_LABEL`] holds once the [`BuildWorld::Normal`] build ran
+    /// for `inv`, as `copy_out` is to write them: each path below the entry, in the order
+    /// `copy_out` writes it, and its bytes. The rig says what the build wrote from what it
+    /// scripted, never from what the build system under test answers.
+    fn output_of(&self, inv: &Invocation<'_>) -> Vec<(String, Vec<u8>)>;
 }
 
 /// The build system as authored, the target and the stamp of every scenario.
@@ -109,6 +115,25 @@ impl Case {
             platform: "linux-x86_64",
         }
     }
+}
+
+/// Every verb a build system of `kind` has: Bazel locates an output with two more.
+fn verbs_of(kind: BuildSystemKind) -> Vec<Verb> {
+    if kind == BuildSystemKind::Bazel {
+        vec![Verb::Build, Verb::Test, Verb::Query, Verb::Info]
+    } else {
+        vec![Verb::Build, Verb::Test]
+    }
+}
+
+/// The command `bs` layers for `case` and `verb`; a `Test` gets its report path.
+fn layered<B: BuildSystem>(bs: &B, case: &Case, verb: Verb) -> Command {
+    let report = case.report();
+    let report = (verb == Verb::Test).then_some(report.as_str());
+    must(
+        bs.command(&case.inv(verb, report)),
+        &format!("command of the {verb} verb"),
+    )
 }
 
 /// The place of the first argument that holds `part`.
@@ -240,46 +265,66 @@ fn same_command_same_bytes<R: BuildSystemRig>(rig: &R) {
         false,
         "a build that wrote nothing proves nothing",
     );
+    let wrong: Vec<_> = rig
+        .output_of(&case.inv(Verb::Build, None))
+        .into_iter()
+        .filter(|file| !first.contains(file))
+        .collect();
+    same(
+        wrong.is_empty(),
+        true,
+        &format!("files of the output that copy_out did not write with their bytes: {wrong:?}"),
+    );
     same(second, first, "the bytes of two builds of one command");
 }
 
 fn base_flags_come_before_target_flags_in_order<R: BuildSystemRig>(rig: &R) {
     let bs = rig.system(&BuildWorld::Normal);
     let case = Case::new(bs.kind());
-    let command = must(bs.command(&case.inv(Verb::Build, None)), "command");
-    let at: Vec<usize> = ["--base-one", "--base-two", "--target-one", "--target-two"]
-        .iter()
-        .map(|flag| index_of(&command.argv, flag))
-        .collect();
-    same(
-        at.windows(2).all(|w| w[0] < w[1]),
-        true,
-        "the flags in the order base then target",
-    );
+    for verb in verbs_of(bs.kind()) {
+        let command = layered(&bs, &case, verb);
+        let at: Vec<usize> = ["--base-one", "--base-two", "--target-one", "--target-two"]
+            .iter()
+            .map(|flag| index_of(&command.argv, flag))
+            .collect();
+        same(
+            at.windows(2).all(|w| w[0] < w[1]),
+            true,
+            &format!("the flags of the {verb} verb in the order base then target"),
+        );
+    }
 }
 
 fn a_target_environment_value_replaces_the_base_value_of_the_same_key<R: BuildSystemRig>(rig: &R) {
     let bs = rig.system(&BuildWorld::Normal);
     let case = Case::new(bs.kind());
-    let command = must(bs.command(&case.inv(Verb::Build, None)), "command");
-    same(
-        env_of(&command, "X"),
-        vec!["target"],
-        "the value of a key both authored",
-    );
-    same(
-        env_of(&command, "KEEP"),
-        vec!["keep"],
-        "the value of a key only the base authored",
-    );
+    for verb in verbs_of(bs.kind()) {
+        let command = layered(&bs, &case, verb);
+        same(
+            env_of(&command, "X"),
+            vec!["target"],
+            &format!("the {verb} verb's value of a key both authored"),
+        );
+        same(
+            env_of(&command, "KEEP"),
+            vec!["keep"],
+            &format!("the {verb} verb's value of a key only the base authored"),
+        );
+    }
 }
 
 fn nothing_is_inherited_from_the_process_environment<R: BuildSystemRig>(rig: &R) {
     let bs = rig.system(&BuildWorld::Normal);
     let case = Case::new(bs.kind());
-    let command = must(bs.command(&case.inv(Verb::Build, None)), "command");
-    let keys: Vec<&str> = command.env.iter().map(|(k, _)| k.as_str()).collect();
-    same(keys, vec!["KEEP", "X"], "the keys of the environment");
+    for verb in verbs_of(bs.kind()) {
+        let command = layered(&bs, &case, verb);
+        let keys: Vec<&str> = command.env.iter().map(|(k, _)| k.as_str()).collect();
+        same(
+            keys,
+            vec!["KEEP", "X"],
+            &format!("the keys of the {verb} verb's environment"),
+        );
+    }
 }
 
 fn placeholders_are_substituted_in_flag_and_environment_values<R: BuildSystemRig>(rig: &R) {
@@ -292,43 +337,47 @@ fn placeholders_are_substituted_in_flag_and_environment_values<R: BuildSystemRig
         "--t={timestamp_ms}".to_owned(),
     ];
     case.target.env = BTreeMap::from([("STAMP".to_owned(), "{release_version}".to_owned())]);
-    let command = must(bs.command(&case.inv(Verb::Build, None)), "command");
-    for flag in [
-        "--v=1.2.3-41",
-        "--c=abc123",
-        "--r=0123@linux-x86_64",
-        "--t=1700",
-    ] {
-        index_of(&command.argv, flag);
+    for verb in verbs_of(bs.kind()) {
+        let command = layered(&bs, &case, verb);
+        for flag in [
+            "--v=1.2.3-41",
+            "--c=abc123",
+            "--r=0123@linux-x86_64",
+            "--t=1700",
+        ] {
+            index_of(&command.argv, flag);
+        }
+        same(
+            env_of(&command, "STAMP"),
+            vec!["1.2.3"],
+            &format!("a placeholder in an environment value of the {verb} verb"),
+        );
+        same(
+            command.argv.iter().any(|a| a.contains('{')),
+            false,
+            &format!("a placeholder left in the argument vector of the {verb} verb"),
+        );
     }
-    same(
-        env_of(&command, "STAMP"),
-        vec!["1.2.3"],
-        "a placeholder in an environment value",
-    );
-    same(
-        command.argv.iter().any(|a| a.contains('{')),
-        false,
-        "a placeholder left in the argument vector",
-    );
 }
 
 fn the_stamp_reaches_a_build_only_through_placeholders<R: BuildSystemRig>(rig: &R) {
     let bs = rig.system(&BuildWorld::Normal);
     let mut case = Case::new(bs.kind());
-    let before = must(bs.command(&case.inv(Verb::Build, None)), "command");
+    let verbs = verbs_of(bs.kind());
+    let before: Vec<Command> = verbs.iter().map(|v| layered(&bs, &case, *v)).collect();
     case.stamp = BuildStamp {
         version: "9.9.9".to_owned(),
         build_number: 7,
         source_commit: "ffffff".to_owned(),
         timestamp_ms: 1,
     };
-    let after = must(bs.command(&case.inv(Verb::Build, None)), "command");
-    same(
-        after,
-        before,
-        "the command when only the stamp changed and no flag names it",
-    );
+    for (verb, before) in verbs.iter().zip(before) {
+        same(
+            layered(&bs, &case, *verb),
+            before,
+            &format!("the {verb} command when only the stamp changed and no flag names it"),
+        );
+    }
 }
 
 fn ucdk_owned_flags_come_after_the_authors<R: BuildSystemRig>(rig: &R) {
@@ -439,6 +488,16 @@ fn copy_out_writes_only_into_the_entry_it_is_given<R: BuildSystemRig>(rig: &R) {
             .all(|(rel, _)| valid_rel(rel) && !rel.contains('\\')),
         true,
         &format!("every path copy_out wrote is a relative path of the entry: {written:?}"),
+    );
+    let wanted: Vec<String> = rig
+        .output_of(&case.inv(Verb::Build, None))
+        .into_iter()
+        .map(|(rel, _)| rel)
+        .collect();
+    same(
+        written.into_iter().map(|(rel, _)| rel).collect::<Vec<_>>(),
+        wanted,
+        "the paths copy_out wrote, which are those of the output and no other",
     );
 }
 

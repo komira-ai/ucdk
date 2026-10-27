@@ -7,7 +7,7 @@ use std::time::Duration;
 use ucdk_core::ManualClock;
 use ucdk_release::codec::GrantPhase;
 use ucdk_release::publish::{Held, Presence};
-use ucdk_release_fake::{FakeGrantSource, FakeRegistry, JobClaims, Read};
+use ucdk_release_fake::{FakeGrantSource, FakeRegistry, JobClaims, Read, coordinate_key};
 use ucdk_release_proto::v1::{ArtifactType, Coordinate, Repository};
 use ucdk_release_seams::kit::{
     Arrangement, ChannelShape, LOCATION, PublisherRig, ReadStep, federated_repository, matching_job,
@@ -83,6 +83,33 @@ pub enum Flaw {
     TransientAfterCommitIsPermanent,
     /// A stage over the bytes of another writer is answered `Staged`.
     StageOverOtherBytesIsStaged,
+    /// A stranger's `observe` of a private channel is answered as a read grant's would be.
+    StrangerObservesPrivate,
+    /// A stranger's `fetch` of a private channel is answered as a read grant's would be.
+    StrangerFetchesPrivate,
+    /// A stranger's `newest` of a private channel is answered as a read grant's would be.
+    StrangerNewestPrivate,
+    /// A stranger's `list` of a private channel is answered as a read grant's would be.
+    StrangerListsPrivate,
+    /// A stranger fetches the bytes of a staged coordinate.
+    StrangerFetchesStaged,
+    /// `list` names staged coordinates.
+    ListIncludesStaged,
+    /// `newest` names staged coordinates.
+    NewestIncludesStaged,
+    /// `newest` answers every coordinate whose name starts with the name asked for.
+    NewestMatchesByPrefix,
+    /// `newest` answers the coordinates of the name in every channel.
+    NewestIgnoresTheChannel,
+    /// An abort by a stage grant gives back every staged coordinate, not only those it names.
+    AbortGivesBackAllStaged,
+    /// A yank is taken from a stage grant.
+    YankIgnoresThePhase,
+    /// A stage grant that does not cover every coordinate of the call is taken for one that does.
+    StageIgnoresCoverage,
+    /// A commit grant that does not cover every coordinate of the call is taken for one that
+    /// does.
+    CommitIgnoresCoverage,
 }
 
 pub struct FakePublisherRig {
@@ -111,27 +138,40 @@ impl FakePublisherRig {
         phase: GrantPhase,
         coordinates: &[Coordinate],
     ) -> Grant {
-        let job = matching_job();
-        let claims = JobClaims {
-            subject: job.subject,
-            audience: job.audience,
-            environment: job.environment,
-            pinned: job.pinned,
-        };
-        let mut source = FakeGrantSource::new(&self.clock, claims);
-        source
-            .grant(&GrantRequest {
-                repository,
-                phase,
-                coordinates,
-                exceptional: false,
-            })
-            .expect("the issuer gives a grant")
+        issue(&self.clock, repository, phase, coordinates)
     }
+}
+
+/// A grant of `phase` for `coordinates` in `repository`, good now.
+fn issue(
+    clock: &ManualClock,
+    repository: &Repository,
+    phase: GrantPhase,
+    coordinates: &[Coordinate],
+) -> Grant {
+    let job = matching_job();
+    let claims = JobClaims {
+        subject: job.subject,
+        audience: job.audience,
+        environment: job.environment,
+        pinned: job.pinned,
+    };
+    let mut source = FakeGrantSource::new(clock, claims);
+    source
+        .grant(&GrantRequest {
+            repository,
+            phase,
+            coordinates,
+            exceptional: false,
+        })
+        .expect("the issuer gives a grant")
 }
 
 pub struct Flawed {
     inner: FakeRegistry,
+    clock: ManualClock,
+    /// Every coordinate that was in a `stage` or `commit` call, with its bytes.
+    known: Vec<(Coordinate, Vec<u8>)>,
     flaw: Option<Flaw>,
     shape: ChannelShape,
     calls: u32,
@@ -158,6 +198,8 @@ impl PublisherRig for FakePublisherRig {
         }
         Flawed {
             inner: registry,
+            clock: self.clock.clone(),
+            known: Vec::new(),
             flaw: self.flaw,
             shape: *shape,
             calls: 0,
@@ -279,6 +321,60 @@ impl Flawed {
         self.shape.group_addressed
     }
 
+    /// A grant the registry issues itself, for a stub that lets a caller in without the grant
+    /// the call needs.
+    fn internal(&self, phase: GrantPhase, coordinates: &[Coordinate]) -> Grant {
+        issue(&self.clock, &federated_repository(), phase, coordinates)
+    }
+
+    /// Whether `g` is no grant on a private channel and `flaw` is the flaw of the stub.
+    fn lets_a_stranger_in(&self, flaw: Flaw, g: &Grant) -> bool {
+        self.is(flaw) && self.shape.private && g.is_none()
+    }
+
+    fn remember(&mut self, items: &[StageItem<'_>]) {
+        for item in items {
+            self.known
+                .push((item.coordinate.clone(), item.file.bytes.to_vec()));
+        }
+    }
+
+    /// The coordinates a call once named that satisfy `keep`, each once.
+    fn known_where(&self, keep: impl Fn(&Self, &Coordinate) -> bool) -> Vec<Coordinate> {
+        let mut found: Vec<Coordinate> = Vec::new();
+        for (coordinate, _) in &self.known {
+            if keep(self, coordinate) && !found.contains(coordinate) {
+                found.push(coordinate.clone());
+            }
+        }
+        found
+    }
+
+    /// What the registry holds for `k`, staged or committed, as it sees it itself.
+    fn held_now(&mut self, k: &Coordinate) -> Option<Held> {
+        let grant = self.internal(GrantPhase::Stage, std::slice::from_ref(k));
+        match self.inner.observe(&grant, k, &[]) {
+            Ok(Presence::Present(held) | Presence::Yanked(held) | Presence::Staged(held)) => {
+                Some(held)
+            }
+            _ => None,
+        }
+    }
+
+    /// The staged coordinates of the channel `ch` whose name starts with `prefix`, as listed.
+    fn staged_listed(&mut self, ch: &str, prefix: &str) -> Vec<Listed> {
+        let staged = self.known_where(|me, c| {
+            me.inner.is_staged(c) && c.channel == ch && c.name.starts_with(prefix)
+        });
+        staged
+            .into_iter()
+            .filter_map(|coordinate| {
+                self.held_now(&coordinate)
+                    .map(|held| Listed { coordinate, held })
+            })
+            .collect()
+    }
+
     /// The grant a flawed registry would take `g` for, when it takes it for another.
     fn regrant(&self, g: &Grant, needs: Needs) -> Option<Grant> {
         if g.is_none() {
@@ -344,6 +440,13 @@ impl Publisher for Flawed {
     ) -> Result<Presence, SeamError> {
         self.calls += 1;
         let first = self.calls == 1;
+        let stranger_in;
+        let g = if self.lets_a_stranger_in(Flaw::StrangerObservesPrivate, g) {
+            stranger_in = self.internal(GrantPhase::Read, std::slice::from_ref(k));
+            &stranger_in
+        } else {
+            g
+        };
         let staged = self.inner.is_staged(k);
         let scope = scope_of(g);
         let told: &[StageItem<'_>] = if self.is(Flaw::TheDeclaredSetIsDropped) && staged {
@@ -422,8 +525,16 @@ impl Publisher for Flawed {
 
     fn stage(&mut self, g: &Grant, items: &[StageItem<'_>]) -> Result<StageAnswer, SeamError> {
         self.calls += 1;
+        self.remember(items);
         let regranted = self.regrant(g, Needs::Stage);
         let g = regranted.as_ref().unwrap_or(g);
+        let covering;
+        let g = if self.is(Flaw::StageIgnoresCoverage) && scope_of(g) == "stage" {
+            covering = covering_every(g, items);
+            &covering
+        } else {
+            g
+        };
         if let Some(first) = items.first() {
             let held = self.inner.bytes(first.coordinate).map(<[u8]>::to_vec);
             let ours = first.file.bytes.to_vec();
@@ -448,14 +559,32 @@ impl Publisher for Flawed {
         if self.is(Flaw::AbortDoesNothing) && scope_of(g) == "stage" {
             return Ok(());
         }
+        if self.is(Flaw::AbortGivesBackAllStaged) && scope_of(g) == "stage" {
+            let mut all = self.known_where(|me, c| me.inner.is_staged(c));
+            for k in ks {
+                if !all.contains(k) {
+                    all.push(k.clone());
+                }
+            }
+            let grant = self.internal(GrantPhase::Stage, &all);
+            return self.inner.abort(&grant, &all);
+        }
         let regranted = self.regrant(g, Needs::Stage);
         self.inner.abort(regranted.as_ref().unwrap_or(g), ks)
     }
 
     fn commit(&mut self, g: &Grant, items: &[StageItem<'_>]) -> Result<CommitAnswer, SeamError> {
         self.calls += 1;
+        self.remember(items);
         let regranted = self.regrant(g, Needs::Commit);
         let g = regranted.as_ref().unwrap_or(g);
+        let covering;
+        let g = if self.is(Flaw::CommitIgnoresCoverage) && scope_of(g) == "commit" {
+            covering = covering_every(g, items);
+            &covering
+        } else {
+            g
+        };
         self.commit_calls += 1;
         let first = items.first();
         let was_staged = first.is_some_and(|item| self.inner.is_staged(item.coordinate));
@@ -495,12 +624,27 @@ impl Publisher for Flawed {
 
     fn yank(&mut self, g: &Grant, k: &Coordinate, reason: &str) -> Result<(), SeamError> {
         self.calls += 1;
+        if self.is(Flaw::YankIgnoresThePhase) && scope_of(g) == "stage" {
+            let grant = self.internal(GrantPhase::Commit, std::slice::from_ref(k));
+            return self.inner.yank(&grant, k, reason);
+        }
         let regranted = self.regrant(g, Needs::Commit);
         self.inner.yank(regranted.as_ref().unwrap_or(g), k, reason)
     }
 
     fn fetch(&mut self, g: &Grant, k: &Coordinate) -> Result<Option<Vec<u8>>, SeamError> {
         self.calls += 1;
+        if self.is(Flaw::StrangerFetchesStaged) && g.is_none() && self.inner.is_staged(k) {
+            let bytes = self.known.iter().rev().find(|(c, _)| c == k);
+            return Ok(bytes.map(|(_, bytes)| bytes.clone()));
+        }
+        let stranger_in;
+        let g = if self.lets_a_stranger_in(Flaw::StrangerFetchesPrivate, g) {
+            stranger_in = self.internal(GrantPhase::Read, std::slice::from_ref(k));
+            &stranger_in
+        } else {
+            g
+        };
         if self.is(Flaw::AnonymousFetchIsDenied) && g.is_none() {
             return Err(SeamError::GrantRefused(
                 ucdk_release::codec::GrantFault::Denied,
@@ -523,9 +667,38 @@ impl Publisher for Flawed {
                 ucdk_release::codec::GrantFault::Denied,
             ));
         }
+        let stranger_in;
+        let g = if self.lets_a_stranger_in(Flaw::StrangerNewestPrivate, g) {
+            stranger_in = self.internal(GrantPhase::Read, &[]);
+            &stranger_in
+        } else {
+            g
+        };
         let mut found = self.inner.newest(g, ch, name)?;
         if self.is(Flaw::NewestDropsYanked) {
             found.retain(|(coordinate, _)| !self.inner.is_yanked(coordinate));
+        }
+        if self.is(Flaw::NewestIncludesStaged) {
+            for listed in self.staged_listed(ch, name) {
+                if listed.coordinate.name == name {
+                    found.push((listed.coordinate, listed.held));
+                }
+            }
+        }
+        if self.is(Flaw::NewestMatchesByPrefix) || self.is(Flaw::NewestIgnoresTheChannel) {
+            let by_prefix = self.is(Flaw::NewestMatchesByPrefix);
+            let held = self.known_where(|me, c| {
+                me.inner.bytes(c).is_some()
+                    && if by_prefix {
+                        c.channel == ch && c.name.starts_with(name)
+                    } else {
+                        c.name == name
+                    }
+            });
+            found = held
+                .into_iter()
+                .filter_map(|c| self.held_now(&c).map(|held| (c, held)))
+                .collect();
         }
         Ok(found)
     }
@@ -536,6 +709,26 @@ impl Publisher for Flawed {
                 ucdk_release::codec::GrantFault::Denied,
             ));
         }
-        self.inner.list(g, scope)
+        let stranger_in;
+        let g = if self.lets_a_stranger_in(Flaw::StrangerListsPrivate, g) {
+            stranger_in = self.internal(GrantPhase::Read, &[]);
+            &stranger_in
+        } else {
+            g
+        };
+        let mut listed = self.inner.list(g, scope)?;
+        if self.is(Flaw::ListIncludesStaged) {
+            listed.extend(self.staged_listed(&scope.channel, &scope.prefix));
+        }
+        Ok(listed)
     }
+}
+
+/// The grant `g` as if it had been issued for every coordinate of `items`: the same scope,
+/// repository and expiry.
+fn covering_every(g: &Grant, items: &[StageItem<'_>]) -> Grant {
+    rewritten(g, |lines, _| {
+        lines.truncate(2);
+        lines.extend(items.iter().map(|item| coordinate_key(item.coordinate)));
+    })
 }

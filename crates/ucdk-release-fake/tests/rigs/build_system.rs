@@ -10,7 +10,7 @@ use ucdk_release_proto::v1::{BuildSystemKind, Reason};
 use ucdk_release_seams::kit::{BUILD_LABEL, BuildSystemRig, BuildWorld};
 use ucdk_release_seams::{
     BuildSystem, Command, EntryWriter, Heartbeat, Invocation, Located, SeamError, Shape, Stop,
-    TestOutcome,
+    TestOutcome, Verb,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,7 +53,28 @@ pub enum Flaw {
     UnparseableReportPasses,
     /// A `Stop` is not forwarded.
     StopIsSwallowed,
+    /// `copy_out` writes `garbage` in place of the output's bytes.
+    CopyOutWritesGarbage,
+    /// `copy_out` writes an empty file in place of the output's bytes.
+    CopyOutWritesAnEmptyFile,
+    /// `copy_out` writes a second file the output does not hold.
+    CopyOutWritesAnExtraFile,
+    /// A `Test` command inherits a variable of the process.
+    TestVerbInheritsTheEnvironment,
+    /// A `Test` command lets the base value of a key win over the target's.
+    TestVerbBaseEnvironmentWins,
+    /// A `Test` command puts the target's flags before the base flags.
+    TestVerbTargetFlagsFirst,
+    /// A `Test` command carries no environment at all.
+    TestVerbDropsTheEnvironment,
+    /// A Bazel `Query` command inherits a variable of the process.
+    QueryVerbInheritsTheEnvironment,
+    /// A Bazel `Info` command carries the build number of the stamp as a flag nobody wrote.
+    InfoVerbLeaksTheStamp,
 }
+
+/// The time on the clock of a rig before anything moves it.
+const START_MS: u64 = 1_000_000;
 
 pub struct FakeBuildRig {
     pub clock: ManualClock,
@@ -64,7 +85,7 @@ pub struct FakeBuildRig {
 impl FakeBuildRig {
     pub fn conforming(kind: BuildSystemKind) -> Self {
         Self {
-            clock: ManualClock::at(1_000_000),
+            clock: ManualClock::at(START_MS),
             kind,
             flaw: None,
         }
@@ -119,6 +140,25 @@ impl BuildSystemRig for FakeBuildRig {
     fn later(&self) {
         self.clock.advance(Duration::from_secs(86_400));
     }
+
+    /// The fake writes one file, `out`, that names the label, every argument and every
+    /// environment pair of the command that built it.
+    fn output_of(&self, inv: &Invocation<'_>) -> Vec<(String, Vec<u8>)> {
+        let command = FakeBuildSystem::new(self.kind, &self.clock)
+            .command(inv)
+            .expect("the fake layers the invocation");
+        let env: Vec<String> = command
+            .env
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        let bytes = format!(
+            "built {BUILD_LABEL}\n{}\n{}\n",
+            command.argv.join("\n"),
+            env.join("\n")
+        );
+        vec![("out".to_owned(), bytes.into_bytes())]
+    }
 }
 
 /// A heartbeat that never stops.
@@ -135,6 +175,10 @@ struct Suffixed<'a> {
     into: &'a mut dyn EntryWriter,
     suffix: Vec<u8>,
     escape: bool,
+    /// Written in place of the bytes it is given.
+    replace: Option<Vec<u8>>,
+    /// A second file written after each file.
+    extra: bool,
 }
 
 impl EntryWriter for Suffixed<'_> {
@@ -142,9 +186,13 @@ impl EntryWriter for Suffixed<'_> {
         if self.escape {
             let _ = self.into.put_file("../escape", b"x");
         }
-        let mut bytes = bytes.to_vec();
+        let mut bytes = self.replace.clone().unwrap_or_else(|| bytes.to_vec());
         bytes.extend_from_slice(&self.suffix);
-        self.into.put_file(rel, &bytes)
+        self.into.put_file(rel, &bytes)?;
+        if self.extra {
+            self.into.put_file("extra", b"not in the output")?;
+        }
+        Ok(())
     }
 }
 
@@ -165,7 +213,24 @@ impl BuildSystem for Flawed {
 
     fn command(&self, inv: &Invocation<'_>) -> Result<Command, SeamError> {
         let mut command = self.inner.command(inv)?;
-        match self.flaw {
+        // A flaw of one verb is the flaw of every verb, applied to that verb alone.
+        let flaw = match (self.flaw, inv.verb) {
+            (Some(Flaw::TestVerbInheritsTheEnvironment), Verb::Test)
+            | (Some(Flaw::QueryVerbInheritsTheEnvironment), Verb::Query) => {
+                Some(Flaw::InheritsTheEnvironment)
+            }
+            (Some(Flaw::TestVerbBaseEnvironmentWins), Verb::Test) => {
+                Some(Flaw::BaseEnvironmentWins)
+            }
+            (Some(Flaw::TestVerbTargetFlagsFirst), Verb::Test) => Some(Flaw::TargetFlagsFirst),
+            (Some(Flaw::InfoVerbLeaksTheStamp), Verb::Info) => Some(Flaw::StampLeaksIntoTheCommand),
+            (Some(Flaw::TestVerbDropsTheEnvironment), Verb::Test) => {
+                command.env.clear();
+                None
+            }
+            (flaw, _) => flaw,
+        };
+        match flaw {
             Some(Flaw::TargetFlagsFirst) => {
                 let at: Vec<usize> = (0..command.argv.len())
                     .filter(|i| {
@@ -285,16 +350,28 @@ impl BuildSystem for Flawed {
 
     fn copy_out(&mut self, out: &Located, into: &mut dyn EntryWriter) -> Result<(), SeamError> {
         let mut suffix = Vec::new();
-        if self.is(Flaw::CallCounterInTheBytes) {
+        // The counter shows from the second build on, and the time once some has passed (only
+        // `nothing_run_specific_in_the_bytes` moves it, after `same_command_same_bytes` has
+        // read the output), so that each stub is wrong in the scenario of its own and in no
+        // scenario that builds once, in one moment, and reads the output.
+        if self.is(Flaw::CallCounterInTheBytes) && self.builds > 1 {
             suffix = format!("#{}", self.builds).into_bytes();
         }
-        if self.is(Flaw::ClockInTheBytes) {
-            suffix = format!("@{}", self.clock.now_millis()).into_bytes();
+        let elapsed = self.clock.now_millis() - START_MS;
+        if self.is(Flaw::ClockInTheBytes) && elapsed > 0 {
+            suffix = format!("@{elapsed}").into_bytes();
         }
+        let replace = match self.flaw {
+            Some(Flaw::CopyOutWritesGarbage) => Some(b"garbage".to_vec()),
+            Some(Flaw::CopyOutWritesAnEmptyFile) => Some(Vec::new()),
+            _ => None,
+        };
         let mut writer = Suffixed {
             into,
             suffix,
             escape: self.is(Flaw::CopyOutEscapes),
+            replace,
+            extra: self.is(Flaw::CopyOutWritesAnExtraFile),
         };
         self.inner.copy_out(out, &mut writer)
     }

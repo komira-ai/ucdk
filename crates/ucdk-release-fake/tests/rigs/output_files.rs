@@ -39,6 +39,26 @@ pub enum Flaw {
     CachesReads,
     /// A `read` that touches the file it read.
     ReadTouches,
+    /// A `read` that turns bytes that are not text into replacement characters.
+    LossyRead,
+    /// A `read` of an empty file that answers `Permanent`, as a missing file.
+    EmptyFileIsMissing,
+    /// A `read` that answers no more than the first 4096 bytes.
+    ReadTruncatesAt4k,
+    /// A listing that leaves out every entry whose name starts with a dot.
+    DotfilesHidden,
+    /// A listing that leaves out every entry more than two directories down.
+    DeepEntriesOmitted,
+    /// A listing that calls a symlink to a directory a directory.
+    LinkToDirListedAsDirectory,
+    /// A listing that leaves out a symlink with nothing at its target.
+    DanglingLinkOmitted,
+    /// A `list` of a symlink to a directory that lists the directory.
+    ListOfSymlinkToDirFollows,
+    /// A `stat` of a symlink named with a trailing slash that says what it points at.
+    TrailingSlashFollowsStat,
+    /// A `read` of a symlink named with a trailing slash that answers the bytes it points at.
+    TrailingSlashFollowsRead,
 }
 
 pub struct FakeFilesRig {
@@ -61,6 +81,8 @@ pub struct Flawed {
     listed: Vec<String>,
     last_stat: Option<String>,
     cache: BTreeMap<String, Vec<u8>>,
+    /// Where each symlink of the tree points, both as full paths.
+    targets: BTreeMap<String, String>,
 }
 
 fn full(rel: &str) -> String {
@@ -76,11 +98,15 @@ impl OutputFilesRig for FakeFilesRig {
 
     fn reader(&self, tree: &[(&str, Node<'_>)]) -> Flawed {
         let mut inner = FakeOutputFiles::new();
+        let mut targets = BTreeMap::new();
         for (rel, node) in tree {
             match node {
                 Node::File(bytes) => inner.file(&full(rel), bytes),
                 Node::Directory => inner.dir(&full(rel)),
-                Node::Link(_) => inner.symlink(&full(rel)),
+                Node::Link(target) => {
+                    inner.symlink(&full(rel));
+                    targets.insert(full(rel), full(target));
+                }
             }
         }
         Flawed {
@@ -89,6 +115,7 @@ impl OutputFilesRig for FakeFilesRig {
             listed: Vec::new(),
             last_stat: None,
             cache: BTreeMap::new(),
+            targets,
         }
     }
 
@@ -125,11 +152,32 @@ impl Flawed {
             .iter()
             .find(|dir| path.starts_with(&format!("{dir}/")))
     }
+
+    /// The path the symlink at `link` points at, when it is one.
+    fn target_of(&self, link: &str) -> Option<String> {
+        self.targets.get(link).cloned()
+    }
+
+    /// What is at the other end of the symlink at `link`; `None` for nothing.
+    fn target_kind(&mut self, link: &str) -> Option<FileKind> {
+        let target = self.target_of(link)?;
+        self.inner.stat(&target).ok().flatten()
+    }
+
+    /// The target of the symlink that `path` names with a slash after it, when it does.
+    fn slashed_target(&self, path: &str) -> Option<String> {
+        self.target_of(path.strip_suffix('/')?)
+    }
 }
 
 impl OutputFiles for Flawed {
     fn stat(&mut self, path: &str) -> Result<Option<FileKind>, SeamError> {
         self.last_stat = Some(path.to_owned());
+        if self.is(Flaw::TrailingSlashFollowsStat)
+            && let Some(target) = self.slashed_target(path)
+        {
+            return self.inner.stat(&target);
+        }
         let kind = self.inner.stat(path)?;
         if self.is(Flaw::StatFollows) && kind == Some(FileKind::Symlink) {
             return Ok(Some(FileKind::File));
@@ -141,8 +189,41 @@ impl OutputFiles for Flawed {
         if self.is(Flaw::ListOfMissingIsEmpty) && self.inner.stat(path) == Ok(None) {
             return Ok(Vec::new());
         }
+        if self.is(Flaw::ListOfSymlinkToDirFollows)
+            && let Some(target) = self.target_of(path)
+        {
+            return self.inner.list(&target);
+        }
         let mut entries = self.inner.list(path)?;
-        self.listed.push(path.trim_end_matches('/').to_owned());
+        let base = path.trim_end_matches('/').to_owned();
+        self.listed.push(base.clone());
+        if self.is(Flaw::DotfilesHidden) {
+            entries.retain(|e| !e.rel.split('/').any(|part| part.starts_with('.')));
+        }
+        if self.is(Flaw::DeepEntriesOmitted) {
+            entries.retain(|e| e.rel.split('/').count() <= 2);
+        }
+        if self.is(Flaw::LinkToDirListedAsDirectory) {
+            for entry in &mut entries {
+                if entry.kind == FileKind::Symlink
+                    && self.target_kind(&format!("{base}/{}", entry.rel))
+                        == Some(FileKind::Directory)
+                {
+                    entry.kind = FileKind::Directory;
+                }
+            }
+        }
+        if self.is(Flaw::DanglingLinkOmitted) {
+            let mut kept = Vec::new();
+            for entry in entries {
+                let dangling = entry.kind == FileKind::Symlink
+                    && self.target_kind(&format!("{base}/{}", entry.rel)).is_none();
+                if !dangling {
+                    kept.push(entry);
+                }
+            }
+            entries = kept;
+        }
         if self.is(Flaw::WalkOrder) {
             entries.sort_by_key(|e| e.rel.replace('/', "\u{0}"));
         }
@@ -168,6 +249,11 @@ impl OutputFiles for Flawed {
     }
 
     fn read(&mut self, path: &str) -> Result<Vec<u8>, SeamError> {
+        if self.is(Flaw::TrailingSlashFollowsRead)
+            && let Some(target) = self.slashed_target(path)
+        {
+            return self.inner.read(&target);
+        }
         if self.is(Flaw::CachesReads)
             && let Some(bytes) = self.cache.get(path)
         {
@@ -214,6 +300,18 @@ impl OutputFiles for Flawed {
                 }
             }
             _ => {}
+        }
+        if let Ok(bytes) = &mut result {
+            match self.flaw {
+                Some(Flaw::LossyRead) => {
+                    *bytes = String::from_utf8_lossy(bytes).into_owned().into_bytes();
+                }
+                Some(Flaw::ReadTruncatesAt4k) => bytes.truncate(4096),
+                _ => {}
+            }
+        }
+        if self.is(Flaw::EmptyFileIsMissing) && result.as_ref().is_ok_and(Vec::is_empty) {
+            result = Err(SeamError::Permanent(format!("{path} is empty")));
         }
         if let Ok(bytes) = &result {
             if self.is(Flaw::CachesReads) {

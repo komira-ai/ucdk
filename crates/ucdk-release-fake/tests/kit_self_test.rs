@@ -43,6 +43,154 @@ fn each_fails_alone<F: Copy>(
     }
 }
 
+/// Holds that each further stub fails the scenarios it names, which are in the kit's order, and
+/// no other. These are the wrong implementations that a first version of a scenario let pass.
+fn further_stubs_fail_exactly<F: Copy + std::fmt::Debug>(
+    kit: &str,
+    scenarios: &[&'static str],
+    table: &[(F, &[&'static str])],
+    run: impl Fn(F) -> Report,
+) {
+    for (flaw, named) in table {
+        let in_order: Vec<&str> = scenarios
+            .iter()
+            .copied()
+            .filter(|s| named.contains(s))
+            .collect();
+        assert_eq!(
+            in_order.as_slice(),
+            *named,
+            "{kit}: {flaw:?} names scenarios the kit has, in the kit's order"
+        );
+        let report = run(*flaw);
+        assert_eq!(
+            report.failed(),
+            *named,
+            "{kit}: the stub {flaw:?} must fail exactly the scenarios it names: {:?}",
+            report.outcomes
+        );
+    }
+}
+
+#[test]
+fn each_further_nonconforming_stub_fails_the_scenarios_that_hold_it() {
+    further_output_files();
+    further_process_runner();
+    further_build_system();
+    further_publisher();
+}
+
+fn further_output_files() {
+    const READ_THROUGH: &str = "an_entry_of_a_listed_directory_is_read_through_its_joined_path";
+    const KINDS: &str = "a_listing_names_the_kind_of_every_entry";
+    const REFUSED: &str = "listing_a_file_and_reading_a_directory_or_a_symlink_are_refused";
+    const STAT: &str = "stat_tells_a_file_a_directory_a_symlink_and_nothing_apart";
+    further_stubs_fail_exactly(
+        "output files",
+        &names(&output_files_scenarios::<FakeFilesRig>()),
+        &[
+            (Files::LossyRead, &[READ_THROUGH]),
+            (Files::EmptyFileIsMissing, &[READ_THROUGH]),
+            (Files::ReadTruncatesAt4k, &[READ_THROUGH]),
+            (Files::DotfilesHidden, &[READ_THROUGH]),
+            (Files::DeepEntriesOmitted, &[READ_THROUGH]),
+            (Files::LinkToDirListedAsDirectory, &[KINDS]),
+            (Files::DanglingLinkOmitted, &[KINDS]),
+            (Files::ListOfSymlinkToDirFollows, &[REFUSED]),
+            (Files::TrailingSlashFollowsRead, &[REFUSED]),
+            (Files::TrailingSlashFollowsStat, &[STAT]),
+        ],
+        |flaw| run_output_files_kit(&FakeFilesRig::flawed(flaw)),
+    );
+}
+
+fn further_process_runner() {
+    further_stubs_fail_exactly(
+        "process runner",
+        &names(&process_runner_scenarios::<FakeProcessRig>()),
+        &[
+            (
+                Process::CwdIgnored,
+                &["argv_and_environment_are_exactly_what_was_given"],
+            ),
+            (
+                Process::NoPathFallsBackToOwn,
+                &["a_name_found_nowhere_on_the_childs_path_is_unstartable"],
+            ),
+        ],
+        |flaw| run_process_runner_kit(&FakeProcessRig::flawed(flaw)),
+    );
+}
+
+fn further_build_system() {
+    const SAME_BYTES: &str = "same_command_same_bytes";
+    const COPY_OUT: &str = "copy_out_writes_only_into_the_entry_it_is_given";
+    const FLAGS: &str = "base_flags_come_before_target_flags_in_order";
+    const REPLACES: &str = "a_target_environment_value_replaces_the_base_value_of_the_same_key";
+    const INHERITS: &str = "nothing_is_inherited_from_the_process_environment";
+    const PLACEHOLDERS: &str = "placeholders_are_substituted_in_flag_and_environment_values";
+    const STAMP: &str = "the_stamp_reaches_a_build_only_through_placeholders";
+    let scenarios = names(&build_system_scenarios::<FakeBuildRig>());
+    for kind in [BuildSystemKind::Buck2, BuildSystemKind::Bazel] {
+        further_stubs_fail_exactly(
+            "build system",
+            &scenarios,
+            &[
+                (Build::CopyOutWritesGarbage, &[SAME_BYTES]),
+                (Build::CopyOutWritesAnEmptyFile, &[SAME_BYTES]),
+                (Build::CopyOutWritesAnExtraFile, &[COPY_OUT]),
+                (Build::TestVerbTargetFlagsFirst, &[FLAGS]),
+                (Build::TestVerbBaseEnvironmentWins, &[REPLACES]),
+                (Build::TestVerbInheritsTheEnvironment, &[INHERITS]),
+                (
+                    Build::TestVerbDropsTheEnvironment,
+                    &[REPLACES, INHERITS, PLACEHOLDERS],
+                ),
+            ],
+            |flaw| run_build_system_kit(&FakeBuildRig::flawed(kind, flaw)),
+        );
+    }
+    // Only Bazel has the two verbs that locate an output.
+    further_stubs_fail_exactly(
+        "build system (Bazel verbs)",
+        &scenarios,
+        &[
+            (Build::QueryVerbInheritsTheEnvironment, &[INHERITS]),
+            (Build::InfoVerbLeaksTheStamp, &[STAMP]),
+        ],
+        |flaw| run_build_system_kit(&FakeBuildRig::flawed(BuildSystemKind::Bazel, flaw)),
+    );
+}
+
+fn further_publisher() {
+    const PRIVATE: &str =
+        "a_read_grant_observes_committed_coordinates_and_can_neither_stage_nor_commit";
+    const STRANGER: &str = "public_read_needs_no_grant";
+    const NEWEST: &str = "newest_lists_every_held_coordinate_of_the_name";
+    const ABORT: &str = "abort_gives_staged_state_back_and_never_touches_a_committed_coordinate";
+    const PHASE: &str = "a_grant_of_the_wrong_phase_is_denied_and_nothing_happens";
+    further_stubs_fail_exactly(
+        "publisher",
+        &names(&publisher_scenarios::<FakePublisherRig>()),
+        &[
+            (Registry::StrangerObservesPrivate, &[PRIVATE]),
+            (Registry::StrangerFetchesPrivate, &[PRIVATE]),
+            (Registry::StrangerNewestPrivate, &[PRIVATE]),
+            (Registry::StrangerListsPrivate, &[PRIVATE]),
+            (Registry::StrangerFetchesStaged, &[STRANGER]),
+            (Registry::ListIncludesStaged, &[STRANGER]),
+            (Registry::NewestIncludesStaged, &[STRANGER]),
+            (Registry::NewestMatchesByPrefix, &[NEWEST]),
+            (Registry::NewestIgnoresTheChannel, &[NEWEST]),
+            (Registry::AbortGivesBackAllStaged, &[ABORT]),
+            (Registry::YankIgnoresThePhase, &[PHASE]),
+            (Registry::StageIgnoresCoverage, &[PHASE]),
+            (Registry::CommitIgnoresCoverage, &[PHASE]),
+        ],
+        |flaw| run_publisher_kit(&FakePublisherRig::flawed(flaw)),
+    );
+}
+
 fn names<R>(scenarios: &[ucdk_release_seams::kit::Scenario<R>]) -> Vec<&'static str> {
     scenarios.iter().map(|s| s.name).collect()
 }

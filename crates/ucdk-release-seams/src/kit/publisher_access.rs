@@ -28,6 +28,27 @@ pub(super) fn public_read_needs_no_grant<R: PublisherRig>(rig: &R) {
     let mut p = rig.publisher(&ChannelShape::staging());
     let set = Set::of(&["a"]);
     publish(rig, &mut p, &set);
+    // Staged state is nothing a stranger can read, however the read is asked.
+    let only_staged = Set::of(&["b"]);
+    stage(rig, &mut p, &only_staged);
+    let b = &only_staged.coords[0];
+    same(
+        must(
+            p.fetch(&Grant::none(), b),
+            "fetch of a staged coordinate by a stranger",
+        ),
+        None,
+        "the bytes of a staged coordinate fetched by a stranger",
+    );
+    same(
+        must(
+            p.newest(&Grant::none(), &b.channel, &b.name),
+            "newest of a staged coordinate by a stranger",
+        )
+        .is_empty(),
+        true,
+        "a staged coordinate found with newest by a stranger",
+    );
     let a = &set.coords[0];
     present_held(stranger(&mut p, a));
     same(
@@ -115,6 +136,69 @@ pub(super) fn a_grant_of_the_wrong_phase_is_denied_and_nothing_happens<R: Publis
         "the bytes of the coordinate after the refused commit",
     );
     staged_held(observed(rig, &mut p, GrantPhase::Stage, &set, 0));
+    a_grant_covers_the_coordinates_it_names_and_no_others(rig);
+    a_yank_needs_the_commit_grant(rig);
+}
+
+/// A grant of the right phase that names one coordinate does not stage or commit two.
+fn a_grant_covers_the_coordinates_it_names_and_no_others<R: PublisherRig>(rig: &R) {
+    let mut p = rig.publisher(&ChannelShape::staging());
+    let pair = Set::of(&["c", "d"]);
+    let blobs = pair.blobs();
+    let items = pair.items(&blobs);
+    let stage_one = rig.grant(&p, GrantPhase::Stage, &pair.coords[..1]);
+    let refusal = must_err(
+        p.stage(&stage_one, &items),
+        "a stage of two coordinates with a grant for one",
+    );
+    same(
+        denied(&refusal),
+        true,
+        "a stage grant that does not cover every coordinate is Denied",
+    );
+    for at in 0..2 {
+        same(
+            observed(rig, &mut p, GrantPhase::Stage, &pair, at),
+            Presence::Absent,
+            "a coordinate after the refused stage",
+        );
+    }
+    stage(rig, &mut p, &pair);
+    let commit_one = rig.grant(&p, GrantPhase::Commit, &pair.coords[..1]);
+    let refusal = must_err(
+        p.commit(&commit_one, &items),
+        "a commit of two coordinates with a grant for one",
+    );
+    same(
+        denied(&refusal),
+        true,
+        "a commit grant that does not cover every coordinate is Denied",
+    );
+    for coord in &pair.coords {
+        same(
+            fetched(rig, &mut p, coord),
+            None,
+            "the bytes of a coordinate after the refused commit",
+        );
+    }
+}
+
+/// A stage grant does not yank, and what it tried to yank stays as it was.
+fn a_yank_needs_the_commit_grant<R: PublisherRig>(rig: &R) {
+    let mut p = rig.publisher(&ChannelShape::staging());
+    let set = Set::of(&["a"]);
+    publish(rig, &mut p, &set);
+    let stage_grant = rig.grant(&p, GrantPhase::Stage, &set.coords);
+    let refusal = must_err(
+        p.yank(&stage_grant, &set.coords[0], "a reason"),
+        "a yank with a stage grant",
+    );
+    same(
+        denied(&refusal),
+        true,
+        "a yank with a stage grant is Denied",
+    );
+    present_held(stranger(&mut p, &set.coords[0]));
 }
 
 pub(super) fn an_expired_grant_is_refused_and_nothing_happens<R: PublisherRig>(rig: &R) {
@@ -148,7 +232,19 @@ pub(super) fn newest_lists_every_held_coordinate_of_the_name<R: PublisherRig>(ri
         platform: "darwin-arm64".to_owned(),
         ..a1.clone()
     };
-    let set = Set::at(vec![a1.clone(), a2.clone(), a3.clone(), coordinate("b")]);
+    // Other names, one that starts with the name asked for, and the name in another channel.
+    let elsewhere = Coordinate {
+        channel: "beta".to_owned(),
+        ..a1.clone()
+    };
+    let set = Set::at(vec![
+        a1.clone(),
+        a2.clone(),
+        a3.clone(),
+        coordinate("b"),
+        coordinate("ab"),
+        elsewhere,
+    ]);
     publish(rig, &mut p, &set);
     let grant = rig.grant(&p, GrantPhase::Commit, std::slice::from_ref(&a2));
     must(p.yank(&grant, &a2, "a reason"), "yank");
@@ -162,7 +258,7 @@ pub(super) fn newest_lists_every_held_coordinate_of_the_name<R: PublisherRig>(ri
     same(
         got,
         want,
-        "every coordinate of the name, yanked ones included, and no other name",
+        "every coordinate of the name in the channel, yanked ones included, and no other",
     );
 }
 
@@ -299,6 +395,7 @@ pub(super) fn a_read_grant_observes_committed_coordinates_and_can_neither_stage_
     });
     let (a, b) = (Set::of(&["a"]), Set::of(&["b"]));
     publish(rig, &mut p, &a);
+    a_stranger_reads_nothing_of_a_private_channel(&mut p, &a.coords[0]);
     let read_a = rig.grant(&p, GrantPhase::Read, &a.coords);
     let read_b = rig.grant(&p, GrantPhase::Read, &b.coords);
     present_held(must(
@@ -335,6 +432,32 @@ pub(super) fn a_read_grant_observes_committed_coordinates_and_can_neither_stage_
         p.observe(&read_a, &a.coords[0], &[]),
         "an observe after the refusals",
     ));
+}
+
+/// Every read of a private channel needs a grant, a stranger's included, and a stranger is
+/// `Denied` however the read is asked.
+fn a_stranger_reads_nothing_of_a_private_channel<P: Publisher>(p: &mut P, held: &Coordinate) {
+    let none = Grant::none();
+    let scope = ListScope {
+        channel: held.channel.clone(),
+        prefix: String::new(),
+    };
+    let refusals = [
+        ("observe", p.observe(&none, held, &[]).map(|_| ())),
+        ("fetch", p.fetch(&none, held).map(|_| ())),
+        (
+            "newest",
+            p.newest(&none, &held.channel, &held.name).map(|_| ()),
+        ),
+        ("list", p.list(&none, &scope).map(|_| ())),
+    ];
+    for (call, answer) in refusals {
+        same(
+            answer,
+            Err(SeamError::GrantRefused(GrantFault::Denied)),
+            &format!("a {call} by a stranger of a private channel"),
+        );
+    }
 }
 
 pub(super) fn commit_is_atomic_when_the_coordinate_appears_between_observe_and_commit<

@@ -37,6 +37,11 @@ pub enum Flaw {
     IgnoresStop,
     /// The process group of a stopped child is left running.
     LeavesTheGroupRunning,
+    /// The child starts in the runner's own working directory, not the one it was given.
+    CwdIgnored,
+    /// A bare name is looked for on the runner's own `PATH` when the child's environment names
+    /// no `PATH`.
+    NoPathFallsBackToOwn,
 }
 
 pub struct FakeProcessRig {
@@ -134,20 +139,21 @@ impl Scripted {
 }
 
 /// What a program that reports writes: its arguments, then its environment.
-fn report(command: &Command, flaw: Option<Flaw>) -> Vec<u8> {
-    let mut lines: Vec<String> = command
-        .argv
-        .iter()
-        .skip(1)
-        .map(|arg| {
-            let arg = if flaw == Some(Flaw::ShellExpandsAnArgument) {
-                arg.replace("$HOME", "/root")
-            } else {
-                arg.clone()
-            };
-            format!("arg {arg}")
-        })
-        .collect();
+fn report(command: &Command, cwd: &str, flaw: Option<Flaw>) -> Vec<u8> {
+    let cwd = if flaw == Some(Flaw::CwdIgnored) {
+        "/runner"
+    } else {
+        cwd
+    };
+    let mut lines: Vec<String> = vec![format!("cwd {cwd}")];
+    lines.extend(command.argv.iter().skip(1).map(|arg| {
+        let arg = if flaw == Some(Flaw::ShellExpandsAnArgument) {
+            arg.replace("$HOME", "/root")
+        } else {
+            arg.clone()
+        };
+        format!("arg {arg}")
+    }));
     let mut env = command.env.clone();
     if flaw == Some(Flaw::InheritsTheEnvironment) {
         env.push(("HOME".to_owned(), "/root".to_owned()));
@@ -166,7 +172,10 @@ impl ProcessRunner for Scripted {
             .argv
             .first()
             .is_some_and(|name| name.starts_with('/'));
-        if self.is(Flaw::ResolvesOnItsOwnPath) && bare {
+        let has_path = command.env.iter().any(|(key, _)| key == "PATH");
+        let falls_back = self.is(Flaw::ResolvesOnItsOwnPath) && has_path
+            || self.is(Flaw::NoPathFallsBackToOwn) && !has_path;
+        if falls_back && bare {
             command.env.retain(|(key, _)| key != "PATH");
             command.env.push(("PATH".to_owned(), OWN_PATH.to_owned()));
         }
@@ -178,7 +187,11 @@ impl ProcessRunner for Scripted {
                 code,
             }) => (Exit::Code(*code), stdout.clone(), stderr.clone()),
             Some(Behavior::Killed(signal)) => (Exit::Signal(*signal), Vec::new(), Vec::new()),
-            Some(Behavior::Reports) => (Exit::Code(0), report(&command, self.flaw), Vec::new()),
+            Some(Behavior::Reports) => (
+                Exit::Code(0),
+                report(&command, spec.cwd, self.flaw),
+                Vec::new(),
+            ),
             Some(Behavior::Chatters { chunks }) => (
                 Exit::Code(0),
                 b"chunk\n".repeat(*chunks as usize),

@@ -524,9 +524,10 @@ fn abort_gives_staged_state_back_and_never_touches_a_committed_coordinate<R: Pub
     rig: &R,
 ) {
     let mut p = rig.publisher(&ChannelShape::staging());
-    let (a, b) = (Set::of(&["a"]), Set::of(&["b"]));
+    let (a, b, c) = (Set::of(&["a"]), Set::of(&["b"]), Set::of(&["c"]));
     publish(rig, &mut p, &a);
     stage(rig, &mut p, &b);
+    stage(rig, &mut p, &c);
     let both = Set::of(&["a", "b"]);
     let grant = rig.grant(&p, GrantPhase::Stage, &both.coords);
     must(p.abort(&grant, &both.coords), "abort");
@@ -535,6 +536,7 @@ fn abort_gives_staged_state_back_and_never_touches_a_committed_coordinate<R: Pub
         Presence::Absent,
         "the staged coordinate after the abort",
     );
+    staged_held(observed(rig, &mut p, GrantPhase::Stage, &c, 0));
     present_held(stranger(&mut p, &a.coords[0]));
     same(
         fetched(rig, &mut p, &a.coords[0]),
