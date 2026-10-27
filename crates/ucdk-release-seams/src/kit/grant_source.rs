@@ -11,6 +11,7 @@ use ucdk_release_proto::v1::{
 };
 
 use super::grant_claims::{
+    an_earlier_request_does_not_decide_the_next,
     claims_that_only_resemble_the_declared_are_refused,
     several_pinned_claims_are_each_compared_and_none_may_be_added,
 };
@@ -579,6 +580,7 @@ fn a_differing_claim_is_refused_before_any_exchange<R: GrantSourceRig>(rig: &R) 
         }
     }
     several_pinned_claims_are_each_compared_and_none_may_be_added(rig);
+    an_earlier_request_does_not_decide_the_next(rig);
     claims_that_only_resemble_the_declared_are_refused(rig);
 }
 
@@ -612,6 +614,37 @@ fn an_exceptional_run_presents_the_exceptional_subject<R: GrantSourceRig>(rig: &
             refused.clone(),
             &format!("an exceptional job asking as ordinary for a {phase:?} grant"),
         );
+    }
+    // The subject and the environment of the two pairs are not interchangeable: a job that
+    // presents one of each is neither run, whichever it is asked as.
+    let crossed = [
+        (
+            "the ordinary subject and the exceptional environment",
+            JobClaims {
+                environment: exceptional.environment.clone(),
+                ..matching_job()
+            },
+        ),
+        (
+            "the exceptional subject and the ordinary environment",
+            JobClaims {
+                environment: matching_job().environment,
+                ..exceptional.clone()
+            },
+        ),
+    ];
+    for phase in PHASES {
+        for (which, job) in &crossed {
+            for as_exceptional in [false, true] {
+                same(
+                    ask(job.clone(), as_exceptional, phase),
+                    refused.clone(),
+                    &format!(
+                        "a job with {which} asking as exceptional {as_exceptional} for a {phase:?} grant"
+                    ),
+                );
+            }
+        }
     }
     // A declaration that names no exceptional subject and no exceptional environment admits no
     // exceptional run, whoever asks: an exceptional run is not an ordinary one in that case.

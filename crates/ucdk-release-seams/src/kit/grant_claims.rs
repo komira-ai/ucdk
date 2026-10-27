@@ -86,6 +86,45 @@ pub(super) fn several_pinned_claims_are_each_compared_and_none_may_be_added<R: G
     }
 }
 
+/// What a source answered for one request does not decide what it answers for the next: a
+/// request for a repository whose claims the job does not meet is refused as often as it is
+/// asked, whatever was granted before it and whichever repository was asked about first, and a
+/// refusal does not stop the grants that follow it.
+pub(super) fn an_earlier_request_does_not_decide_the_next<R: GrantSourceRig>(rig: &R) {
+    let coords = [coordinate("a")];
+    let admitted = federated_repository();
+    let other = declaration("registry/other", |declared| {
+        "elsewhere".clone_into(&mut declared.subject);
+    });
+    for phase in PHASES {
+        let mut source = rig.source(&setup(matching_job()));
+        for (step, (repository, granted)) in [
+            (&admitted, true),
+            (&other, false),
+            (&other, false),
+            (&admitted, true),
+            (&other, false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let answer = source.grant(&request(repository, phase, &coords));
+            let what =
+                format!("request {step} of one source, a {phase:?} grant, granted {granted}");
+            if granted {
+                must(answer, &what);
+            } else {
+                same(denied(&must_err(answer, &what)), true, &what);
+            }
+        }
+        same(
+            rig.exchanges(&source),
+            2,
+            &format!("the exchanges of the two {phase:?} grants of one source"),
+        );
+    }
+}
+
 /// A claim a job presents that the declaration compares.
 #[derive(Debug, Clone, Copy)]
 enum Claim {
@@ -133,10 +172,12 @@ impl Claim {
 }
 
 /// Texts that are not `declared` and that a lax comparison takes for it: `declared` with
-/// something added before it, after it or around it, with white space around it, in full-width
-/// letters, and with the long s and the Kelvin sign for the letters they look like. A text the
-/// change leaves as it was (no `s`, no `k`) is left out.
+/// something added before it, after it or around it, with white space around it, with a
+/// zero-width character or a NUL in it or beside it, in full-width letters, and with the long s
+/// and the Kelvin sign for the letters they look like. A text the change leaves as it was (no
+/// `s`, no `k`) is left out.
 fn lookalikes(declared: &str) -> Vec<(&'static str, String)> {
+    let (head, tail) = declared.split_at(declared.len().min(1));
     let full_width: String = declared
         .chars()
         .map(|c| char::from_u32(u32::from(c) + 0xFEE0).unwrap_or(c))
@@ -156,6 +197,17 @@ fn lookalikes(declared: &str) -> Vec<(&'static str, String)> {
         ("with a space before it", format!(" {declared}")),
         ("with a space after it", format!("{declared} ")),
         ("with a newline after it", format!("{declared}\n")),
+        (
+            "with a zero-width space inside it",
+            format!("{head}\u{200b}{tail}"),
+        ),
+        (
+            "with a zero-width no-break space before it",
+            format!("\u{feff}{declared}"),
+        ),
+        ("with a word joiner after it", format!("{declared}\u{2060}")),
+        ("with a NUL inside it", format!("{head}\0{tail}")),
+        ("with a NUL and more after it", format!("{declared}\0evil")),
         ("in full-width letters", full_width),
         ("with a long s and a Kelvin sign", look_alike_letters),
     ])

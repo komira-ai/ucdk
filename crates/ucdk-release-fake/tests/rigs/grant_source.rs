@@ -111,11 +111,39 @@ pub enum Flaw {
     LogsTheMiddleOfTheSecret,
     /// The secret of a grant is written into the log in hex.
     LogsTheSecretInHex,
+    /// The claims are compared only for the first repository a source is asked about.
+    ClaimsCheckedForTheFirstRepositoryOnly,
+    /// A request that was refused and is asked again as it was is issued.
+    RepeatOfRefusedIssues,
+    /// An exceptional run is admitted on the ordinary subject too.
+    ExceptionalAcceptsTheOrdinarySubject,
+    /// An ordinary run is admitted on the exceptional subject too.
+    OrdinaryAcceptsTheExceptionalSubject,
+    /// An ordinary run is admitted on the exceptional environment too.
+    OrdinaryAcceptsTheExceptionalEnvironment,
+    /// The claims are compared after removing zero-width characters.
+    ClaimsMatchedWithoutInvisibleCharacters,
+    /// The claims are compared up to the first NUL.
+    ClaimsMatchedUpToANul,
+    /// The secret of a commit grant is written into the log.
+    LogsTheCommitSecret,
+    /// The secret of an exceptional grant is written into the log.
+    LogsTheExceptionalSecret,
+    /// The secret of a grant is written into the log in base64.
+    LogsTheSecretInBase64,
+    /// The secret of a grant is written into the log with a space after each byte.
+    LogsTheSecretSpaced,
+    /// The first two fifths of the secret of a grant are written into the log.
+    LogsThePrefixOfTheSecret,
+    /// The secret of every grant of a source but its first is written into the log.
+    LogsTheSecretFromTheSecondGrant,
+    /// The secret of every grant after a refusal is written into the log.
+    LogsTheSecretAfterARefusal,
 }
 
 impl Flaw {
     /// Every stub of the issuer.
-    pub const ALL: [Self; 44] = [
+    pub const ALL: [Self; 58] = [
         Self::AnonymousGetsAGrant,
         Self::DropsTheLastCoordinate,
         Self::IgnoresPinnedClaims,
@@ -160,6 +188,20 @@ impl Flaw {
         Self::LogsTheSecretReversed,
         Self::LogsTheMiddleOfTheSecret,
         Self::LogsTheSecretInHex,
+        Self::ClaimsCheckedForTheFirstRepositoryOnly,
+        Self::RepeatOfRefusedIssues,
+        Self::ExceptionalAcceptsTheOrdinarySubject,
+        Self::OrdinaryAcceptsTheExceptionalSubject,
+        Self::OrdinaryAcceptsTheExceptionalEnvironment,
+        Self::ClaimsMatchedWithoutInvisibleCharacters,
+        Self::ClaimsMatchedUpToANul,
+        Self::LogsTheCommitSecret,
+        Self::LogsTheExceptionalSecret,
+        Self::LogsTheSecretInBase64,
+        Self::LogsTheSecretSpaced,
+        Self::LogsThePrefixOfTheSecret,
+        Self::LogsTheSecretFromTheSecondGrant,
+        Self::LogsTheSecretAfterARefusal,
     ];
 }
 
@@ -186,6 +228,47 @@ fn folded(text: &str) -> String {
         })
         .collect()
 }
+
+/// A text without its zero-width characters.
+fn without_invisible(text: &str) -> String {
+    text.chars()
+        .filter(|c| {
+            !matches!(
+                c,
+                '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{feff}' | '\u{2060}'
+            )
+        })
+        .collect()
+}
+
+/// A text up to its first NUL.
+fn up_to_nul(text: &str) -> &str {
+    text.split('\0').next().unwrap_or_default()
+}
+
+/// Standard base64 with padding.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    bytes
+        .chunks(3)
+        .flat_map(|chunk| {
+            let word = chunk.iter().enumerate().fold(0u32, |word, (at, byte)| {
+                word | (u32::from(*byte) << (16 - 8 * at))
+            });
+            (0..4).map(move |at| {
+                if at <= chunk.len() {
+                    ALPHABET[((word >> (18 - 6 * at)) & 63) as usize] as char
+                } else {
+                    '='
+                }
+            })
+        })
+        .collect()
+}
+
+/// What a source was asked when it refused: the repository, the phase, whether the run is
+/// exceptional, and the coordinates.
+type Asked = (Repository, GrantPhase, bool, Vec<Coordinate>);
 
 pub struct FakeGrantRig {
     clock: ManualClock,
@@ -222,6 +305,10 @@ pub struct Flawed {
     first_phase: Option<GrantPhase>,
     first_repository: Option<Repository>,
     covered: usize,
+    first_claims: Option<Repository>,
+    refused_request: Option<Asked>,
+    issued: usize,
+    refused: bool,
 }
 
 /// The coordinate a registry reads out of the text a grant keeps it under: the channel, the
@@ -270,6 +357,10 @@ impl GrantSourceRig for FakeGrantRig {
             first_phase: None,
             first_repository: None,
             covered: 0,
+            first_claims: None,
+            refused_request: None,
+            issued: 0,
+            refused: false,
         }
     }
 
@@ -322,7 +413,21 @@ impl Flawed {
             return repository;
         };
         let job = &self.job;
-        let skipped = self.is(Flaw::SkipsClaimsOutsideStage) && req.phase != GrantPhase::Stage;
+        let repeated = self.is(Flaw::RepeatOfRefusedIssues)
+            && self.refused_request.as_ref().is_some_and(|(r, p, e, c)| {
+                r == req.repository
+                    && *p == req.phase
+                    && *e == req.exceptional
+                    && c.as_slice() == req.coordinates
+            });
+        let elsewhere = self.is(Flaw::ClaimsCheckedForTheFirstRepositoryOnly)
+            && self
+                .first_claims
+                .as_ref()
+                .is_some_and(|first| first != req.repository);
+        let skipped = (self.is(Flaw::SkipsClaimsOutsideStage) && req.phase != GrantPhase::Stage)
+            || repeated
+            || elsewhere;
         if skipped
             || (self.is(Flaw::ClaimsMatchedBySubstring) && job.subject.contains(&declared.subject))
         {
@@ -399,6 +504,24 @@ impl Flawed {
                 declared.pinned_claims.clone_from(&job.pinned);
             }
         }
+        if self.is(Flaw::ExceptionalAcceptsTheOrdinarySubject)
+            && req.exceptional
+            && job.subject == declared.subject
+        {
+            declared.exceptional_subject.clone_from(&job.subject);
+        }
+        if self.is(Flaw::OrdinaryAcceptsTheExceptionalSubject)
+            && !req.exceptional
+            && job.subject == declared.exceptional_subject
+        {
+            declared.subject.clone_from(&job.subject);
+        }
+        if self.is(Flaw::OrdinaryAcceptsTheExceptionalEnvironment)
+            && !req.exceptional
+            && job.environment == declared.exceptional_environment
+        {
+            declared.environment.clone_from(&job.environment);
+        }
         let (subject, environment) = if req.exceptional {
             (
                 &mut declared.exceptional_subject,
@@ -447,6 +570,10 @@ impl Flawed {
                 }
                 Some(Flaw::ClaimsMatchedAfterFolding) => folded(claimed) == folded(declared),
                 Some(Flaw::ClaimsMatchedAfterTrimming) => claimed.trim() == declared.trim(),
+                Some(Flaw::ClaimsMatchedWithoutInvisibleCharacters) => {
+                    without_invisible(claimed) == without_invisible(declared)
+                }
+                Some(Flaw::ClaimsMatchedUpToANul) => up_to_nul(claimed) == up_to_nul(declared),
                 _ => false,
             }
     }
@@ -535,6 +662,10 @@ impl GrantSource for Flawed {
         } else {
             GrantRequest { ..*req }
         };
+        if self.is(Flaw::ClaimsCheckedForTheFirstRepositoryOnly) {
+            self.first_claims
+                .get_or_insert_with(|| req.repository.clone());
+        }
         let repository = self.as_a_lax_issuer_reads(&asked);
         let exchanged = self.inner.exchanges().len();
         let exceptional =
@@ -548,8 +679,22 @@ impl GrantSource for Flawed {
         if self.is(Flaw::StickyExceptional) && req.exceptional && result.is_ok() {
             self.sticky_exceptional = true;
         }
+        let (granted_before, refused_before) = (self.issued, self.refused);
         if result.is_ok() {
             self.covered += coordinates.len();
+            self.issued += 1;
+        } else {
+            self.refused = true;
+        }
+        if self.is(Flaw::RepeatOfRefusedIssues)
+            && matches!(result, Err(SeamError::GrantRefused(GrantFault::Denied)))
+        {
+            self.refused_request = Some((
+                req.repository.clone(),
+                req.phase,
+                req.exceptional,
+                req.coordinates.to_vec(),
+            ));
         }
         match (self.flaw, result) {
             (Some(Flaw::AnonymousStageOrReadGetsAGrant), Ok(grant))
@@ -641,6 +786,38 @@ impl GrantSource for Flawed {
             (Some(Flaw::LogsTheSecretInHex), Ok(grant)) => {
                 let hex: String = grant.secret().iter().map(|b| format!("{b:02x}")).collect();
                 self.log.extend_from_slice(hex.as_bytes());
+                Ok(grant)
+            }
+            (Some(Flaw::LogsTheCommitSecret), Ok(grant)) if phase == GrantPhase::Commit => {
+                self.log.extend_from_slice(grant.secret());
+                Ok(grant)
+            }
+            (Some(Flaw::LogsTheExceptionalSecret), Ok(grant)) if req.exceptional => {
+                self.log.extend_from_slice(grant.secret());
+                Ok(grant)
+            }
+            (Some(Flaw::LogsTheSecretInBase64), Ok(grant)) => {
+                self.log
+                    .extend_from_slice(base64(grant.secret()).as_bytes());
+                Ok(grant)
+            }
+            (Some(Flaw::LogsTheSecretSpaced), Ok(grant)) => {
+                for byte in grant.secret() {
+                    self.log.extend_from_slice(&[*byte, b' ']);
+                }
+                Ok(grant)
+            }
+            (Some(Flaw::LogsThePrefixOfTheSecret), Ok(grant)) => {
+                let secret = grant.secret();
+                self.log.extend_from_slice(&secret[..secret.len() * 2 / 5]);
+                Ok(grant)
+            }
+            (Some(Flaw::LogsTheSecretFromTheSecondGrant), Ok(grant)) if granted_before > 0 => {
+                self.log.extend_from_slice(grant.secret());
+                Ok(grant)
+            }
+            (Some(Flaw::LogsTheSecretAfterARefusal), Ok(grant)) if refused_before => {
+                self.log.extend_from_slice(grant.secret());
                 Ok(grant)
             }
             (Some(Flaw::ReissuesTheExpiredGrant), Ok(grant)) => {
