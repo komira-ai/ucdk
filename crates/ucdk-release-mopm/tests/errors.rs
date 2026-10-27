@@ -442,10 +442,11 @@ fn nothing_but_the_status_and_the_code_reaches_an_error() {
         for status in [400, 401, 404, 409, 500, 503] {
             let mapped = map_reply(op, &response(status, &[], &body), CEILING).unwrap();
             assert!(!format!("{mapped:?}").contains(canary), "{op:?} {status}");
-            if let Mapped::Failed(e) = mapped {
+            if let Mapped::Failed(e) = &mapped {
                 assert!(!e.to_string().contains(canary));
             }
-            if let Mapped::Conflict(reason) = mapped {
+            if let Mapped::Conflict(reason) = &mapped {
+                let reason = *reason;
                 assert_eq!(reason, ConflictReason::Unlisted);
                 assert!(!format!("{:?}", reason.answer()).contains(canary));
             }
