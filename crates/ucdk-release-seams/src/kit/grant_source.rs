@@ -84,22 +84,29 @@ pub const READ_SCOPE: &str = "read";
 
 /// A repository whose push identity is federated, with three distinct scope names.
 pub fn federated_repository() -> Repository {
+    declaration(LOCATION, |_| {})
+}
+
+/// The repository of [`federated_repository`] at `location`, its declaration changed by `change`.
+fn declaration(location: &str, change: impl FnOnce(&mut Federated)) -> Repository {
+    let mut declared = Federated {
+        subject: "release".to_owned(),
+        audience: "registry".to_owned(),
+        exceptional_subject: "exceptional".to_owned(),
+        environment: "publish".to_owned(),
+        exceptional_environment: "publish-exceptional".to_owned(),
+        pinned_claims: BTreeMap::from([("ref".to_owned(), "main".to_owned())]),
+        stage_scope: STAGE_SCOPE.to_owned(),
+        commit_scope: COMMIT_SCOPE.to_owned(),
+        read_scope: READ_SCOPE.to_owned(),
+    };
+    change(&mut declared);
     Repository {
         r#type: ArtifactType::File as i32,
-        location: LOCATION.to_owned(),
+        location: location.to_owned(),
         visibility: Visibility::Private as i32,
         push: Some(PushIdentity {
-            kind: Some(Kind::Federated(Federated {
-                subject: "release".to_owned(),
-                audience: "registry".to_owned(),
-                exceptional_subject: "exceptional".to_owned(),
-                environment: "publish".to_owned(),
-                exceptional_environment: "publish-exceptional".to_owned(),
-                pinned_claims: BTreeMap::from([("ref".to_owned(), "main".to_owned())]),
-                stage_scope: STAGE_SCOPE.to_owned(),
-                commit_scope: COMMIT_SCOPE.to_owned(),
-                read_scope: READ_SCOPE.to_owned(),
-            })),
+            kind: Some(Kind::Federated(declared)),
         }),
     }
 }
@@ -231,9 +238,83 @@ fn an_anonymous_identity_needs_no_exchange<R: GrantSourceRig>(rig: &R) {
 /// Every phase a grant is asked for.
 const PHASES: [GrantPhase; 3] = [GrantPhase::Stage, GrantPhase::Commit, GrantPhase::Read];
 
+/// Two coordinates that differ from the kits' default in every field but the name: a grant
+/// covers the version, platform, channel and type it is asked for.
+fn mixed_coordinates() -> [Coordinate; 2] {
+    [
+        coordinate("a"),
+        Coordinate {
+            channel: "beta".to_owned(),
+            r#type: ArtifactType::Oci as i32,
+            version: "9.9.9".to_owned(),
+            platform: "darwin-arm64".to_owned(),
+            ..coordinate("b")
+        },
+    ]
+}
+
+/// The declaration of [`federated_repository`] with its location and every scope name changed,
+/// and the same claims: the job [`matching_job`] is admitted by both. With `one_scope`, the
+/// stage and the commit phase share one scope name.
+fn renamed_declaration(one_scope: bool) -> Repository {
+    declaration("elsewhere/repo", |declared| {
+        declared.stage_scope = "s2".to_owned();
+        declared.commit_scope = if one_scope { "s2" } else { "c2" }.to_owned();
+        declared.read_scope = "r2".to_owned();
+    })
+}
+
+/// One source serves many requests, and each grant is of the phase and the repository of its
+/// own request, whatever was asked before.
+fn one_source_serves_every_request_as_asked<R: GrantSourceRig>(rig: &R) {
+    let coords = [coordinate("a")];
+    let (first, second) = (federated_repository(), renamed_declaration(false));
+    let mut source = rig.source(&setup(matching_job()));
+    for (repository, phase, scope, location) in [
+        (&first, GrantPhase::Stage, STAGE_SCOPE, LOCATION),
+        (&first, GrantPhase::Commit, COMMIT_SCOPE, LOCATION),
+        (&second, GrantPhase::Commit, "c2", "elsewhere/repo"),
+        (&second, GrantPhase::Stage, "s2", "elsewhere/repo"),
+        (&first, GrantPhase::Stage, STAGE_SCOPE, LOCATION),
+    ] {
+        let grant = must(
+            source.grant(&request(repository, phase, &coords)),
+            &format!("a {phase:?} grant after other requests of one source"),
+        );
+        same(
+            rig.content(&source, &grant),
+            GrantContent {
+                scope: scope.to_owned(),
+                repository: location.to_owned(),
+                coordinates: coords.to_vec(),
+            },
+            &format!("what a {phase:?} grant of {location} covers after other requests"),
+        );
+    }
+    // A declaration with one scope name for both phases is a declaration like another.
+    let shared = renamed_declaration(true);
+    for phase in [GrantPhase::Stage, GrantPhase::Commit] {
+        let mut source = rig.source(&setup(matching_job()));
+        let grant = must(
+            source.grant(&request(&shared, phase, &coords)),
+            &format!("a {phase:?} grant when both phases have one scope"),
+        );
+        same(
+            rig.content(&source, &grant),
+            GrantContent {
+                scope: "s2".to_owned(),
+                repository: "elsewhere/repo".to_owned(),
+                coordinates: coords.to_vec(),
+            },
+            &format!("what a {phase:?} grant covers when both phases have one scope"),
+        );
+    }
+}
+
 fn a_grant_covers_exactly_the_coordinates_asked<R: GrantSourceRig>(rig: &R) {
+    one_source_serves_every_request_as_asked(rig);
     let repository = federated_repository();
-    let coords = [coordinate("a"), coordinate("b")];
+    let coords = mixed_coordinates();
     for (phase, scope) in [
         (GrantPhase::Stage, STAGE_SCOPE),
         (GrantPhase::Commit, COMMIT_SCOPE),
@@ -465,6 +546,78 @@ fn a_differing_claim_is_refused_before_any_exchange<R: GrantSourceRig>(rig: &R) 
             );
         }
     }
+    several_pinned_claims_are_each_compared_and_none_may_be_added(rig);
+}
+
+/// Every pinned claim of the declaration is compared, the last as the first, and a job that
+/// presents a claim the declaration does not pin is not the job it declares.
+fn several_pinned_claims_are_each_compared_and_none_may_be_added<R: GrantSourceRig>(rig: &R) {
+    let coords = [coordinate("a")];
+    let pinned = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect()
+    };
+    let pins = |pairs: &[(&str, &str)]| JobClaims {
+        pinned: pinned(pairs),
+        ..matching_job()
+    };
+    let two = declaration(LOCATION, |declared| {
+        declared.pinned_claims = pinned(&[("ref", "main"), ("workflow", "release")]);
+    });
+    let one = federated_repository();
+    for phase in PHASES {
+        let mut source = rig.source(&setup(pins(&[("ref", "main"), ("workflow", "release")])));
+        must(
+            source.grant(&request(&two, phase, &coords)),
+            &format!("a {phase:?} grant for a job that presents both pinned claims"),
+        );
+        let differing = [
+            (
+                &two,
+                "the second of two pinned claims",
+                pins(&[("ref", "main"), ("workflow", "other")]),
+            ),
+            (
+                &two,
+                "the first of two pinned claims",
+                pins(&[("ref", "topic"), ("workflow", "release")]),
+            ),
+            (
+                &two,
+                "one of two pinned claims missing",
+                pins(&[("ref", "main")]),
+            ),
+            (
+                &two,
+                "a third claim the declaration does not pin",
+                pins(&[("ref", "main"), ("workflow", "release"), ("extra", "x")]),
+            ),
+            (
+                &one,
+                "a second claim the declaration does not pin",
+                pins(&[("ref", "main"), ("extra", "x")]),
+            ),
+        ];
+        for (repository, which, job) in differing {
+            let mut source = rig.source(&setup(job));
+            let refusal = must_err(
+                source.grant(&request(repository, phase, &coords)),
+                &format!("a {phase:?} grant for a job with {which}"),
+            );
+            same(
+                denied(&refusal),
+                true,
+                &format!("a job with {which} is Denied for a {phase:?} grant"),
+            );
+            same(
+                rig.exchanges(&source),
+                0,
+                &format!("the exchanges a job with {which} spent on a {phase:?} grant"),
+            );
+        }
+    }
 }
 
 fn an_exceptional_run_presents_the_exceptional_subject<R: GrantSourceRig>(rig: &R) {
@@ -498,6 +651,56 @@ fn an_exceptional_run_presents_the_exceptional_subject<R: GrantSourceRig>(rig: &
             &format!("an exceptional job asking as ordinary for a {phase:?} grant"),
         );
     }
+    // A declaration that names no exceptional subject and no exceptional environment admits no
+    // exceptional run, whoever asks: an exceptional run is not an ordinary one in that case.
+    let undeclared = declaration(LOCATION, |declared| {
+        declared.exceptional_subject.clear();
+        declared.exceptional_environment.clear();
+    });
+    for phase in PHASES {
+        let mut source = rig.source(&setup(matching_job()));
+        let req = GrantRequest {
+            exceptional: true,
+            ..request(&undeclared, phase, &coords)
+        };
+        let refusal = must_err(
+            source.grant(&req),
+            &format!("an exceptional {phase:?} grant where none is declared"),
+        );
+        same(
+            denied(&refusal),
+            true,
+            &format!("an exceptional {phase:?} grant is Denied where none is declared"),
+        );
+        same(rig.exchanges(&source), 0, "the exchanges of that refusal");
+    }
+    // One source serves an exceptional run and an ordinary request one after the other, and
+    // having been asked as exceptional does not make the next request exceptional.
+    let mut source = rig.source(&setup(exceptional.clone()));
+    for phase in PHASES {
+        for (as_exceptional, want) in [
+            (true, Ok(false)),
+            (false, refused.0.clone()),
+            (true, Ok(false)),
+        ] {
+            let req = GrantRequest {
+                exceptional: as_exceptional,
+                ..request(&repository, phase, &coords)
+            };
+            same(
+                source.grant(&req).map(|g| g.is_none()),
+                want,
+                &format!(
+                    "a {phase:?} grant of an exceptional job asked as exceptional {as_exceptional}, one source throughout"
+                ),
+            );
+        }
+    }
+    same(
+        rig.exchanges(&source),
+        6,
+        "the exchanges of two grants each phase",
+    );
 }
 
 fn a_used_identity_token_is_refused_the_second_time<R: GrantSourceRig>(rig: &R) {
@@ -571,7 +774,7 @@ fn a_read_grant_carries_the_read_scope_and_covers_exactly_the_coordinates_asked<
 ) {
     let repository = federated_repository();
     let mut source = rig.source(&setup(matching_job()));
-    let coords = [coordinate("a"), coordinate("b")];
+    let coords = mixed_coordinates();
     let grant = must(
         source.grant(&request(&repository, GrantPhase::Read, &coords)),
         "grant",
@@ -626,6 +829,9 @@ fn an_unreachable_issuer_is_unreachable_and_spends_nothing<R: GrantSourceRig>(ri
 fn an_expiry_is_reported_as_the_issuer_stated_it<R: GrantSourceRig>(rig: &R) {
     let repository = federated_repository();
     let coords = [coordinate("a")];
+    // The clock is not at a whole second, as it is not once anything has run: an expiry that is
+    // rounded to a second is not the one stated.
+    rig.advance(437);
     for offset in [30_000_i64, -30_000] {
         let mut source = rig.source(&GrantSetup {
             lifetime_ms: 60_000,

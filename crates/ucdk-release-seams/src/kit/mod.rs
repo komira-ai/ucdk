@@ -32,6 +32,8 @@ mod output_files;
 mod process_runner;
 mod publisher;
 mod publisher_access;
+mod publisher_grants;
+mod publisher_more;
 mod store;
 
 pub use build_system::{

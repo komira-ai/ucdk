@@ -41,7 +41,8 @@ pub enum Flaw {
     CommitOverOtherBytesOverwrites,
     /// An abort does nothing.
     AbortDoesNothing,
-    /// A commit of a set that fails leaves the first coordinate readable.
+    /// A commit of a set that fails leaves the first coordinate readable, on a channel that
+    /// stages.
     SetCommitIsTorn,
     /// A channel that does not stage says it does.
     StagesLies,
@@ -49,7 +50,7 @@ pub enum Flaw {
     OthersHaveNoDigest,
     /// A yanked coordinate cannot be fetched.
     YankedIsNotFetchable,
-    /// A commit over a yanked coordinate answers `Committed`.
+    /// A commit over a yanked coordinate answers `Committed`, on a channel that stages.
     CommitOverYankedCommits,
     /// After an answer was lost, an observe answers `Absent`.
     ObserveAfterALostAnswerIsAbsent,
@@ -83,7 +84,7 @@ pub enum Flaw {
     AReadGrantMayWrite,
     /// A commit that lost a race replaces the bytes that won it.
     ARacedCommitOverwrites,
-    /// A failure after a commit that landed is `Permanent`.
+    /// A failure after a commit that landed is `Permanent`, on a channel that stages.
     TransientAfterCommitIsPermanent,
     /// A stage over the bytes of another writer is answered `Staged`.
     StageOverOtherBytesIsStaged,

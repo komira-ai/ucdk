@@ -43,6 +43,11 @@ kit_tests!(
     duplicate_over_other_bytes_leaves_the_old_bytes,
     a_second_commit_of_the_same_bytes_is_duplicate,
     a_stage_over_ones_own_staged_coordinate_is_duplicate,
+    a_commit_carries_exactly_what_was_staged,
+    a_duplicate_answer_leaves_every_coordinate_of_the_set_as_it_was,
+    a_set_that_names_a_coordinate_twice_is_refused,
+    a_stage_or_commit_grant_reads_no_staged_state_but_through_observe,
+    a_channel_that_does_not_stage_creates_a_coordinate_once,
 );
 
 #[test]

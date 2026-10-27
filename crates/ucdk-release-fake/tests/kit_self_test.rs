@@ -20,6 +20,29 @@ use ucdk_release_seams::kit::{
     store_scenarios,
 };
 
+/// A scenario that catches a stub only because an earlier scenario moved the clock has not caught
+/// it: run alone, on a rig of its own, as the kit's own test of the fake runs it, each scenario
+/// must fail every stub that the whole kit fails it for.
+#[test]
+fn each_grant_source_scenario_fails_its_stubs_when_run_alone() {
+    let scenarios = grant_source_scenarios::<FakeGrantRig>();
+    let mut wrong = Vec::new();
+    for flaw in Grants::ALL {
+        let in_the_kit = run_grant_source_kit(&FakeGrantRig::flawed(flaw)).failed();
+        let alone: Vec<&str> = scenarios
+            .iter()
+            .filter(|s| s.run_on(&FakeGrantRig::flawed(flaw)).is_err())
+            .map(|s| s.name)
+            .collect();
+        if alone != in_the_kit {
+            wrong.push(format!(
+                "{flaw:?}: in the kit {in_the_kit:?}, alone {alone:?}"
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
 #[test]
 fn each_further_output_files_stub_fails_the_scenarios_that_hold_it() {
     further_output_files();
@@ -75,22 +98,22 @@ fn further_store() {
             (Store::PathsAreCaseFolded, &[LISTED]),
             (Store::GetTakesATrailingSlash, &[ESCAPES]),
             (Store::EmptyEntryIsNoEntry, &[SECOND_BEGIN]),
-            (Store::DeepPathsDropped, &[]),
-            (Store::DeepPathsNotListed, &[]),
-            (Store::DeepPathsGetNone, &[]),
-            (Store::DiscardDeepSurvives, &[]),
-            (Store::PutTruncatesAt64k, &[]),
-            (Store::GetTruncatesAt64k, &[]),
-            (Store::AppendOnRewrite, &[]),
-            (Store::DiscardPrefixSiblings, &[]),
-            (Store::BeginRefusedOnExistingLongerKey, &[]),
-            (Store::KeysOmitsEmptyEntries, &[]),
-            (Store::WriterPoisonedAfterRefusal, &[]),
-            (Store::DotfilesHidden, &[]),
-            (Store::TrailingSpaceTrimmed, &[]),
-            (Store::UnicodeFolded, &[]),
-            (Store::FilesCappedAt100, &[]),
-            (Store::KeysCappedAt100, &[]),
+            (Store::DeepPathsDropped, &[READ_BACK]),
+            (Store::DeepPathsNotListed, &[READ_BACK]),
+            (Store::DeepPathsGetNone, &[READ_BACK]),
+            (Store::DiscardDeepSurvives, &[DISCARD]),
+            (Store::PutTruncatesAt64k, &[READ_BACK]),
+            (Store::GetTruncatesAt64k, &[READ_BACK]),
+            (Store::AppendOnRewrite, &[READ_BACK]),
+            (Store::DiscardPrefixSiblings, &[DISCARD]),
+            (Store::BeginRefusedOnExistingLongerKey, &[DISCARD]),
+            (Store::KeysOmitsEmptyEntries, &[SECOND_BEGIN]),
+            (Store::WriterPoisonedAfterRefusal, &[ESCAPES]),
+            (Store::DotfilesHidden, &[LISTED]),
+            (Store::TrailingSpaceTrimmed, &[LISTED]),
+            (Store::UnicodeFolded, &[LISTED]),
+            (Store::FilesCappedAt100, &[LISTED]),
+            (Store::KeysCappedAt100, &[KEYS]),
         ],
         |flaw| run_store_kit(&FakeStoreRig::flawed(flaw)),
     );
@@ -118,14 +141,14 @@ fn further_grant_source() {
             (Grants::LimitIsCheckedForStageOnly, &[LIMIT]),
             (Grants::IgnoresTheDeclaredScopesAndLocation, &[COVERS, READ]),
             (Grants::ClaimsMatchedIgnoringCase, &[DIFFERING]),
-            (Grants::NormalizesCoordinateFields, &[]),
-            (Grants::ExceptionalFallsBackWhenUndeclared, &[]),
-            (Grants::PinnedOnlyFirstCompared, &[]),
-            (Grants::PinnedSubset, &[]),
-            (Grants::EqualScopesCommitDenied, &[]),
-            (Grants::StickyExceptional, &[]),
-            (Grants::ScopeStickyToFirstRequest, &[]),
-            (Grants::StickyRepository, &[]),
+            (Grants::NormalizesCoordinateFields, &[COVERS, READ]),
+            (Grants::ExceptionalFallsBackWhenUndeclared, &[EXCEPTIONAL]),
+            (Grants::PinnedOnlyFirstCompared, &[DIFFERING]),
+            (Grants::PinnedSubset, &[DIFFERING]),
+            (Grants::EqualScopesCommitDenied, &[COVERS]),
+            (Grants::StickyExceptional, &[EXCEPTIONAL]),
+            (Grants::ScopeStickyToFirstRequest, &[COVERS]),
+            (Grants::StickyRepository, &[COVERS]),
             (Grants::ExpiryRoundedToSecond, &[EXPIRY]),
         ],
         |flaw| run_grant_source_kit(&FakeGrantRig::flawed(flaw)),
@@ -138,6 +161,9 @@ fn further_output_files() {
     const REFUSED: &str = "listing_a_file_and_reading_a_directory_or_a_symlink_are_refused";
     const STAT: &str = "stat_tells_a_file_a_directory_a_symlink_and_nothing_apart";
     const DESCENDED: &str = "a_listed_symlink_is_never_descended";
+    const SORTED: &str = "a_listing_is_sorted_relative_paths";
+    const DOTS: &str =
+        "a_dot_part_a_repeated_slash_and_a_trailing_slash_name_the_path_they_stand_in";
     further_stubs_fail_exactly(
         "output files",
         &names(&output_files_scenarios::<FakeFilesRig>()),
@@ -157,30 +183,33 @@ fn further_output_files() {
             (Files::StatBelowAFileIsAnError, &[STAT]),
             (Files::ListOfAnEmptyDirectoryIsPermanent, &[KINDS]),
             (Files::ReadTruncatesAt64k, &[READ_THROUGH]),
-            (Files::ReadTruncatesAt128k, &[]),
-            (Files::ReadTruncatesAt1M, &[]),
-            (Files::ListCappedAt256, &[]),
-            (Files::DeepEntriesOmittedBeyond5, &[]),
-            (Files::ReadOfDanglingLinkIsEmpty, &[]),
-            (Files::ReadOfLinkToDirIsEmpty, &[]),
-            (Files::ListOfDanglingLinkIsEmpty, &[]),
-            (Files::ListTrailingSlashFails, &[]),
-            (Files::ListTrailingSlashRelsLeadingSlash, &[]),
-            (Files::RefusesDotPart, &[]),
-            (Files::RefusesDoubleSlash, &[]),
-            (Files::ReadFailsOnSpaceInPath, &[]),
-            (Files::ListOmitsNamesWithSpace, &[]),
-            (Files::ListOmitsNonAscii, &[]),
-            (Files::ListNamesPercentEncoded, &[]),
-            (Files::ReadOfFileWithNewlineNameFails, &[]),
-            (Files::NaturalSort, &[]),
-            (Files::ReadOfEmptyFileInSubdirIsMissing, &[]),
+            (Files::ReadTruncatesAt128k, &[READ_THROUGH]),
+            (Files::ReadTruncatesAt1M, &[READ_THROUGH]),
+            (Files::ListCappedAt256, &[SORTED]),
+            (Files::DeepEntriesOmittedBeyond5, &[READ_THROUGH]),
+            (Files::ReadOfDanglingLinkIsEmpty, &[REFUSED]),
+            (Files::ReadOfLinkToDirIsEmpty, &[REFUSED]),
+            (Files::ListOfDanglingLinkIsEmpty, &[REFUSED]),
+            (Files::ListTrailingSlashFails, &[DOTS]),
+            (Files::ListTrailingSlashRelsLeadingSlash, &[DOTS]),
+            (Files::RefusesDoubleSlash, &[DOTS]),
+            (Files::ReadFailsOnSpaceInPath, &[READ_THROUGH]),
+            (Files::ListOmitsNamesWithSpace, &[READ_THROUGH]),
+            (Files::ListOmitsNonAscii, &[READ_THROUGH]),
+            (Files::ListNamesPercentEncoded, &[READ_THROUGH]),
+            (Files::ReadOfFileWithNewlineNameFails, &[READ_THROUGH]),
+            (Files::NaturalSort, &[SORTED]),
+            (Files::ReadOfEmptyFileInSubdirIsMissing, &[READ_THROUGH]),
         ],
         |flaw| run_output_files_kit(&FakeFilesRig::flawed(flaw)),
     );
 }
 
 fn further_process_runner() {
+    const BARE: &str = "a_bare_name_is_resolved_on_the_childs_path_and_never_the_runners";
+    const ARGV: &str = "argv_and_environment_are_exactly_what_was_given";
+    const EXIT: &str = "exit_code_and_signal_are_distinguished";
+    const OUTPUT: &str = "output_is_bounded_and_its_tail_is_kept";
     further_stubs_fail_exactly(
         "process runner",
         &names(&process_runner_scenarios::<FakeProcessRig>()),
@@ -195,7 +224,10 @@ fn further_process_runner() {
             ),
             (
                 Process::AStopPoisonsTheRunner,
-                &["the_runner_beats_on_progress_and_stops_the_child_when_told"],
+                &[
+                    ARGV,
+                    "the_runner_beats_on_progress_and_stops_the_child_when_told",
+                ],
             ),
             (
                 Process::EnvironmentLeaksIntoTheNextRun,
@@ -205,17 +237,17 @@ fn further_process_runner() {
                 Process::LastPathEntryWins,
                 &["a_bare_name_is_resolved_on_the_childs_path_and_never_the_runners"],
             ),
-            (Process::CwdIsFirstRuns, &[]),
-            (Process::LimitIsFirstRuns, &[]),
-            (Process::PathMissCached, &[]),
-            (Process::StderrTailAccumulates, &[]),
-            (Process::EnvLeaksAfterAnUnstartableRun, &[]),
-            (Process::EnvLeaksAfterAStop, &[]),
-            (Process::SignalOtherThan9IsCode128Plus, &[]),
-            (Process::HighCodeIsASignal, &[]),
-            (Process::ZeroLimitMeansUnlimited, &[]),
-            (Process::EnvValueWithEqualsTruncated, &[]),
-            (Process::NonexistentPathEntryIsFatal, &[]),
+            (Process::CwdIsFirstRuns, &[ARGV]),
+            (Process::LimitIsFirstRuns, &[OUTPUT]),
+            (Process::PathMissCached, &[BARE]),
+            (Process::StderrTailAccumulates, &[OUTPUT]),
+            (Process::EnvLeaksAfterAnUnstartableRun, &[ARGV]),
+            (Process::EnvLeaksAfterAStop, &[ARGV]),
+            (Process::SignalOtherThan9IsCode128Plus, &[EXIT]),
+            (Process::HighCodeIsASignal, &[EXIT]),
+            (Process::ZeroLimitMeansUnlimited, &[OUTPUT]),
+            (Process::EnvValueWithEqualsTruncated, &[ARGV]),
+            (Process::NonexistentPathEntryIsFatal, &[BARE]),
         ],
         |flaw| run_process_runner_kit(&FakeProcessRig::flawed(flaw)),
     );
@@ -284,6 +316,7 @@ fn further_publisher() {
     const PRIVATE: &str =
         "a_read_grant_observes_committed_coordinates_and_can_neither_stage_nor_commit";
     const STRANGER: &str = "public_read_needs_no_grant";
+    const WRITER_READS: &str = "a_stage_or_commit_grant_reads_no_staged_state_but_through_observe";
     const NEWEST: &str = "newest_lists_every_held_coordinate_of_the_name";
     const ABORT: &str = "abort_gives_staged_state_back_and_never_touches_a_committed_coordinate";
     const PHASE: &str = "a_grant_of_the_wrong_phase_is_denied_and_nothing_happens";
@@ -303,8 +336,8 @@ fn further_publisher() {
             (Registry::StrangerNewestPrivate, &[PRIVATE]),
             (Registry::StrangerListsPrivate, &[PRIVATE]),
             (Registry::StrangerFetchesStaged, &[STRANGER]),
-            (Registry::ListIncludesStaged, &[STRANGER]),
-            (Registry::NewestIncludesStaged, &[STRANGER]),
+            (Registry::ListIncludesStaged, &[STRANGER, WRITER_READS]),
+            (Registry::NewestIncludesStaged, &[STRANGER, WRITER_READS]),
             (Registry::NewestMatchesByPrefix, &[NEWEST]),
             (Registry::NewestIgnoresTheChannel, &[NEWEST]),
             (Registry::AbortGivesBackAllStaged, &[ABORT]),
@@ -317,7 +350,10 @@ fn further_publisher() {
             (Registry::StrangerMayYank, &[PHASE]),
             (Registry::PrivateTakesAForeignReadGrant, &[PRIVATE]),
             (Registry::PrivateTakesAnExpiredReadGrant, &[PRIVATE]),
-            (Registry::PrivateTakesAnUncoveredReadGrant, &[PRIVATE]),
+            (
+                Registry::PrivateTakesAnUncoveredReadGrant,
+                &[PHASE, PRIVATE],
+            ),
             (Registry::ObserveIgnoresVersion, &[ABSENT]),
             (Registry::ObserveIgnoresPlatform, &[ABSENT]),
             (Registry::ObserveIgnoresChannel, &[ABSENT]),
@@ -430,6 +466,10 @@ fn output_files() {
                 Files::CachesReads,
             ),
             ("no_call_changes_the_tree", Files::ReadTouches),
+            (
+                "a_dot_part_a_repeated_slash_and_a_trailing_slash_name_the_path_they_stand_in",
+                Files::RefusesDotPart,
+            ),
         ],
         |flaw| run_output_files_kit(&FakeFilesRig::flawed(flaw)),
     );
@@ -652,9 +692,10 @@ fn build_system() {
 }
 
 fn publisher() {
+    // The scenarios the second part of the kit adds have theirs in `kit_self_test_publisher`.
     each_fails_alone(
         "publisher",
-        &names(&publisher_scenarios::<FakePublisherRig>()),
+        &names(&publisher_scenarios::<FakePublisherRig>())[..34],
         &[
             ("observe_absent_is_not_an_error", Registry::AbsentIsAnError),
             (

@@ -71,13 +71,31 @@ fn run_plain<R: ProcessRig>(
     runner: &mut R::Runner,
     command: &Command,
 ) -> Result<ProcessResult, SeamError> {
+    run_with(runner, command, &rig.scratch(), 1 << 20)
+}
+
+/// Runs `command` in `cwd`, with a heartbeat that never stops and the given bound on the output.
+fn run_with<N: ProcessRunner>(
+    runner: &mut N,
+    command: &Command,
+    cwd: &str,
+    stdout_limit: usize,
+) -> Result<ProcessResult, SeamError> {
     let beats = Beats::counting();
     runner.run(&ProcessSpec {
         command,
-        cwd: &rig.scratch(),
+        cwd,
         heartbeat: &beats,
-        stdout_limit: 1 << 20,
+        stdout_limit,
     })
+}
+
+fn exits(code: i32) -> Behavior {
+    Behavior::Prints {
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        code,
+    }
 }
 
 fn prints(stdout: &str) -> Behavior {
@@ -176,6 +194,38 @@ fn a_bare_name_is_resolved_on_the_childs_path_and_never_the_runners<R: ProcessRi
             &format!("the program that ran with PATH {path}"),
         );
     }
+    // A directory of the `PATH` that is not there is skipped, not fatal.
+    let missing = format!("{}/missing-bin", rig.scratch());
+    let path = format!("{missing}:{child_dir}");
+    let result = must(
+        run_plain(rig, &mut runner, &command(&["tool"], &[("PATH", &path)])),
+        "run of a bare name with a directory on the PATH that does not exist",
+    );
+    same(
+        text(&result.stdout),
+        "child".to_owned(),
+        "the program that ran with a directory of the PATH that does not exist",
+    );
+    // A name that was not found on one `PATH` is found on another that has it.
+    let empty = format!("{}/empty-bin", rig.scratch());
+    rig.install(&mut runner, &format!("{empty}/other-tool"), prints("x"));
+    must_err(
+        run_plain(rig, &mut runner, &command(&["tool"], &[("PATH", &empty)])),
+        "run of a bare name that the PATH does not have",
+    );
+    let result = must(
+        run_plain(
+            rig,
+            &mut runner,
+            &command(&["tool"], &[("PATH", &child_dir)]),
+        ),
+        "run of a bare name found after it was missed",
+    );
+    same(
+        text(&result.stdout),
+        "child".to_owned(),
+        "the program that ran after the name was missed on another PATH",
+    );
 }
 
 fn a_name_found_nowhere_on_the_childs_path_is_unstartable<R: ProcessRig>(rig: &R) {
@@ -218,6 +268,33 @@ fn argv_and_environment_are_exactly_what_was_given<R: ProcessRig>(rig: &R) {
     // What an earlier run of the same runner was given is not what this child sees.
     let earlier = command(&[&program], &[("SECRET", "1"), ("PATH", "/earlier")]);
     must(run_plain(rig, &mut runner, &earlier), "an earlier run");
+    // A run that could not be started and one that was stopped leave nothing behind either.
+    let clean = |runner: &mut R::Runner, after: &str| {
+        let bare = command(&[&program], &[("PATH", "/nowhere")]);
+        let result = must(run_plain(rig, runner, &bare), after);
+        same(
+            text(&result.stdout),
+            format!("cwd {}\nenv PATH=/nowhere\n", rig.scratch()),
+            &format!("what the child saw after {after}"),
+        );
+    };
+    clean(&mut runner, "an earlier run");
+    let unstartable = command(&["never-installed"], &[("SECRET_UNSTARTED", "1")]);
+    must_err(
+        run_plain(rig, &mut runner, &unstartable),
+        "an earlier run that cannot be started",
+    );
+    clean(&mut runner, "a run that could not be started");
+    let chatter = format!("{}/bin/chatter", rig.scratch());
+    rig.install(&mut runner, &chatter, Behavior::Chatters { chunks: 4 });
+    let stopped = command(&[&chatter], &[("SECRET_STOPPED", "1")]);
+    let _ = runner.run(&ProcessSpec {
+        command: &stopped,
+        cwd: &rig.scratch(),
+        heartbeat: &Beats::stopping_at(1),
+        stdout_limit: 1 << 20,
+    });
+    clean(&mut runner, "a run that was stopped");
     let given = command(
         &[
             &program,
@@ -227,7 +304,7 @@ fn argv_and_environment_are_exactly_what_was_given<R: ProcessRig>(rig: &R) {
             "--flag=value",
             "\u{e9}",
         ],
-        &[("A", "1"), ("B", ""), ("PATH", "/nowhere")],
+        &[("A", "1"), ("B", ""), ("EQ", "a=b=c"), ("PATH", "/nowhere")],
     );
     let result = must(run_plain(rig, &mut runner, &given), "run");
     same(result.exit, Exit::Code(0), "the exit of the report");
@@ -235,10 +312,23 @@ fn argv_and_environment_are_exactly_what_was_given<R: ProcessRig>(rig: &R) {
         text(&result.stdout),
         format!(
             "cwd {}\narg plain\narg with space\narg \narg --flag=value\narg \u{e9}\n\
-             env A=1\nenv B=\nenv PATH=/nowhere\n",
+             env A=1\nenv B=\nenv EQ=a=b=c\nenv PATH=/nowhere\n",
             rig.scratch()
         ),
         "the working directory, the arguments and the whole environment the child saw",
+    );
+    // A later run is in the directory it is given, which is not the one of the first.
+    let elsewhere = format!("{}/elsewhere", rig.scratch());
+    rig.install(&mut runner, &format!("{elsewhere}/marker"), prints(""));
+    let again = command(&[&program, "x"], &[("PATH", "/nowhere")]);
+    let result = must(
+        run_with(&mut runner, &again, &elsewhere, 1 << 20),
+        "a run in another directory",
+    );
+    same(
+        text(&result.stdout),
+        format!("cwd {elsewhere}\narg x\nenv PATH=/nowhere\n"),
+        "the working directory of a later run, and the environment of that run alone",
     );
 }
 
@@ -289,10 +379,23 @@ fn exit_code_and_signal_are_distinguished<R: ProcessRig>(rig: &R) {
         },
     );
     rig.install(&mut runner, &format!("{dir}/killed"), Behavior::Killed(9));
+    // Another signal than 9, and exit codes that are above 128 without being a signal.
+    rig.install(
+        &mut runner,
+        &format!("{dir}/terminated"),
+        Behavior::Killed(15),
+    );
+    rig.install(&mut runner, &format!("{dir}/hangup"), Behavior::Killed(1));
+    rig.install(&mut runner, &format!("{dir}/high"), exits(200));
+    rig.install(&mut runner, &format!("{dir}/as_killed"), exits(137));
     for (name, want) in [
         ("ok", Exit::Code(0)),
         ("three", Exit::Code(3)),
         ("killed", Exit::Signal(9)),
+        ("terminated", Exit::Signal(15)),
+        ("hangup", Exit::Signal(1)),
+        ("high", Exit::Code(200)),
+        ("as_killed", Exit::Code(137)),
     ] {
         let given = command(&[&format!("{dir}/{name}")], &[]);
         let result = must(run_plain(rig, &mut runner, &given), name);
@@ -328,17 +431,19 @@ fn output_is_bounded_and_its_tail_is_kept<R: ProcessRig>(rig: &R) {
             code: 0,
         },
     );
-    let beats = Beats::counting();
     let given = command(&[&program], &[]);
-    let result = must(
-        runner.run(&ProcessSpec {
-            command: &given,
-            cwd: &rig.scratch(),
-            heartbeat: &beats,
-            stdout_limit: 100,
-        }),
-        "run",
+    // The limit of one run is the limit of that run: a first run that keeps everything does not
+    // set the limit of the next, and a limit of 0 keeps nothing.
+    let whole = must(
+        run_with(&mut runner, &given, &rig.scratch(), 1 << 20),
+        "a run that keeps everything",
     );
+    same(
+        whole.stdout,
+        stdout.clone(),
+        "the output kept under a big limit",
+    );
+    let result = must(run_with(&mut runner, &given, &rig.scratch(), 100), "run");
     same(
         result.stdout,
         stdout[stdout.len() - 100..].to_vec(),
@@ -353,6 +458,27 @@ fn output_is_bounded_and_its_tail_is_kept<R: ProcessRig>(rig: &R) {
         stderr.ends_with(&result.stderr_tail),
         true,
         "the error output kept is its tail",
+    );
+    let none = must(
+        run_with(&mut runner, &given, &rig.scratch(), 0),
+        "a run with a limit of 0",
+    );
+    same(
+        none.stdout,
+        Vec::new(),
+        "the output kept under a limit of 0",
+    );
+    // The error tail is that of the run: a run that wrote none has none.
+    let quiet = format!("{}/bin/quiet", rig.scratch());
+    rig.install(&mut runner, &quiet, prints("quiet"));
+    let result = must(
+        run_with(&mut runner, &command(&[&quiet], &[]), &rig.scratch(), 100),
+        "a quiet run after a noisy one",
+    );
+    same(
+        result.stderr_tail,
+        Vec::new(),
+        "the error tail of a run that wrote none",
     );
 }
 

@@ -22,6 +22,7 @@ kit_tests!(
     an_entry_of_a_listed_directory_is_read_through_its_joined_path,
     a_read_returns_the_file_as_it_is_at_the_call,
     no_call_changes_the_tree,
+    a_dot_part_a_repeated_slash_and_a_trailing_slash_name_the_path_they_stand_in,
 );
 
 #[test]

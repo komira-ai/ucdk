@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! The publisher kit: thirty-four scenarios over observing, staging, committing, aborting and
+//! The publisher kit: thirty-nine scenarios over observing, staging, committing, aborting and
 //! reading the coordinates of a channel, and over the grants those calls carry.
 //!
 //! The scenarios of this file are about what a registry holds and answers; those of
@@ -12,6 +12,7 @@ use ucdk_release::publish::{Held, Presence};
 use ucdk_release_proto::v1::{Coordinate, Stamped};
 
 use super::publisher_access as access;
+use super::publisher_more as more;
 use super::{Report, Scenario, coordinate, fail, must, must_err, run_scenarios, same};
 use crate::{Blob, CommitAnswer, Grant, ListScope, Publisher, StageAnswer, StageItem};
 
@@ -414,6 +415,26 @@ pub fn publisher_scenarios<R: PublisherRig>() -> Vec<Scenario<R>> {
             "a_stage_over_ones_own_staged_coordinate_is_duplicate",
             a_stage_over_ones_own_staged_coordinate_is_duplicate::<R>,
         ),
+        Scenario::new(
+            "a_commit_carries_exactly_what_was_staged",
+            more::a_commit_carries_exactly_what_was_staged::<R>,
+        ),
+        Scenario::new(
+            "a_duplicate_answer_leaves_every_coordinate_of_the_set_as_it_was",
+            more::a_duplicate_answer_leaves_every_coordinate_of_the_set_as_it_was::<R>,
+        ),
+        Scenario::new(
+            "a_set_that_names_a_coordinate_twice_is_refused",
+            more::a_set_that_names_a_coordinate_twice_is_refused::<R>,
+        ),
+        Scenario::new(
+            "a_stage_or_commit_grant_reads_no_staged_state_but_through_observe",
+            more::a_stage_or_commit_grant_reads_no_staged_state_but_through_observe::<R>,
+        ),
+        Scenario::new(
+            "a_channel_that_does_not_stage_creates_a_coordinate_once",
+            more::a_channel_that_does_not_stage_creates_a_coordinate_once::<R>,
+        ),
     ]
 }
 
@@ -479,6 +500,7 @@ fn observe_absent_is_not_an_error<R: PublisherRig>(rig: &R) {
         "a coordinate nobody wrote",
     );
     a_held_coordinate_does_not_answer_for_one_that_differs_in_a_field(rig);
+    more::a_sibling_is_another_coordinate_to_stage_commit_and_observe(rig);
 }
 
 /// A coordinate is the whole of its five fields: the one held that differs from the one asked
@@ -658,6 +680,7 @@ fn abort_gives_staged_state_back_and_never_touches_a_committed_coordinate<R: Pub
         Some(b"a".to_vec()),
         "the committed bytes after it",
     );
+    more::an_abort_reaches_only_the_coordinates_it_names(rig);
 }
 
 fn a_set_commit_makes_every_coordinate_readable_or_none<R: PublisherRig>(rig: &R) {
@@ -734,6 +757,7 @@ fn yank_keeps_bytes_fetchable<R: PublisherRig>(rig: &R) {
         true,
         "a yanked coordinate is observed as Yanked",
     );
+    more::a_yank_reaches_only_the_coordinate_it_names_and_needs_it_held(rig);
 }
 
 fn yanked_coordinate_cannot_be_committed_again<R: PublisherRig>(rig: &R) {

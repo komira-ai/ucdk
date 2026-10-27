@@ -10,6 +10,7 @@ use super::publisher::{
     A_DAY_MS, Arrangement, ChannelShape, PublisherRig, ReadStep, Set, fetched, observed,
     present_held, publish, sha, stage, staged_held, stranger,
 };
+use super::publisher_grants::{self as grants, Spoiled};
 use super::{coordinate, must, must_err, same};
 use crate::{CommitAnswer, Grant, ListScope, Publisher, SeamError, StageAnswer};
 
@@ -174,6 +175,7 @@ pub(super) fn a_grant_for_another_repository_sends_nothing<R: PublisherRig>(rig:
         &SeamError::GrantRefused(GrantFault::Denied),
         "for another repository",
     );
+    grants::every_shape_refuses_a_bad_write_grant(rig, Spoiled::Foreign);
 }
 
 pub(super) fn a_grant_of_the_wrong_phase_is_denied_and_nothing_happens<R: PublisherRig>(rig: &R) {
@@ -215,6 +217,10 @@ pub(super) fn a_grant_of_the_wrong_phase_is_denied_and_nothing_happens<R: Publis
     staged_held(observed(rig, &mut p, GrantPhase::Stage, &set, 0));
     a_grant_covers_the_coordinates_it_names_and_no_others(rig);
     a_yank_needs_the_commit_grant_that_names_it(rig);
+    grants::an_abort_needs_the_stage_grant_that_names_it(rig);
+    grants::a_grant_names_every_field_of_the_coordinates_it_covers(rig);
+    grants::every_shape_refuses_a_bad_write_grant(rig, Spoiled::Uncovered);
+    grants::every_shape_refuses_a_bad_write_grant(rig, Spoiled::OtherPhase);
     for shape in [ChannelShape::staging(), ChannelShape::private_grouped()] {
         a_stranger_writes_nothing(rig, &shape);
     }
@@ -375,6 +381,7 @@ pub(super) fn an_expired_grant_is_refused_and_nothing_happens<R: PublisherRig>(r
         &SeamError::GrantRefused(GrantFault::Expired),
         "that has expired",
     );
+    grants::every_shape_refuses_a_bad_write_grant(rig, Spoiled::Expired);
 }
 
 pub(super) fn newest_lists_every_held_coordinate_of_the_name<R: PublisherRig>(rig: &R) {
@@ -614,6 +621,7 @@ pub(super) fn a_read_grant_observes_committed_coordinates_and_can_neither_stage_
         "an observe after the refusals",
     ));
     a_private_channel_reads_only_for_a_good_read_grant(rig);
+    grants::every_private_shape_refuses_a_bad_read_grant(rig);
 }
 
 /// A read of a private channel needs a read grant that is for this repository, covers what is

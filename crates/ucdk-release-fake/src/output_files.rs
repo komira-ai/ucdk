@@ -97,14 +97,21 @@ impl FakeOutputFiles {
             .collect()
     }
 
-    /// The common start of every call: log it, check the path, fail an unreadable path.
-    fn enter(&mut self, method: &str, path: &str) -> Result<(), SeamError> {
+    /// The common start of every call: log it, check the path, fail an unreadable path. The
+    /// path that comes back is the one the call is about: a `.` part and an empty part (a
+    /// repeated slash, a trailing one) name nothing, as the operating system reads them.
+    fn enter(&mut self, method: &str, path: &str) -> Result<String, SeamError> {
         self.calls.push(format!("{method} {path}"));
         check_path(path)?;
-        if self.unreadable.contains(path) {
+        let parts: Vec<&str> = path
+            .split('/')
+            .filter(|part| !part.is_empty() && *part != ".")
+            .collect();
+        let path = format!("/{}", parts.join("/"));
+        if self.unreadable.contains(&path) {
             return Err(SeamError::Unknown(format!("{path} cannot be read")));
         }
-        Ok(())
+        Ok(path)
     }
 
     /// The node at `path`, unless the path or a directory above it was made missing.
@@ -129,14 +136,14 @@ fn kind_of(node: &Node) -> FileKind {
 
 impl OutputFiles for FakeOutputFiles {
     fn stat(&mut self, path: &str) -> Result<Option<FileKind>, SeamError> {
-        self.enter("stat", path)?;
-        Ok(self.node(path).map(kind_of))
+        let at = self.enter("stat", path)?;
+        Ok(self.node(&at).map(kind_of))
     }
 
-    fn list(&mut self, path: &str) -> Result<Vec<DirEntry>, SeamError> {
-        self.enter("list", path)?;
-        if self.node(path) != Some(&Node::Directory) {
-            return Err(SeamError::Permanent(format!("{path} is not a directory")));
+    fn list(&mut self, given: &str) -> Result<Vec<DirEntry>, SeamError> {
+        let path = self.enter("list", given)?;
+        if self.node(&path) != Some(&Node::Directory) {
+            return Err(SeamError::Permanent(format!("{given} is not a directory")));
         }
         let below = format!("{}/", path.trim_end_matches('/'));
         let mut entries = Vec::new();
@@ -175,12 +182,12 @@ impl OutputFiles for FakeOutputFiles {
         Ok(entries)
     }
 
-    fn read(&mut self, path: &str) -> Result<Vec<u8>, SeamError> {
-        self.enter("read", path)?;
-        match self.node(path) {
+    fn read(&mut self, given: &str) -> Result<Vec<u8>, SeamError> {
+        let path = self.enter("read", given)?;
+        match self.node(&path) {
             Some(Node::File(bytes)) => Ok(bytes.clone()),
             _ => Err(SeamError::Permanent(format!(
-                "{path} is not a regular file"
+                "{given} is not a regular file"
             ))),
         }
     }

@@ -84,6 +84,43 @@ pub enum Flaw {
     ExpiryRoundedToSecond,
 }
 
+impl Flaw {
+    /// Every stub of the issuer.
+    pub const ALL: [Self; 31] = [
+        Self::AnonymousGetsAGrant,
+        Self::DropsTheLastCoordinate,
+        Self::IgnoresPinnedClaims,
+        Self::IgnoresExceptional,
+        Self::UsedIsDenied,
+        Self::ReissuesTheExpiredGrant,
+        Self::CommitWithoutScopeIsIssued,
+        Self::ReadIsIssuedAsStage,
+        Self::UnreachableSpendsTheToken,
+        Self::CorrectsTheSkew,
+        Self::AllowsOneOverTheLimit,
+        Self::LogsTheSecret,
+        Self::SkipsClaimsOutsideStage,
+        Self::ClaimsMatchedBySubstring,
+        Self::NoPinnedClaimIsIssued,
+        Self::ExceptionalIgnoresEnvironment,
+        Self::ExceptionalIgnoresAudienceAndPinned,
+        Self::LimitIsCheckedForStageOnly,
+        Self::CommitGrantHasTheStageScope,
+        Self::CommitGrantDropsACoordinate,
+        Self::IgnoresTheDeclaredScopesAndLocation,
+        Self::ClaimsMatchedIgnoringCase,
+        Self::NormalizesCoordinateFields,
+        Self::ExceptionalFallsBackWhenUndeclared,
+        Self::PinnedOnlyFirstCompared,
+        Self::PinnedSubset,
+        Self::EqualScopesCommitDenied,
+        Self::StickyExceptional,
+        Self::ScopeStickyToFirstRequest,
+        Self::StickyRepository,
+        Self::ExpiryRoundedToSecond,
+    ];
+}
+
 pub struct FakeGrantRig {
     clock: ManualClock,
     flaw: Option<Flaw>,

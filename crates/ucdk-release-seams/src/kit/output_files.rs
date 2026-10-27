@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! The `OutputFiles` kit: thirteen scenarios over the three questions a build system asks of a
+//! The `OutputFiles` kit: fourteen scenarios over the three questions a build system asks of a
 //! tree it did not make (what is at a path, what is below a directory, what a file holds).
 
 use super::{Report, Scenario, must, must_err, must_some, permanent_naming, run_scenarios, same};
@@ -99,7 +99,54 @@ pub fn output_files_scenarios<R: OutputFilesRig>() -> Vec<Scenario<R>> {
             a_read_returns_the_file_as_it_is_at_the_call::<R>,
         ),
         Scenario::new("no_call_changes_the_tree", no_call_changes_the_tree::<R>),
+        Scenario::new(
+            "a_dot_part_a_repeated_slash_and_a_trailing_slash_name_the_path_they_stand_in",
+            a_dot_part_a_repeated_slash_and_a_trailing_slash_name_the_path_they_stand_in::<R>,
+        ),
     ]
+}
+
+/// The operating system reads `/d/./x` and `/d//x` as `/d/x` and `list` of `/d/` as `list` of
+/// `/d`, and the contract refuses only a `..` part: a reader that refuses or fails on any of
+/// them, or lists with a leading slash, is not one.
+fn a_dot_part_a_repeated_slash_and_a_trailing_slash_name_the_path_they_stand_in<
+    R: OutputFilesRig,
+>(
+    rig: &R,
+) {
+    let mut files = rig.reader(&[
+        ("d/x", Node::File(b"X")),
+        ("d/z", Node::File(b"Z")),
+        ("d/sub/y", Node::File(b"Y")),
+    ]);
+    let listed = must(files.list(&at(rig, "d")), "list of the plain path");
+    for suffix in ["/d/", "/d//", "//d", "/./d", "/d/.", "/./d/./"] {
+        let spelled = format!("{}{suffix}", rig.root());
+        same(
+            must(files.list(&spelled), &format!("list of {spelled:?}")),
+            listed.clone(),
+            &format!("the listing of {spelled:?}, which is the listing of the plain path"),
+        );
+        same(
+            must(files.stat(&spelled), &format!("stat of {spelled:?}")),
+            Some(FileKind::Directory),
+            &format!("what is at {spelled:?}"),
+        );
+    }
+    for suffix in ["/d/./x", "/d//x", "/./d/x", "/d/./z", "/d//z"] {
+        let spelled = format!("{}{suffix}", rig.root());
+        let want: &[u8] = if suffix.ends_with('x') { b"X" } else { b"Z" };
+        same(
+            must(files.read(&spelled), &format!("read of {spelled:?}")),
+            want.to_vec(),
+            &format!("the bytes of {spelled:?}"),
+        );
+        same(
+            must(files.stat(&spelled), &format!("stat of {spelled:?}")),
+            Some(FileKind::File),
+            &format!("what is at {spelled:?}"),
+        );
+    }
 }
 
 /// `a.txt` sorts before `a/y` because `.` is below `/`; a walk that lists a directory's
@@ -118,6 +165,22 @@ fn a_listing_is_sorted_relative_paths<R: OutputFilesRig>(rig: &R) {
         rels,
         vec!["B", "a", "a.txt", "a/y", "a/z", "b.txt"],
         "the listing, sorted bytewise by rel",
+    );
+    // More entries than a reader might list at most, whose names sort differently as numbers
+    // than as bytes (`f10` is before `f2`).
+    let paths: Vec<String> = (0..600).map(|n| format!("w/f{n}")).collect();
+    let tree: Vec<(&str, Node<'_>)> = paths
+        .iter()
+        .map(|path| (path.as_str(), Node::File(b"x")))
+        .collect();
+    let mut files = rig.reader(&tree);
+    let listing = must(files.list(&at(rig, "w")), "list of a wide directory");
+    let mut want: Vec<String> = (0..600).map(|n| format!("f{n}")).collect();
+    want.sort();
+    same(
+        listing.into_iter().map(|e| e.rel).collect::<Vec<_>>(),
+        want,
+        "the listing of 600 entries, sorted bytewise by rel",
     );
 }
 
@@ -230,10 +293,27 @@ fn listing_a_file_and_reading_a_directory_or_a_symlink_are_refused<R: OutputFile
         ("r/dir/inside", Node::File(b"y")),
         ("r/link", Node::Link("r/file")),
         ("r/link_to_dir", Node::Link("r/dir")),
+        ("r/dangling", Node::Link("r/nowhere")),
     ]);
     let (file, dir, link) = (at(rig, "r/file"), at(rig, "r/dir"), at(rig, "r/link"));
     let (link_to_dir, slashed) = (at(rig, "r/link_to_dir"), at(rig, "r/link/"));
+    let dangling = at(rig, "r/dangling");
     let cases = [
+        (
+            "read of a symlink to a directory",
+            &link_to_dir,
+            must_err(files.read(&link_to_dir), "read"),
+        ),
+        (
+            "read of a dangling symlink",
+            &dangling,
+            must_err(files.read(&dangling), "read"),
+        ),
+        (
+            "list of a dangling symlink",
+            &dangling,
+            must_err(files.list(&dangling), "list"),
+        ),
         ("list of a file", &file, must_err(files.list(&file), "list")),
         (
             "list of a symlink to a directory",
@@ -329,12 +409,19 @@ fn a_path_that_is_relative_or_climbs_is_refused<R: OutputFilesRig>(rig: &R) {
 }
 
 fn an_entry_of_a_listed_directory_is_read_through_its_joined_path<R: OutputFilesRig>(rig: &R) {
-    // Bytes that are not text, a file past any buffer a reader might size at 4 KiB or 64 KiB,
-    // an empty file, a hidden one, one three directories down and names that hold two dots
-    // without being a `..` part.
+    // Bytes that are not text, a file past any buffer a reader might size at 4 KiB, 64 KiB,
+    // 128 KiB or a megabyte, an empty file (below the top too), a hidden one, ones three and
+    // seven directories down, names that hold two dots without being a `..` part, and names
+    // with a space, a newline or a character that is not ASCII, in a file or a directory.
     let binary: &[u8] = &[0xff, 0xfe, 0x00, 0x80, 0xc3, 0x28];
-    let big: Vec<u8> = (0..=255u8).cycle().take(70_000).collect();
+    let big: Vec<u8> = (0..=255u8).cycle().take(2_100_000).collect();
     let mut files = rig.reader(&[
+        ("e/sp ace", Node::File(b"S")),
+        ("e/\u{e9}.txt", Node::File(b"E")),
+        ("e/new\nline", Node::File(b"N")),
+        ("e/n/empty", Node::File(b"")),
+        ("e/dir with space/x", Node::File(b"W")),
+        ("e/g/h/i/j/k/l/m", Node::File(b"M")),
         ("e/a", Node::File(b"A")),
         ("e/n/b", Node::File(b"B")),
         ("e/n/c", Node::File(b"C")),
@@ -350,7 +437,13 @@ fn an_entry_of_a_listed_directory_is_read_through_its_joined_path<R: OutputFiles
     ]);
     let dir = at(rig, "e");
     let listing = must(files.list(&dir), "list");
-    let wanted: [(&str, &[u8]); 12] = [
+    let wanted: [(&str, &[u8]); 18] = [
+        ("sp ace", b"S"),
+        ("\u{e9}.txt", b"E"),
+        ("new\nline", b"N"),
+        ("n/empty", b""),
+        ("dir with space/x", b"W"),
+        ("g/h/i/j/k/l/m", b"M"),
         (".hidden", b"H"),
         ("..dots", b"K"),
         ("a", b"A"),

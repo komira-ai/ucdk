@@ -74,9 +74,10 @@ fn an_entry_reads_back_what_was_written<R: StoreRig>(rig: &R) {
     let mut store = rig.store();
     let k = key("build", "g1", "tool");
     // Bytes that are not text, a file past any buffer a store might size at a few kilobytes
-    // and an empty file are entries like any other.
+    // and an empty file are entries like any other, and so are paths as deep as an OCI layout's
+    // blobs and deeper. A path written twice holds what the second write gave it.
     let binary: &[u8] = &[0xff, 0xfe, 0x00, 0x80, 0xc3, 0x28];
-    let big: Vec<u8> = (0..=255u8).cycle().take(10_000).collect();
+    let big: Vec<u8> = (0..=255u8).cycle().take(100_000).collect();
     {
         let mut writer = must(store.begin(&k), "begin");
         must(writer.put_file("tool", b"bytes"), "put_file");
@@ -84,14 +85,27 @@ fn an_entry_reads_back_what_was_written<R: StoreRig>(rig: &R) {
             writer.put_file("dir/inner", b"inner"),
             "put_file of a nested path",
         );
+        must(
+            writer.put_file("blobs/sha256/abc", b"blob"),
+            "put_file of a path three parts deep",
+        );
+        must(
+            writer.put_file("a/b/c/d/e/f/g", b"deep"),
+            "put_file of a path seven parts deep",
+        );
         must(writer.put_file("binary", binary), "put_file of bytes");
         must(writer.put_file("big", &big), "put_file of a large file");
         must(writer.put_file("empty", b""), "put_file of an empty file");
+        must(writer.put_file("rewritten", b"one"), "the first put_file");
+        must(writer.put_file("rewritten", b"two"), "the second put_file");
     }
     for (rel, want) in [
         ("binary", binary),
         ("big", big.as_slice()),
         ("empty", b"".as_slice()),
+        ("blobs/sha256/abc", b"blob".as_slice()),
+        ("a/b/c/d/e/f/g", b"deep".as_slice()),
+        ("rewritten", b"two".as_slice()),
     ] {
         same(
             must(store.get(&k, rel), "get"),
@@ -104,16 +118,27 @@ fn an_entry_reads_back_what_was_written<R: StoreRig>(rig: &R) {
     listed.sort();
     same(
         listed,
-        ["big", "binary", "dir/inner", "empty", "tool"]
-            .map(str::to_owned)
-            .to_vec(),
-        "the paths of the entry, the empty file among them",
+        [
+            "a/b/c/d/e/f/g",
+            "big",
+            "binary",
+            "blobs/sha256/abc",
+            "dir/inner",
+            "empty",
+            "rewritten",
+            "tool",
+        ]
+        .map(str::to_owned)
+        .to_vec(),
+        "the paths of the entry, the empty file and the deep ones among them",
     );
-    same(
-        must(store.get(&k, "dir"), "get"),
-        None,
-        "a directory of the entry is no file",
-    );
+    for directory in ["dir", "blobs/sha256"] {
+        same(
+            must(store.get(&k, directory), "get"),
+            None,
+            &format!("{directory}, a directory of the entry, is no file"),
+        );
+    }
     same(
         must(store.get(&k, "tool"), "get"),
         Some(b"bytes".to_vec()),
@@ -134,22 +159,32 @@ fn an_entry_reads_back_what_was_written<R: StoreRig>(rig: &R) {
 fn an_entry_is_listed_exactly<R: StoreRig>(rig: &R) {
     let mut store = rig.store();
     let k = key("build", "g1", "image");
+    // Paths that differ only in case, in a trailing space or in the composition of a character
+    // are different paths, a dotfile is a file, and more than a hundred paths are all listed.
+    let mut names: Vec<String> = ["z", "a/b", "m", "X", "x", "a", "a ", ".hidden", ".d/e"]
+        .map(str::to_owned)
+        .to_vec();
+    names.extend(["e\u{301}", "\u{e9}"].map(str::to_owned));
+    names.extend((0..120).map(|n| format!("many/f{n:03}")));
     {
         let mut writer = must(store.begin(&k), "begin");
-        for rel in ["z", "a/b", "m", "X", "x"] {
+        for rel in &names {
             must(writer.put_file(rel, rel.as_bytes()), "put_file");
         }
     }
+    let mut want = names.clone();
+    want.sort();
     same(
         must(store.files(&k), "files"),
-        ["X", "a/b", "m", "x", "z"].map(str::to_owned).to_vec(),
-        "the paths of the entry, sorted bytewise, two that differ only in case among them",
+        want,
+        "the paths of the entry, sorted bytewise",
     );
-    for rel in ["X", "x"] {
+    // What a read of a nested path does is the business of `an_entry_reads_back_what_was_written`.
+    for rel in names.iter().filter(|rel| !rel.contains('/')) {
         same(
             must(store.get(&k, rel), "get"),
             Some(rel.as_bytes().to_vec()),
-            &format!("the file {rel}, which another path differs from only in case"),
+            &format!("the file {rel:?}, which another path may differ from only a little"),
         );
     }
 }
@@ -181,17 +216,24 @@ fn a_second_begin_on_one_key_is_refused<R: StoreRig>(rig: &R) {
         true,
         "the second begin of an entry that holds nothing is Refused",
     );
+    let mut listed = must(store.keys(), "keys");
+    listed.sort();
+    let mut want = vec![k, empty];
+    want.sort();
+    same(listed, want, "the keys: an entry that holds nothing is one");
 }
 
 fn keys_of_two_scopes_are_listed_apart<R: StoreRig>(rig: &R) {
     let mut store = rig.store();
-    // Three scopes that share a member name, and a member whose name starts with another's.
-    let made = [
+    // Three scopes that share a member name, a member whose name starts with another's, and
+    // more keys than a store might list at most.
+    let mut made = vec![
         key("build", "g1", "tool"),
         key("build", "g1", "tool2"),
         key("build", "g2", "tool"),
         key("test", "g1", "tool"),
     ];
+    made.extend((0..120).map(|n| key("build", "g3", &format!("m{n:03}"))));
     for (n, k) in made.iter().enumerate() {
         must(
             must(store.begin(k), "begin").put_file(&format!("f{n}"), &[n as u8]),
@@ -200,7 +242,7 @@ fn keys_of_two_scopes_are_listed_apart<R: StoreRig>(rig: &R) {
     }
     let mut listed = must(store.keys(), "keys");
     listed.sort();
-    let mut want = made.to_vec();
+    let mut want = made.clone();
     want.sort();
     same(listed, want, "the keys of the scopes and members");
     for (n, k) in made.iter().enumerate() {
@@ -229,11 +271,18 @@ fn paths_that_escape_an_entry_are_refused<R: StoreRig>(rig: &R) {
                 &format!("the path {bad:?} is Refused"),
             );
         }
+        // A refused path does not spoil the writer: the next good one is written.
+        must(
+            writer.put_file("y", b"after"),
+            "put_file of a good path after refused ones",
+        );
     }
+    let mut files = must(store.files(&k), "files");
+    files.sort();
     same(
-        must(store.files(&k), "files"),
-        vec!["x".to_owned()],
-        "the files after refused paths: only the good one",
+        files,
+        vec!["x".to_owned(), "y".to_owned()],
+        "the files after refused paths: only the good ones",
     );
     // A path nobody wrote is nothing, however it climbs or spells the file that is there.
     for climbing in ["../x", "a/../x", "./x", "/x", "x/"] {
@@ -282,9 +331,16 @@ fn discard_removes_every_path_of_an_entry<R: StoreRig>(rig: &R) {
     let mut store = rig.store();
     let k = key("build", "g1", "image");
     let sibling = key("build", "g1", "other");
-    let paths = ["a", "b/c", "d"];
+    // A key that the discarded one is a prefix of is another entry, begun before the
+    // discarded one so that a begin must not mind it.
+    let longer = key("build", "g1", "image2");
+    let paths = ["a", "b/c", "d", "blobs/sha256/abc", "x/y/z/w"];
+    must(
+        must(store.begin(&longer), "begin").put_file("l", b"longer"),
+        "put_file",
+    );
     {
-        let mut writer = must(store.begin(&k), "begin");
+        let mut writer = must(store.begin(&k), "begin of a key a longer one starts with");
         for rel in paths {
             must(writer.put_file(rel, b"x"), "put_file");
         }
@@ -301,15 +357,24 @@ fn discard_removes_every_path_of_an_entry<R: StoreRig>(rig: &R) {
             &format!("{rel} after the discard"),
         );
     }
+    let mut kept = must(store.keys(), "keys");
+    kept.sort();
+    let mut want = vec![sibling.clone(), longer.clone()];
+    want.sort();
     same(
-        must(store.keys(), "keys"),
-        vec![sibling.clone()],
-        "the keys after the discard: the other entry alone",
+        kept,
+        want,
+        "the keys after the discard: the other entries alone, the one it is a prefix of too",
     );
     same(
         must(store.get(&sibling, "o"), "get"),
         Some(b"keep".to_vec()),
         "the other entry after the discard",
+    );
+    same(
+        must(store.get(&longer, "l"), "get"),
+        Some(b"longer".to_vec()),
+        "the entry whose key the discarded one is a prefix of",
     );
     drop(must(store.begin(&k), "a begin on a key that was discarded"));
     // An entry that is gone, or never was, is discarded without a fault.

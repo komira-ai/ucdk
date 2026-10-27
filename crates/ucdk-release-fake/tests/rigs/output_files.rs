@@ -469,9 +469,14 @@ impl OutputFiles for Flawed {
                 }
             }
             Some(Flaw::NestedEntryIsUnreadable) if result.is_ok() => {
-                let nested = self
-                    .listed_above(path)
-                    .is_some_and(|dir| path[dir.len() + 1..].contains('/'));
+                // The parts that name something: a `.` part and an empty part name nothing.
+                let nested = self.listed_above(path).is_some_and(|dir| {
+                    path[dir.len() + 1..]
+                        .split('/')
+                        .filter(|part| !part.is_empty() && *part != ".")
+                        .count()
+                        > 1
+                });
                 if nested {
                     result = Err(SeamError::Permanent(format!("{path} is not an entry")));
                 }

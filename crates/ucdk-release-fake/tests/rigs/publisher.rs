@@ -84,6 +84,8 @@ pub struct Flawed {
     calls: u32,
     commit_calls: u32,
     lost: bool,
+    /// A commit was arranged to lose a race.
+    raced: bool,
     list_lags: bool,
     group_fails: bool,
     read_offset: usize,
@@ -112,6 +114,7 @@ impl PublisherRig for FakePublisherRig {
             calls: 0,
             commit_calls: 0,
             lost: false,
+            raced: false,
             list_lags: false,
             group_fails: false,
             read_offset: 0,
@@ -127,12 +130,15 @@ impl PublisherRig for FakePublisherRig {
             Arrangement::StagedByAnother { coordinate, bytes } => {
                 p.inner.stage_other_bytes(coordinate, bytes);
             }
-            Arrangement::RaceNextCommit(bytes) => p.inner.race_next_commit(bytes),
+            Arrangement::RaceNextCommit(bytes) => {
+                p.raced = true;
+                p.inner.race_next_commit(bytes);
+            }
             Arrangement::LoseAnswerAfterCommit => p.inner.lose_answer_after_commit(next_commit),
             Arrangement::LoseAnswerBeforeCommit => p.inner.lose_answer_before_commit(next_commit),
             Arrangement::FailAfterCommit => p.inner.fail_after_commit(next_commit),
             Arrangement::CommitSetFailsWhole => {
-                if p.flaw == Some(Flaw::SetCommitIsTorn) {
+                if p.flaw == Some(Flaw::SetCommitIsTorn) && p.shape.stages {
                     p.inner.torn_commit();
                 } else {
                     p.inner.commit_set_fails_whole();
@@ -688,7 +694,10 @@ impl Publisher for Flawed {
         if let Some(item) = first {
             let held = self.inner.bytes(item.coordinate).map(<[u8]>::to_vec);
             let ours = item.file.bytes.to_vec();
-            if self.is(Flaw::CommitOverYankedCommits) && self.inner.is_yanked(item.coordinate) {
+            if self.is(Flaw::CommitOverYankedCommits)
+                && self.shape.stages
+                && self.inner.is_yanked(item.coordinate)
+            {
                 return Ok(CommitAnswer::Committed);
             }
             if self.is(Flaw::SecondCommitOfTheSameBytesIsCommitted)
@@ -708,13 +717,15 @@ impl Publisher for Flawed {
         let result = self.inner.commit(g, items);
         match (self.flaw, result, first) {
             (Some(Flaw::ARacedCommitOverwrites), Ok(CommitAnswer::Duplicate), Some(item))
-                if was_staged =>
+                if was_staged && self.raced =>
             {
                 self.inner
                     .present_different(item.coordinate, item.file.bytes);
                 Ok(CommitAnswer::Committed)
             }
-            (Some(Flaw::TransientAfterCommitIsPermanent), Err(SeamError::Transient(_)), _) => {
+            (Some(Flaw::TransientAfterCommitIsPermanent), Err(SeamError::Transient(_)), _)
+                if self.shape.stages =>
+            {
                 Err(SeamError::Permanent("the commit failed".to_owned()))
             }
             (_, Err(SeamError::Unknown(why)), _) => {
