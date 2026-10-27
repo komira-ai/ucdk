@@ -100,7 +100,7 @@ fn table() -> Vec<(Stub, &'static [&'static str])> {
 #[test]
 fn each_stub_of_what_a_read_gives_away_or_a_call_sends_fails_the_scenarios_that_hold_it() {
     let table = table();
-    assert_eq!(table.len(), 23,"the number of stubs of the table");
+    assert_eq!(table.len(), 23, "the number of stubs of the table");
     further_stubs_fail_exactly(
         "publisher",
         &names(&publisher_scenarios::<FakePublisherRig>()),

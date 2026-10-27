@@ -11,8 +11,8 @@ use ucdk_release_proto::v1::{Coordinate, Reason, Stamped};
 use super::publisher_gates::skips_that_name_a_declared_capability;
 use super::publisher_list::publisher_scenarios;
 use super::publisher_rig::{
-    Arrangement, ChannelShape, PublisherRig, Set, built, fetched, fetched_by_a_reader, looked,
-    commit, observed, plain_shapes, present_held, publish, sha, siblings_beside, stage,
+    Arrangement, ChannelShape, PublisherRig, Set, built, commit, fetched, fetched_by_a_reader,
+    looked, observed, plain_shapes, present_held, publish, sha, siblings_beside, stage,
     staged_held, stranger,
 };
 use super::{must, must_err, must_some, same};
