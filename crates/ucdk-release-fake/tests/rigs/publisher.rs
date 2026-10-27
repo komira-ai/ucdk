@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use ucdk_core::ManualClock;
+use ucdk_core::{Clock, ManualClock};
 use ucdk_release::codec::GrantPhase;
 use ucdk_release::publish::{Held, Presence};
 use ucdk_release_fake::{FakeGrantSource, FakeRegistry, JobClaims, Read, coordinate_key};
@@ -357,6 +357,22 @@ impl Flawed {
             .collect()
     }
 
+    /// Whether `g` is a grant of `scope` for this repository that has not expired and names
+    /// every coordinate of `ks`.
+    fn is_good_for(&self, g: &Grant, scope: &str, ks: &[Coordinate]) -> bool {
+        let text = String::from_utf8_lossy(g.secret()).into_owned();
+        let mut lines = text.lines();
+        let fresh = g.expires_ms().is_none_or(|e| self.clock.now_millis() < e);
+        let (first, second) = (lines.next(), lines.next());
+        let named: Vec<&str> = lines.collect();
+        first == Some(scope)
+            && second == Some(LOCATION)
+            && fresh
+            && ks
+                .iter()
+                .all(|k| named.contains(&coordinate_key(k).as_str()))
+    }
+
     /// The bytes the caller staged at `k` that are still staged, as the stub saw them.
     fn staged_bytes(&self, k: &Coordinate) -> Option<Vec<u8>> {
         if !self.inner.is_staged(k) {
@@ -623,16 +639,13 @@ impl Publisher for Flawed {
 
     fn abort(&mut self, g: &Grant, ks: &[Coordinate]) -> Result<(), SeamError> {
         self.calls += 1;
-        if self.is(Flaw::AbortDoesNothing) && scope_of(g) == "stage" {
+        // A stub that breaks what an abort does still refuses a grant it should refuse.
+        if self.is(Flaw::AbortDoesNothing) && self.is_good_for(g, "stage", ks) {
             return Ok(());
         }
         if self.is(Flaw::AbortGivesBackAllStaged) && scope_of(g) == "stage" {
-            let mut all = self.known_where(|me, c| me.inner.is_staged(c));
-            for k in ks {
-                if !all.contains(k) {
-                    all.push(k.clone());
-                }
-            }
+            self.inner.abort(g, ks)?;
+            let all = self.known_where(|me, c| me.inner.is_staged(c));
             let grant = self.internal(GrantPhase::Stage, &all);
             return self.inner.abort(&grant, &all);
         }

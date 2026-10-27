@@ -250,6 +250,59 @@ fn a_grant_covers_exactly_the_coordinates_asked<R: GrantSourceRig>(rig: &R) {
             &format!("what a {phase:?} grant covers"),
         );
     }
+    // A declaration that shares no name with the one above: the grant follows the request.
+    let (custom, job) = custom_declaration();
+    for (phase, scope) in [
+        (GrantPhase::Stage, "s-custom"),
+        (GrantPhase::Commit, "c-custom"),
+    ] {
+        let mut source = rig.source(&setup(job.clone()));
+        let grant = must(
+            source.grant(&request(&custom, phase, &coords)),
+            &format!("a {phase:?} grant for another declaration"),
+        );
+        same(
+            rig.content(&source, &grant),
+            GrantContent {
+                scope: scope.to_owned(),
+                repository: "elsewhere/repo".to_owned(),
+                coordinates: coords.to_vec(),
+            },
+            &format!("what a {phase:?} grant covers when the declaration names its own scopes"),
+        );
+    }
+}
+
+/// A declaration that shares nothing with [`federated_repository`]: its location, the names of
+/// its scopes and every claim differ. The claims of the job that it admits come with it.
+fn custom_declaration() -> (Repository, JobClaims) {
+    let claim = |text: &str| text.to_owned();
+    let pinned = BTreeMap::from([(claim("branch"), claim("trunk"))]);
+    let repository = Repository {
+        r#type: ArtifactType::File as i32,
+        location: claim("elsewhere/repo"),
+        visibility: Visibility::Private as i32,
+        push: Some(PushIdentity {
+            kind: Some(Kind::Federated(Federated {
+                subject: claim("custom-subject"),
+                audience: claim("custom-audience"),
+                exceptional_subject: claim("custom-exceptional"),
+                environment: claim("custom-env"),
+                exceptional_environment: claim("custom-env-exceptional"),
+                pinned_claims: pinned.clone(),
+                stage_scope: claim("s-custom"),
+                commit_scope: claim("c-custom"),
+                read_scope: claim("r-custom"),
+            })),
+        }),
+    };
+    let job = JobClaims {
+        subject: claim("custom-subject"),
+        audience: claim("custom-audience"),
+        environment: claim("custom-env"),
+        pinned,
+    };
+    (repository, job)
 }
 
 fn a_differing_claim_is_refused_before_any_exchange<R: GrantSourceRig>(rig: &R) {
@@ -289,6 +342,41 @@ fn a_differing_claim_is_refused_before_any_exchange<R: GrantSourceRig>(rig: &R) 
             "environment",
             JobClaims {
                 environment: "preview".to_owned(),
+                ..job.clone()
+            },
+        ),
+        (
+            "subject in another case",
+            JobClaims {
+                subject: job.subject.to_uppercase(),
+                ..job.clone()
+            },
+        ),
+        (
+            "audience in another case",
+            JobClaims {
+                audience: job.audience.to_uppercase(),
+                ..job.clone()
+            },
+        ),
+        (
+            "environment in another case",
+            JobClaims {
+                environment: job.environment.to_uppercase(),
+                ..job.clone()
+            },
+        ),
+        (
+            "pinned claim value in another case",
+            JobClaims {
+                pinned: BTreeMap::from([("ref".to_owned(), "MAIN".to_owned())]),
+                ..job.clone()
+            },
+        ),
+        (
+            "pinned claim name in another case",
+            JobClaims {
+                pinned: BTreeMap::from([("REF".to_owned(), "main".to_owned())]),
                 ..job.clone()
             },
         ),
@@ -334,6 +422,13 @@ fn a_differing_claim_is_refused_before_any_exchange<R: GrantSourceRig>(rig: &R) 
             "audience",
             JobClaims {
                 audience: "elsewhere".to_owned(),
+                ..exceptional.clone()
+            },
+        ),
+        (
+            "subject in another case",
+            JobClaims {
+                subject: exceptional.subject.to_uppercase(),
                 ..exceptional.clone()
             },
         ),
@@ -489,6 +584,22 @@ fn a_read_grant_carries_the_read_scope_and_covers_exactly_the_coordinates_asked<
             coordinates: coords.to_vec(),
         },
         "what a read grant covers",
+    );
+    // The scope and the location are those of the declaration the request carries.
+    let (custom, job) = custom_declaration();
+    let mut source = rig.source(&setup(job));
+    let grant = must(
+        source.grant(&request(&custom, GrantPhase::Read, &coords)),
+        "a read grant for another declaration",
+    );
+    same(
+        rig.content(&source, &grant),
+        GrantContent {
+            scope: "r-custom".to_owned(),
+            repository: "elsewhere/repo".to_owned(),
+            coordinates: coords.to_vec(),
+        },
+        "what a read grant covers when the declaration names its own scopes",
     );
 }
 

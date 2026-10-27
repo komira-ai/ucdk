@@ -108,6 +108,10 @@ fn each_further_publisher_stub_fails_the_scenarios_that_hold_it() {
 fn further_store() {
     const READ_BACK: &str = "an_entry_reads_back_what_was_written";
     const ESCAPES: &str = "paths_that_escape_an_entry_are_refused";
+    const LISTED: &str = "an_entry_is_listed_exactly";
+    const SECOND_BEGIN: &str = "a_second_begin_on_one_key_is_refused";
+    const KEYS: &str = "keys_of_two_scopes_are_listed_apart";
+    const DISCARD: &str = "discard_removes_every_path_of_an_entry";
     further_stubs_fail_exactly(
         "store",
         &names(&store_scenarios::<FakeStoreRig>()),
@@ -120,12 +124,12 @@ fn further_store() {
             (Store::WriterAcceptsADotPart, &[ESCAPES]),
             (Store::WriterAcceptsControlCharacters, &[ESCAPES]),
             (Store::GetResolvesClimbs, &[ESCAPES]),
-            (Store::DiscardWipesEveryEntry, &[]),
-            (Store::DiscardOfAMissingEntryIsAnError, &[]),
-            (Store::FilesMatchedByKeyPrefix, &[]),
-            (Store::PathsAreCaseFolded, &[]),
-            (Store::GetTakesATrailingSlash, &[]),
-            (Store::EmptyEntryIsNoEntry, &[]),
+            (Store::DiscardWipesEveryEntry, &[DISCARD]),
+            (Store::DiscardOfAMissingEntryIsAnError, &[DISCARD]),
+            (Store::FilesMatchedByKeyPrefix, &[KEYS]),
+            (Store::PathsAreCaseFolded, &[LISTED]),
+            (Store::GetTakesATrailingSlash, &[ESCAPES]),
+            (Store::EmptyEntryIsNoEntry, &[SECOND_BEGIN]),
         ],
         |flaw| run_store_kit(&FakeStoreRig::flawed(flaw)),
     );
@@ -136,6 +140,8 @@ fn further_grant_source() {
     const DIFFERING: &str = "a_differing_claim_is_refused_before_any_exchange";
     const EXCEPTIONAL: &str = "an_exceptional_run_presents_the_exceptional_subject";
     const LIMIT: &str = "more_coordinates_than_the_limit_are_refused_before_the_exchange";
+    const READ: &str =
+        "a_read_grant_carries_the_read_scope_and_covers_exactly_the_coordinates_asked";
     further_stubs_fail_exactly(
         "grant source",
         &names(&grant_source_scenarios::<FakeGrantRig>()),
@@ -148,8 +154,8 @@ fn further_grant_source() {
             (Grants::ExceptionalIgnoresEnvironment, &[DIFFERING]),
             (Grants::ExceptionalIgnoresAudienceAndPinned, &[DIFFERING]),
             (Grants::LimitIsCheckedForStageOnly, &[LIMIT]),
-            (Grants::IgnoresTheDeclaredScopesAndLocation, &[]),
-            (Grants::ClaimsMatchedIgnoringCase, &[]),
+            (Grants::IgnoresTheDeclaredScopesAndLocation, &[COVERS, READ]),
+            (Grants::ClaimsMatchedIgnoringCase, &[DIFFERING]),
         ],
         |flaw| run_grant_source_kit(&FakeGrantRig::flawed(flaw)),
     );
@@ -177,9 +183,9 @@ fn further_output_files() {
             (Files::TrailingSlashFollowsStat, &[STAT]),
             (Files::ReadRefusesDotDotNames, &[READ_THROUGH]),
             (Files::FollowsNestedLinks, &[DESCENDED]),
-            (Files::StatBelowAFileIsAnError, &[]),
-            (Files::ListOfAnEmptyDirectoryIsPermanent, &[]),
-            (Files::ReadTruncatesAt64k, &[]),
+            (Files::StatBelowAFileIsAnError, &[STAT]),
+            (Files::ListOfAnEmptyDirectoryIsPermanent, &[KINDS]),
+            (Files::ReadTruncatesAt64k, &[READ_THROUGH]),
         ],
         |flaw| run_output_files_kit(&FakeFilesRig::flawed(flaw)),
     );
@@ -198,9 +204,18 @@ fn further_process_runner() {
                 Process::NoPathFallsBackToOwn,
                 &["a_name_found_nowhere_on_the_childs_path_is_unstartable"],
             ),
-            (Process::AStopPoisonsTheRunner, &[]),
-            (Process::EnvironmentLeaksIntoTheNextRun, &[]),
-            (Process::LastPathEntryWins, &[]),
+            (
+                Process::AStopPoisonsTheRunner,
+                &["the_runner_beats_on_progress_and_stops_the_child_when_told"],
+            ),
+            (
+                Process::EnvironmentLeaksIntoTheNextRun,
+                &["argv_and_environment_are_exactly_what_was_given"],
+            ),
+            (
+                Process::LastPathEntryWins,
+                &["a_bare_name_is_resolved_on_the_childs_path_and_never_the_runners"],
+            ),
         ],
         |flaw| run_process_runner_kit(&FakeProcessRig::flawed(flaw)),
     );
@@ -216,6 +231,7 @@ fn further_build_system() {
     const STAMP: &str = "the_stamp_reaches_a_build_only_through_placeholders";
     const ONE_OUTPUT: &str = "a_build_lists_exactly_one_output";
     const SYMLINK: &str = "a_symlink_in_an_output_is_refused";
+    const RUN_SPECIFIC: &str = "nothing_run_specific_in_the_bytes";
     let scenarios = names(&build_system_scenarios::<FakeBuildRig>());
     for kind in [BuildSystemKind::Buck2, BuildSystemKind::Bazel] {
         further_stubs_fail_exactly(
@@ -236,12 +252,18 @@ fn further_build_system() {
                     Build::BaseFlagsRepeatedAfterTheOwnedFlag,
                     &[FLAGS, "ucdk_owned_flags_come_after_the_authors"],
                 ),
-                (Build::DirectoryIsListedAsAFile, &[ONE_OUTPUT]),
-                (Build::DirectoryOutputIsRefused, &[ONE_OUTPUT, COPY_OUT]),
+                (
+                    Build::DirectoryIsListedAsAFile,
+                    &[SAME_BYTES, ONE_OUTPUT, COPY_OUT],
+                ),
+                (
+                    Build::DirectoryOutputIsRefused,
+                    &[SAME_BYTES, ONE_OUTPUT, RUN_SPECIFIC, COPY_OUT],
+                ),
                 (Build::NestedSymlinkIsAccepted, &[SYMLINK]),
                 (Build::CopyOutOfADirectoryEscapes, &[COPY_OUT]),
-                (Build::CopyOutOfADirectoryWritesGarbage, &[]),
-                (Build::CopyOutOfADirectoryCarriesTheClock, &[]),
+                (Build::CopyOutOfADirectoryWritesGarbage, &[SAME_BYTES]),
+                (Build::CopyOutOfADirectoryCarriesTheClock, &[RUN_SPECIFIC]),
             ],
             |flaw| run_build_system_kit(&FakeBuildRig::flawed(kind, flaw)),
         );
@@ -265,6 +287,9 @@ fn further_publisher() {
     const NEWEST: &str = "newest_lists_every_held_coordinate_of_the_name";
     const ABORT: &str = "abort_gives_staged_state_back_and_never_touches_a_committed_coordinate";
     const PHASE: &str = "a_grant_of_the_wrong_phase_is_denied_and_nothing_happens";
+    const FOREIGN: &str = "a_grant_for_another_repository_sends_nothing";
+    const EXPIRED: &str = "an_expired_grant_is_refused_and_nothing_happens";
+    const OWN_STAGED: &str = "a_stage_over_ones_own_staged_coordinate_is_duplicate";
     const ABSENT: &str = "observe_absent_is_not_an_error";
     const LIST: &str = "list_may_lag_but_observe_is_exact";
     const DECLARED: &str =
@@ -307,19 +332,41 @@ fn further_publisher() {
             (Registry::ListIgnoresTheChannel, &[LIST]),
             (Registry::ListIgnoresThePrefix, &[LIST]),
             (Registry::ObserveDropsAForeignSet, &[DECLARED]),
-            (Registry::StrangerObservesPrivateWithASet, &[]),
-            (Registry::BadGrantTakenBy(Bad::Foreign, Call::Commit), &[]),
-            (Registry::BadGrantTakenBy(Bad::Foreign, Call::Abort), &[]),
-            (Registry::BadGrantTakenBy(Bad::Foreign, Call::Yank), &[]),
-            (Registry::BadGrantTakenBy(Bad::Expired, Call::Commit), &[]),
-            (Registry::BadGrantTakenBy(Bad::Expired, Call::Abort), &[]),
-            (Registry::BadGrantTakenBy(Bad::Expired, Call::Yank), &[]),
-            (Registry::BadGrantTakenBy(Bad::Uncovered, Call::Abort), &[]),
-            (Registry::BadGrantTakenBy(Bad::Uncovered, Call::Yank), &[]),
-            (Registry::OnlyTheLastCoordinateIsCovered, &[]),
-            (Registry::SecondCommitOfTheSameBytesIsCommitted, &[]),
-            (Registry::StageOverOwnStagedSameBytesIsStaged, &[]),
-            (Registry::StageOverOwnStagedOverwrites, &[]),
+            (Registry::StrangerObservesPrivateWithASet, &[PRIVATE]),
+            (
+                Registry::BadGrantTakenBy(Bad::Foreign, Call::Commit),
+                &[FOREIGN],
+            ),
+            (
+                Registry::BadGrantTakenBy(Bad::Foreign, Call::Abort),
+                &[FOREIGN],
+            ),
+            (
+                Registry::BadGrantTakenBy(Bad::Foreign, Call::Yank),
+                &[FOREIGN],
+            ),
+            (
+                Registry::BadGrantTakenBy(Bad::Expired, Call::Commit),
+                &[EXPIRED],
+            ),
+            (
+                Registry::BadGrantTakenBy(Bad::Expired, Call::Abort),
+                &[EXPIRED],
+            ),
+            (
+                Registry::BadGrantTakenBy(Bad::Expired, Call::Yank),
+                &[EXPIRED],
+            ),
+            (
+                Registry::BadGrantTakenBy(Bad::Uncovered, Call::Abort),
+                &[PHASE],
+            ),
+            (
+                Registry::BadGrantTakenBy(Bad::Uncovered, Call::Yank),
+                &[PHASE],
+            ),
+            (Registry::OnlyTheLastCoordinateIsCovered, &[PHASE]),
+            (Registry::StageOverOwnStagedOverwrites, &[OWN_STAGED]),
         ],
         |flaw| run_publisher_kit(&FakePublisherRig::flawed(flaw)),
     );
@@ -731,6 +778,14 @@ fn publisher() {
             (
                 "duplicate_over_other_bytes_leaves_the_old_bytes",
                 Registry::StageOverOtherBytesIsStaged,
+            ),
+            (
+                "a_second_commit_of_the_same_bytes_is_duplicate",
+                Registry::SecondCommitOfTheSameBytesIsCommitted,
+            ),
+            (
+                "a_stage_over_ones_own_staged_coordinate_is_duplicate",
+                Registry::StageOverOwnStagedSameBytesIsStaged,
             ),
         ],
         |flaw| run_publisher_kit(&FakePublisherRig::flawed(flaw)),

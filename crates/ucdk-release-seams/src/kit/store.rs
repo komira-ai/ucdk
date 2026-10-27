@@ -136,15 +136,22 @@ fn an_entry_is_listed_exactly<R: StoreRig>(rig: &R) {
     let k = key("build", "g1", "image");
     {
         let mut writer = must(store.begin(&k), "begin");
-        for rel in ["z", "a/b", "m"] {
+        for rel in ["z", "a/b", "m", "X", "x"] {
             must(writer.put_file(rel, rel.as_bytes()), "put_file");
         }
     }
     same(
         must(store.files(&k), "files"),
-        vec!["a/b".to_owned(), "m".to_owned(), "z".to_owned()],
-        "the paths of the entry, sorted",
+        ["X", "a/b", "m", "x", "z"].map(str::to_owned).to_vec(),
+        "the paths of the entry, sorted bytewise, two that differ only in case among them",
     );
+    for rel in ["X", "x"] {
+        same(
+            must(store.get(&k, rel), "get"),
+            Some(rel.as_bytes().to_vec()),
+            &format!("the file {rel}, which another path differs from only in case"),
+        );
+    }
 }
 
 fn a_second_begin_on_one_key_is_refused<R: StoreRig>(rig: &R) {
@@ -165,18 +172,29 @@ fn a_second_begin_on_one_key_is_refused<R: StoreRig>(rig: &R) {
         Some(b"first".to_vec()),
         "the entry after the refused begin",
     );
+    // An entry that was begun and holds nothing is an entry: it is begun once.
+    let empty = key("build", "g1", "empty");
+    drop(must(store.begin(&empty), "begin of an entry left empty"));
+    let refusal = must_err(store.begin(&empty), "a second begin of an empty entry");
+    same(
+        matches!(refusal, SeamError::Refused(_)),
+        true,
+        "the second begin of an entry that holds nothing is Refused",
+    );
 }
 
 fn keys_of_two_scopes_are_listed_apart<R: StoreRig>(rig: &R) {
     let mut store = rig.store();
+    // Three scopes that share a member name, and a member whose name starts with another's.
     let made = [
         key("build", "g1", "tool"),
+        key("build", "g1", "tool2"),
         key("build", "g2", "tool"),
         key("test", "g1", "tool"),
     ];
     for (n, k) in made.iter().enumerate() {
         must(
-            must(store.begin(k), "begin").put_file("f", &[n as u8]),
+            must(store.begin(k), "begin").put_file(&format!("f{n}"), &[n as u8]),
             "put_file",
         );
     }
@@ -184,16 +202,12 @@ fn keys_of_two_scopes_are_listed_apart<R: StoreRig>(rig: &R) {
     listed.sort();
     let mut want = made.to_vec();
     want.sort();
-    same(
-        listed,
-        want,
-        "the keys of three scopes that share a member name",
-    );
-    for k in &made {
+    same(listed, want, "the keys of the scopes and members");
+    for (n, k) in made.iter().enumerate() {
         same(
             must(store.files(k), "files"),
-            vec!["f".to_owned()],
-            "the files of each entry",
+            vec![format!("f{n}")],
+            &format!("the files of {k}, and no file of another entry"),
         );
     }
 }
@@ -222,7 +236,7 @@ fn paths_that_escape_an_entry_are_refused<R: StoreRig>(rig: &R) {
         "the files after refused paths: only the good one",
     );
     // A path nobody wrote is nothing, however it climbs or spells the file that is there.
-    for climbing in ["../x", "a/../x", "./x", "/x"] {
+    for climbing in ["../x", "a/../x", "./x", "/x", "x/"] {
         same(
             matches!(store.get(&k, climbing), Ok(None) | Err(_)),
             true,
@@ -267,6 +281,7 @@ fn two_entries_do_not_touch_each_other<R: StoreRig>(rig: &R) {
 fn discard_removes_every_path_of_an_entry<R: StoreRig>(rig: &R) {
     let mut store = rig.store();
     let k = key("build", "g1", "image");
+    let sibling = key("build", "g1", "other");
     let paths = ["a", "b/c", "d"];
     {
         let mut writer = must(store.begin(&k), "begin");
@@ -274,6 +289,10 @@ fn discard_removes_every_path_of_an_entry<R: StoreRig>(rig: &R) {
             must(writer.put_file(rel, b"x"), "put_file");
         }
     }
+    must(
+        must(store.begin(&sibling), "begin").put_file("o", b"keep"),
+        "put_file",
+    );
     must(store.discard(&k), "discard");
     for rel in paths {
         same(
@@ -284,10 +303,22 @@ fn discard_removes_every_path_of_an_entry<R: StoreRig>(rig: &R) {
     }
     same(
         must(store.keys(), "keys"),
-        Vec::new(),
-        "the keys after the discard",
+        vec![sibling.clone()],
+        "the keys after the discard: the other entry alone",
     );
-    must(store.begin(&k), "a begin on a key that was discarded");
+    same(
+        must(store.get(&sibling, "o"), "get"),
+        Some(b"keep".to_vec()),
+        "the other entry after the discard",
+    );
+    drop(must(store.begin(&k), "a begin on a key that was discarded"));
+    // An entry that is gone, or never was, is discarded without a fault.
+    must(store.discard(&k), "a discard of the entry just begun");
+    must(store.discard(&k), "a discard of an entry that is gone");
+    must(
+        store.discard(&key("build", "g1", "never")),
+        "a discard of an entry never begun",
+    );
 }
 
 fn a_missing_entry_lists_as_empty<R: StoreRig>(rig: &R) {

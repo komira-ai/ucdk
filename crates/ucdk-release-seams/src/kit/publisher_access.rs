@@ -77,25 +77,102 @@ pub(super) fn public_read_needs_no_grant<R: PublisherRig>(rig: &R) {
     );
 }
 
+/// A channel in which each write has something to change: a committed coordinate to yank, two
+/// staged ones (one to commit, one to abort) and one nobody has written.
+struct Writes {
+    held: Set,
+    to_commit: Set,
+    to_abort: Set,
+    fresh: Set,
+    /// Every coordinate above, for a grant that names them all.
+    all: Set,
+}
+
+impl Writes {
+    /// Publishes `held` and stages `to_commit` and `to_abort` in `p`.
+    fn arranged<R: PublisherRig>(rig: &R, p: &mut R::Publisher) -> Self {
+        let writes = Self {
+            held: Set::of(&["h"]),
+            to_commit: Set::of(&["c"]),
+            to_abort: Set::of(&["x"]),
+            fresh: Set::of(&["n"]),
+            all: Set::of(&["h", "c", "x", "n"]),
+        };
+        publish(rig, p, &writes.held);
+        stage(rig, p, &writes.to_commit);
+        stage(rig, p, &writes.to_abort);
+        writes
+    }
+}
+
+/// Holds that a stage, a commit, an abort and a yank with a bad grant (`stage_grant` for the
+/// first and the third, `commit_grant` for the others) are each refused with `fault`, and that
+/// what each tried to change is as it was.
+fn every_write_refuses_a_bad_grant<R: PublisherRig>(
+    rig: &R,
+    p: &mut R::Publisher,
+    writes: &Writes,
+    (stage_grant, commit_grant): (&Grant, &Grant),
+    fault: &SeamError,
+    what: &str,
+) {
+    let blobs = writes.fresh.blobs();
+    let items = writes.fresh.items(&blobs);
+    same(
+        must_err(p.stage(stage_grant, &items), "a stage with a bad grant"),
+        fault.clone(),
+        &format!("the answer to a stage with a grant {what}"),
+    );
+    same(
+        observed(rig, p, GrantPhase::Stage, &writes.fresh, 0),
+        Presence::Absent,
+        &format!("the coordinate after a stage with a grant {what}"),
+    );
+    let blobs = writes.to_commit.blobs();
+    let items = writes.to_commit.items(&blobs);
+    same(
+        must_err(p.commit(commit_grant, &items), "a commit with a bad grant"),
+        fault.clone(),
+        &format!("the answer to a commit with a grant {what}"),
+    );
+    staged_held(observed(rig, p, GrantPhase::Stage, &writes.to_commit, 0));
+    same(
+        fetched(rig, p, &writes.to_commit.coords[0]),
+        None,
+        &format!("the bytes after a commit with a grant {what}"),
+    );
+    same(
+        must_err(
+            p.abort(stage_grant, &writes.to_abort.coords),
+            "an abort with a bad grant",
+        ),
+        fault.clone(),
+        &format!("the answer to an abort with a grant {what}"),
+    );
+    staged_held(observed(rig, p, GrantPhase::Stage, &writes.to_abort, 0));
+    same(
+        must_err(
+            p.yank(commit_grant, &writes.held.coords[0], "a reason"),
+            "a yank with a bad grant",
+        ),
+        fault.clone(),
+        &format!("the answer to a yank with a grant {what}"),
+    );
+    present_held(stranger(p, &writes.held.coords[0]));
+}
+
 pub(super) fn a_grant_for_another_repository_sends_nothing<R: PublisherRig>(rig: &R) {
     let mut p = rig.publisher(&ChannelShape::staging());
-    let set = Set::of(&["a"]);
-    let blobs = set.blobs();
-    let items = set.items(&blobs);
-    let foreign = rig.foreign_grant(&p, GrantPhase::Stage, &set.coords);
-    let refusal = must_err(
-        p.stage(&foreign, &items),
-        "a stage with a grant for another repository",
-    );
-    same(
-        denied(&refusal),
-        true,
-        "a grant for another repository is Denied",
-    );
-    same(
-        observed(rig, &mut p, GrantPhase::Stage, &set, 0),
-        Presence::Absent,
-        "the coordinate after the refused stage",
+    let writes = Writes::arranged(rig, &mut p);
+    let stage_grant = rig.foreign_grant(&p, GrantPhase::Stage, &writes.all.coords);
+    let commit_grant = rig.foreign_grant(&p, GrantPhase::Commit, &writes.all.coords);
+    every_write_refuses_a_bad_grant(
+        rig,
+        &mut p,
+        &writes,
+        (&stage_grant, &commit_grant),
+        &SeamError::GrantRefused(GrantFault::Denied),
+        "for another repository",
     );
 }
 
@@ -137,7 +214,7 @@ pub(super) fn a_grant_of_the_wrong_phase_is_denied_and_nothing_happens<R: Publis
     );
     staged_held(observed(rig, &mut p, GrantPhase::Stage, &set, 0));
     a_grant_covers_the_coordinates_it_names_and_no_others(rig);
-    a_yank_needs_the_commit_grant(rig);
+    a_yank_needs_the_commit_grant_that_names_it(rig);
     for shape in [ChannelShape::staging(), ChannelShape::private_grouped()] {
         a_stranger_writes_nothing(rig, &shape);
     }
@@ -192,53 +269,74 @@ fn stranger_or_read<R: PublisherRig>(rig: &R, p: &mut R::Publisher, k: &Coordina
     must(p.observe(&grant, k, &[]), "an observe with a read grant")
 }
 
-/// A grant of the right phase that names one coordinate does not stage or commit two.
+/// A grant of the right phase that names one of three coordinates does not stage, commit or
+/// abort the three, whichever of them it names (the first, the last or the one between).
 fn a_grant_covers_the_coordinates_it_names_and_no_others<R: PublisherRig>(rig: &R) {
     let mut p = rig.publisher(&ChannelShape::staging());
-    let pair = Set::of(&["c", "d"]);
-    let blobs = pair.blobs();
-    let items = pair.items(&blobs);
-    let stage_one = rig.grant(&p, GrantPhase::Stage, &pair.coords[..1]);
-    let refusal = must_err(
-        p.stage(&stage_one, &items),
-        "a stage of two coordinates with a grant for one",
-    );
-    same(
-        denied(&refusal),
-        true,
-        "a stage grant that does not cover every coordinate is Denied",
-    );
-    for at in 0..2 {
+    let trio = Set::of(&["c", "d", "e"]);
+    let blobs = trio.blobs();
+    let items = trio.items(&blobs);
+    for one in 0..3 {
+        let only = rig.grant(&p, GrantPhase::Stage, &trio.coords[one..=one]);
+        let refusal = must_err(
+            p.stage(&only, &items),
+            "a stage of three coordinates with a grant for one",
+        );
         same(
-            observed(rig, &mut p, GrantPhase::Stage, &pair, at),
-            Presence::Absent,
-            "a coordinate after the refused stage",
+            denied(&refusal),
+            true,
+            &format!("a stage grant that names only coordinate {one} of three is Denied"),
         );
     }
-    stage(rig, &mut p, &pair);
-    let commit_one = rig.grant(&p, GrantPhase::Commit, &pair.coords[..1]);
-    let refusal = must_err(
-        p.commit(&commit_one, &items),
-        "a commit of two coordinates with a grant for one",
-    );
-    same(
-        denied(&refusal),
-        true,
-        "a commit grant that does not cover every coordinate is Denied",
-    );
-    for coord in &pair.coords {
+    for at in 0..3 {
+        same(
+            observed(rig, &mut p, GrantPhase::Stage, &trio, at),
+            Presence::Absent,
+            "a coordinate after the refused stages",
+        );
+    }
+    stage(rig, &mut p, &trio);
+    for one in 0..3 {
+        let only = rig.grant(&p, GrantPhase::Commit, &trio.coords[one..=one]);
+        let refusal = must_err(
+            p.commit(&only, &items),
+            "a commit of three coordinates with a grant for one",
+        );
+        same(
+            denied(&refusal),
+            true,
+            &format!("a commit grant that names only coordinate {one} of three is Denied"),
+        );
+    }
+    for coord in &trio.coords {
         same(
             fetched(rig, &mut p, coord),
             None,
-            "the bytes of a coordinate after the refused commit",
+            "the bytes of a coordinate after the refused commits",
         );
+    }
+    for one in 0..3 {
+        let only = rig.grant(&p, GrantPhase::Stage, &trio.coords[one..=one]);
+        let refusal = must_err(
+            p.abort(&only, &trio.coords),
+            "an abort of three coordinates with a grant for one",
+        );
+        same(
+            denied(&refusal),
+            true,
+            &format!("a stage grant that names only coordinate {one} of three cannot abort them"),
+        );
+    }
+    for at in 0..3 {
+        staged_held(observed(rig, &mut p, GrantPhase::Stage, &trio, at));
     }
 }
 
-/// A stage grant does not yank, and what it tried to yank stays as it was.
-fn a_yank_needs_the_commit_grant<R: PublisherRig>(rig: &R) {
+/// Only a commit grant that names the coordinate yanks it, and what a refused yank tried to
+/// yank stays as it was.
+fn a_yank_needs_the_commit_grant_that_names_it<R: PublisherRig>(rig: &R) {
     let mut p = rig.publisher(&ChannelShape::staging());
-    let set = Set::of(&["a"]);
+    let (set, other) = (Set::of(&["a"]), Set::of(&["b"]));
     publish(rig, &mut p, &set);
     let stage_grant = rig.grant(&p, GrantPhase::Stage, &set.coords);
     let refusal = must_err(
@@ -250,26 +348,32 @@ fn a_yank_needs_the_commit_grant<R: PublisherRig>(rig: &R) {
         true,
         "a yank with a stage grant is Denied",
     );
+    let elsewhere = rig.grant(&p, GrantPhase::Commit, &other.coords);
+    let refusal = must_err(
+        p.yank(&elsewhere, &set.coords[0], "a reason"),
+        "a yank with a commit grant that does not name the coordinate",
+    );
+    same(
+        denied(&refusal),
+        true,
+        "a yank with a commit grant for another coordinate is Denied",
+    );
     present_held(stranger(&mut p, &set.coords[0]));
 }
 
 pub(super) fn an_expired_grant_is_refused_and_nothing_happens<R: PublisherRig>(rig: &R) {
     let mut p = rig.publisher(&ChannelShape::staging());
-    let set = Set::of(&["a"]);
-    let blobs = set.blobs();
-    let items = set.items(&blobs);
-    let old = rig.grant(&p, GrantPhase::Stage, &set.coords);
+    let writes = Writes::arranged(rig, &mut p);
+    let stage_grant = rig.grant(&p, GrantPhase::Stage, &writes.all.coords);
+    let commit_grant = rig.grant(&p, GrantPhase::Commit, &writes.all.coords);
     rig.advance(A_DAY_MS);
-    let refusal = must_err(p.stage(&old, &items), "a stage with an expired grant");
-    same(
-        refusal,
-        SeamError::GrantRefused(GrantFault::Expired),
-        "the answer to an expired grant",
-    );
-    same(
-        observed(rig, &mut p, GrantPhase::Stage, &set, 0),
-        Presence::Absent,
-        "the coordinate after the refused stage",
+    every_write_refuses_a_bad_grant(
+        rig,
+        &mut p,
+        &writes,
+        (&stage_grant, &commit_grant),
+        &SeamError::GrantRefused(GrantFault::Expired),
+        "that has expired",
     );
 }
 
@@ -472,7 +576,7 @@ pub(super) fn a_read_grant_observes_committed_coordinates_and_can_neither_stage_
     });
     let (a, b) = (Set::of(&["a"]), Set::of(&["b"]));
     publish(rig, &mut p, &a);
-    a_stranger_reads_nothing_of_a_private_channel(&mut p, &a.coords[0]);
+    a_stranger_reads_nothing_of_a_private_channel(&mut p, &a);
     let read_a = rig.grant(&p, GrantPhase::Read, &a.coords);
     let read_b = rig.grant(&p, GrantPhase::Read, &b.coords);
     present_held(must(
@@ -575,15 +679,22 @@ fn a_private_channel_reads_only_for_a_good_read_grant<R: PublisherRig>(rig: &R) 
 }
 
 /// Every read of a private channel needs a grant, a stranger's included, and a stranger is
-/// `Denied` however the read is asked.
-fn a_stranger_reads_nothing_of_a_private_channel<P: Publisher>(p: &mut P, held: &Coordinate) {
+/// `Denied` however the read is asked, an observe told the declared set included.
+fn a_stranger_reads_nothing_of_a_private_channel<P: Publisher>(p: &mut P, set: &Set) {
     let none = Grant::none();
+    let held = &set.coords[0];
+    let blobs = set.blobs();
+    let items = set.items(&blobs);
     let scope = ListScope {
         channel: held.channel.clone(),
         prefix: String::new(),
     };
     let refusals = [
         ("observe", p.observe(&none, held, &[]).map(|_| ())),
+        (
+            "observe told the declared set",
+            p.observe(&none, held, &items).map(|_| ()),
+        ),
         ("fetch", p.fetch(&none, held).map(|_| ())),
         (
             "newest",

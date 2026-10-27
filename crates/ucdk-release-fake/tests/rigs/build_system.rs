@@ -161,9 +161,9 @@ impl BuildSystemRig for FakeBuildRig {
         self.clock.advance(Duration::from_secs(86_400));
     }
 
-    /// The fake writes one file, `out`, that names the label, every argument and every
-    /// environment pair of the command that built it.
-    fn output_of(&self, inv: &Invocation<'_>) -> Vec<(String, Vec<u8>)> {
+    /// The fake writes one file, `out` (`out/layout` for a directory output), that names the
+    /// label, every argument and every environment pair of the command that built it.
+    fn output_of(&self, inv: &Invocation<'_>, world: &BuildWorld) -> Vec<(String, Vec<u8>)> {
         let command = FakeBuildSystem::new(self.kind, &self.clock)
             .command(inv)
             .expect("the fake layers the invocation");
@@ -177,7 +177,12 @@ impl BuildSystemRig for FakeBuildRig {
             command.argv.join("\n"),
             env.join("\n")
         );
-        vec![("out".to_owned(), bytes.into_bytes())]
+        let path = if *world == BuildWorld::DirectoryOutput {
+            "out/layout"
+        } else {
+            "out"
+        };
+        vec![(path.to_owned(), bytes.into_bytes())]
     }
 }
 

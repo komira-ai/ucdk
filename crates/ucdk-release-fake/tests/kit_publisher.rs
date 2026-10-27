@@ -41,6 +41,8 @@ kit_tests!(
     commit_is_atomic_when_the_coordinate_appears_between_observe_and_commit,
     transient_after_commit_is_observed_before_retry,
     duplicate_over_other_bytes_leaves_the_old_bytes,
+    a_second_commit_of_the_same_bytes_is_duplicate,
+    a_stage_over_ones_own_staged_coordinate_is_duplicate,
 );
 
 #[test]

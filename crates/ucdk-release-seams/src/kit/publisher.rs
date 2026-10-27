@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! The publisher kit: thirty-two scenarios over observing, staging, committing, aborting and
+//! The publisher kit: thirty-four scenarios over observing, staging, committing, aborting and
 //! reading the coordinates of a channel, and over the grants those calls carry.
 //!
 //! The scenarios of this file are about what a registry holds and answers; those of
@@ -406,7 +406,68 @@ pub fn publisher_scenarios<R: PublisherRig>() -> Vec<Scenario<R>> {
             "duplicate_over_other_bytes_leaves_the_old_bytes",
             access::duplicate_over_other_bytes_leaves_the_old_bytes::<R>,
         ),
+        Scenario::new(
+            "a_second_commit_of_the_same_bytes_is_duplicate",
+            a_second_commit_of_the_same_bytes_is_duplicate::<R>,
+        ),
+        Scenario::new(
+            "a_stage_over_ones_own_staged_coordinate_is_duplicate",
+            a_stage_over_ones_own_staged_coordinate_is_duplicate::<R>,
+        ),
     ]
+}
+
+/// A coordinate is created once: a commit of the bytes it already holds is `Duplicate`, on a
+/// channel that stages and on one that does not, and the coordinate is as it was.
+fn a_second_commit_of_the_same_bytes_is_duplicate<R: PublisherRig>(rig: &R) {
+    for shape in [ChannelShape::staging(), ChannelShape::without_staging()] {
+        let mut p = rig.publisher(&shape);
+        let set = Set::of(&["a"]);
+        if shape.stages {
+            stage(rig, &mut p, &set);
+        }
+        commit(rig, &mut p, &set);
+        let blobs = set.blobs();
+        let items = set.items(&blobs);
+        let grant = rig.grant(&p, GrantPhase::Commit, &set.coords);
+        same(
+            must(p.commit(&grant, &items), "a second commit"),
+            CommitAnswer::Duplicate,
+            &format!("a second commit of the same bytes ({shape:?})"),
+        );
+        present_held(stranger(&mut p, &set.coords[0]));
+        same(
+            fetched(rig, &mut p, &set.coords[0]),
+            Some(b"a".to_vec()),
+            "the bytes after the second commit",
+        );
+    }
+}
+
+/// A stage over a coordinate the caller itself has staged is `Duplicate` too, with the same
+/// bytes and with other bytes, and the staged bytes are the first ones.
+fn a_stage_over_ones_own_staged_coordinate_is_duplicate<R: PublisherRig>(rig: &R) {
+    let mut p = rig.publisher(&ChannelShape::staging());
+    let set = Set::of(&["a"]);
+    stage(rig, &mut p, &set);
+    let mut other = Set::of(&["a"]);
+    other.bytes[0] = b"other".to_vec();
+    for (what, again) in [("the same bytes", &set), ("other bytes", &other)] {
+        let blobs = again.blobs();
+        let items = again.items(&blobs);
+        let grant = rig.grant(&p, GrantPhase::Stage, &again.coords);
+        same(
+            must(p.stage(&grant, &items), "a second stage"),
+            StageAnswer::Duplicate,
+            &format!("a stage over one's own staged coordinate with {what}"),
+        );
+    }
+    commit(rig, &mut p, &set);
+    same(
+        fetched(rig, &mut p, &set.coords[0]),
+        Some(b"a".to_vec()),
+        "the bytes committed after the second stages",
+    );
 }
 
 fn observe_absent_is_not_an_error<R: PublisherRig>(rig: &R) {

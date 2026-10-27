@@ -11,7 +11,7 @@ use ucdk_release_proto::v1::push_identity::Kind;
 use ucdk_release_proto::v1::{Reason, Repository};
 use ucdk_release_seams::kit::{
     COMMIT_SCOPE, GrantContent, GrantSetup, GrantSourceRig, JobClaims, LOCATION, READ_SCOPE,
-    STAGE_SCOPE, matching_job,
+    STAGE_SCOPE,
 };
 use ucdk_release_seams::{Grant, GrantRequest, GrantSource, SeamError};
 
@@ -101,15 +101,11 @@ impl GrantSourceRig for FakeGrantRig {
     type Source = Flawed;
 
     fn source(&self, setup: &GrantSetup) -> Flawed {
-        let mut pinned = setup.job.pinned.clone();
-        if self.flaw == Some(Flaw::IgnoresPinnedClaims) {
-            pinned = matching_job().pinned;
-        }
         let claims = FakeClaims {
             subject: setup.job.subject.clone(),
             audience: setup.job.audience.clone(),
             environment: setup.job.environment.clone(),
-            pinned,
+            pinned: setup.job.pinned.clone(),
         };
         let inner_limit = if self.flaw == Some(Flaw::LimitIsCheckedForStageOnly) {
             usize::MAX
@@ -208,6 +204,9 @@ impl Flawed {
         }
         if skipped {
             declared.exceptional_subject.clone_from(&job.subject);
+        }
+        if self.is(Flaw::IgnoresPinnedClaims) {
+            declared.pinned_claims.clone_from(&job.pinned);
         }
         if skipped || (self.is(Flaw::ExceptionalIgnoresAudienceAndPinned) && req.exceptional) {
             declared.audience.clone_from(&job.audience);

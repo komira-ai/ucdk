@@ -58,12 +58,16 @@ pub trait BuildSystemRig {
     /// is built after.
     fn later(&self);
 
-    /// The files the output of [`BUILD_LABEL`] holds once the [`BuildWorld::Normal`] build ran
-    /// for `inv`, as `copy_out` is to write them: each path below the entry, in the order
-    /// `copy_out` writes it, and its bytes. The rig says what the build wrote from what it
-    /// scripted, never from what the build system under test answers.
-    fn output_of(&self, inv: &Invocation<'_>) -> Vec<(String, Vec<u8>)>;
+    /// The files the output of [`BUILD_LABEL`] holds once the build of `world` ran for `inv`, as
+    /// `copy_out` is to write them: each path below the entry, in the order `copy_out` writes
+    /// it, and its bytes. `world` is [`BuildWorld::Normal`] (a file) or
+    /// [`BuildWorld::DirectoryOutput`] (a directory). The rig says what the build wrote from
+    /// what it scripted, never from what the build system under test answers.
+    fn output_of(&self, inv: &Invocation<'_>, world: &BuildWorld) -> Vec<(String, Vec<u8>)>;
 }
+
+/// The worlds in which a build lists an output that `copy_out` copies: a file and a directory.
+const COPIED: [BuildWorld; 2] = [BuildWorld::Normal, BuildWorld::DirectoryOutput];
 
 /// The build system as authored, the target and the stamp of every scenario.
 struct Case {
@@ -269,26 +273,35 @@ pub fn build_system_scenarios<R: BuildSystemRig>() -> Vec<Scenario<R>> {
 }
 
 fn same_command_same_bytes<R: BuildSystemRig>(rig: &R) {
-    let mut bs = rig.system(&BuildWorld::Normal);
-    let case = Case::new(bs.kind());
-    let first = built_bytes(&mut bs, &case);
-    let second = built_bytes(&mut bs, &case);
-    same(
-        first.is_empty(),
-        false,
-        "a build that wrote nothing proves nothing",
-    );
-    let wrong: Vec<_> = rig
-        .output_of(&case.inv(Verb::Build, None))
-        .into_iter()
-        .filter(|file| !first.contains(file))
-        .collect();
-    same(
-        wrong.is_empty(),
-        true,
-        &format!("files of the output that copy_out did not write with their bytes: {wrong:?}"),
-    );
-    same(second, first, "the bytes of two builds of one command");
+    for world in &COPIED {
+        let mut bs = rig.system(world);
+        let case = Case::new(bs.kind());
+        let first = built_bytes(&mut bs, &case);
+        let second = built_bytes(&mut bs, &case);
+        same(
+            first.is_empty(),
+            false,
+            &format!("a build that wrote nothing proves nothing ({world:?})"),
+        );
+        let wrong: Vec<_> = rig
+            .output_of(&case.inv(Verb::Build, None), world)
+            .into_iter()
+            .filter(|file| !first.contains(file))
+            .collect();
+        same(
+            wrong.is_empty(),
+            true,
+            &format!(
+                "files of the output ({world:?}) that copy_out did not write with their bytes: \
+                 {wrong:?}"
+            ),
+        );
+        same(
+            second,
+            first,
+            &format!("the bytes of two builds of one command ({world:?})"),
+        );
+    }
 }
 
 fn base_flags_come_before_target_flags_in_order<R: BuildSystemRig>(rig: &R) {
@@ -503,17 +516,19 @@ fn unstartable_is_not_failed<R: BuildSystemRig>(rig: &R) {
 }
 
 fn nothing_run_specific_in_the_bytes<R: BuildSystemRig>(rig: &R) {
-    let mut first = rig.system(&BuildWorld::Normal);
-    let case = Case::new(first.kind());
-    let before = built_bytes(&mut first, &case);
-    rig.later();
-    let mut second = rig.system(&BuildWorld::Normal);
-    let after = built_bytes(&mut second, &case);
-    same(
-        after,
-        before,
-        "the bytes of the same build in another run, later",
-    );
+    for world in &COPIED {
+        let mut first = rig.system(world);
+        let case = Case::new(first.kind());
+        let before = built_bytes(&mut first, &case);
+        rig.later();
+        let mut second = rig.system(world);
+        let after = built_bytes(&mut second, &case);
+        same(
+            after,
+            before,
+            &format!("the bytes of the same build ({world:?}) in another run, later"),
+        );
+    }
 }
 
 fn copy_out_writes_only_into_the_entry_it_is_given<R: BuildSystemRig>(rig: &R) {
@@ -529,7 +544,7 @@ fn copy_out_writes_only_into_the_entry_it_is_given<R: BuildSystemRig>(rig: &R) {
         &format!("every path copy_out wrote is a relative path of the entry: {written:?}"),
     );
     let wanted: Vec<String> = rig
-        .output_of(&case.inv(Verb::Build, None))
+        .output_of(&case.inv(Verb::Build, None), &BuildWorld::Normal)
         .into_iter()
         .map(|(rel, _)| rel)
         .collect();
@@ -553,6 +568,16 @@ fn copy_out_writes_only_into_the_entry_it_is_given<R: BuildSystemRig>(rig: &R) {
             .all(|(rel, _)| valid_rel(rel) && !rel.contains('\\')),
         true,
         &format!("every path copy_out wrote of a directory is a relative path: {written:?}"),
+    );
+    let wanted: Vec<String> = rig
+        .output_of(&case.inv(Verb::Build, None), &BuildWorld::DirectoryOutput)
+        .into_iter()
+        .map(|(rel, _)| rel)
+        .collect();
+    same(
+        written.into_iter().map(|(rel, _)| rel).collect::<Vec<_>>(),
+        wanted,
+        "the paths copy_out wrote of a directory, which are those of the output and no other",
     );
 }
 

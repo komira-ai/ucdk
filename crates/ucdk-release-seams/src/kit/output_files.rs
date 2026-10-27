@@ -142,6 +142,12 @@ fn a_listing_names_the_kind_of_every_entry<R: OutputFilesRig>(rig: &R) {
         ],
         "the kind of each entry",
     );
+    // A directory with nothing in it lists as empty; it is not a fault.
+    same(
+        must(files.list(&at(rig, "k/dir")), "list of an empty directory").is_empty(),
+        true,
+        "the listing of an empty directory is empty",
+    );
 }
 
 fn a_listed_symlink_is_never_descended<R: OutputFilesRig>(rig: &R) {
@@ -187,6 +193,8 @@ fn stat_tells_a_file_a_directory_a_symlink_and_nothing_apart<R: OutputFilesRig>(
         "a dangling link",
     );
     same(stat("s/nothing"), None, "nothing");
+    // Below a regular file nothing is, and the operating system's answer is no fault.
+    same(stat("s/file/child"), None, "a path below a regular file");
     // A trailing slash makes an operating system follow a symlink; the reader must not.
     for rel in ["s/to_file/", "s/to_dir/"] {
         let answer = files.stat(&at(rig, rel));
@@ -321,11 +329,11 @@ fn a_path_that_is_relative_or_climbs_is_refused<R: OutputFilesRig>(rig: &R) {
 }
 
 fn an_entry_of_a_listed_directory_is_read_through_its_joined_path<R: OutputFilesRig>(rig: &R) {
-    // Bytes that are not text, a file past any buffer a reader might size at a few kilobytes,
+    // Bytes that are not text, a file past any buffer a reader might size at 4 KiB or 64 KiB,
     // an empty file, a hidden one, one three directories down and names that hold two dots
     // without being a `..` part.
     let binary: &[u8] = &[0xff, 0xfe, 0x00, 0x80, 0xc3, 0x28];
-    let big: Vec<u8> = (0..=255u8).cycle().take(10_000).collect();
+    let big: Vec<u8> = (0..=255u8).cycle().take(70_000).collect();
     let mut files = rig.reader(&[
         ("e/a", Node::File(b"A")),
         ("e/n/b", Node::File(b"B")),

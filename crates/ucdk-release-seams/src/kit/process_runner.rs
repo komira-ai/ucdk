@@ -140,7 +140,9 @@ pub fn process_runner_scenarios<R: ProcessRig>() -> Vec<Scenario<R>> {
 fn a_bare_name_is_resolved_on_the_childs_path_and_never_the_runners<R: ProcessRig>(rig: &R) {
     let mut runner = rig.runner();
     let child_dir = format!("{}/child-bin", rig.scratch());
+    let other_dir = format!("{}/other-bin", rig.scratch());
     rig.install(&mut runner, &format!("{child_dir}/tool"), prints("child"));
+    rig.install(&mut runner, &format!("{other_dir}/tool"), prints("other"));
     rig.install(
         &mut runner,
         &format!("{}/tool", rig.own_path_dir()),
@@ -159,6 +161,21 @@ fn a_bare_name_is_resolved_on_the_childs_path_and_never_the_runners<R: ProcessRi
         "child".to_owned(),
         "the program that ran",
     );
+    // With the name in two directories of the `PATH`, the first of them in the order given wins.
+    for (path, want) in [
+        (format!("{child_dir}:{other_dir}"), "child"),
+        (format!("{other_dir}:{child_dir}"), "other"),
+    ] {
+        let result = must(
+            run_plain(rig, &mut runner, &command(&["tool"], &[("PATH", &path)])),
+            "run of a bare name found in two directories",
+        );
+        same(
+            text(&result.stdout),
+            want.to_owned(),
+            &format!("the program that ran with PATH {path}"),
+        );
+    }
 }
 
 fn a_name_found_nowhere_on_the_childs_path_is_unstartable<R: ProcessRig>(rig: &R) {
@@ -198,6 +215,9 @@ fn argv_and_environment_are_exactly_what_was_given<R: ProcessRig>(rig: &R) {
     let mut runner = rig.runner();
     let program = format!("{}/bin/report", rig.scratch());
     rig.install(&mut runner, &program, Behavior::Reports);
+    // What an earlier run of the same runner was given is not what this child sees.
+    let earlier = command(&[&program], &[("SECRET", "1"), ("PATH", "/earlier")]);
+    must(run_plain(rig, &mut runner, &earlier), "an earlier run");
     let given = command(
         &[
             &program,
@@ -367,6 +387,13 @@ fn the_runner_beats_on_progress_and_stops_the_child_when_told<R: ProcessRig>(rig
         "the answer to a Stop",
     );
     same(stopping.count() >= 2, true, "the beats before the Stop");
+    // A Stop ends one run: the runner runs the next child as it did the first.
+    let after = must(runner.run(&spec(&Beats::counting())), "a run after a Stop");
+    same(
+        after.exit,
+        Exit::Code(0),
+        "the chatty child ends by itself after a run was stopped",
+    );
 }
 
 fn a_stopped_child_and_its_process_group_are_gone<R: ProcessRig>(rig: &R) {
