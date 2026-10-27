@@ -209,7 +209,12 @@ fn held_by_the_lax_stub(stub: More) -> &'static [&'static str] {
             &[OTHERS_OBSERVE, EMPTY_SET]
         }
         More::Lax(Lax::OthersCommittedBlind(Kind::Public, ..)) => &[OTHERS_OBSERVE],
-        More::Lax(Lax::OthersCommittedBlind(_, Holder::Read, false)) => &[LIST, OTHERS_OBSERVE],
+        // A read grant that is blind to what another writer committed is blind to it when the
+        // scenarios that observe a coordinate another writer holds read it with one: the one about
+        // the digest of such a coordinate and the one about a set that meets it.
+        More::Lax(Lax::OthersCommittedBlind(_, Holder::Read, false)) => {
+            &[NO_DIGEST, LIST, OTHERS_OBSERVE, DUPLICATE_SET]
+        }
         More::Lax(Lax::OthersCommittedBlind(..)) => &[OTHERS_OBSERVE],
         // What a private channel lets a stage or a commit grant read, and a stranger, is held with
         // the reads of a read grant; what a channel that is not private lets a stage or a commit
@@ -217,6 +222,9 @@ fn held_by_the_lax_stub(stub: More) -> &'static [&'static str] {
         More::Lax(Lax::WriterGrantOnRead(Kind::Grouped | Kind::NonStaging, ..)) => {
             &[PUBLIC_READ, READ_GRANT]
         }
+        // A stranger of a private channel is refused by the scenario about a stranger and a staged
+        // coordinate, as well as by the one about read grants.
+        More::Lax(Lax::StrangerSeesStaged(_)) => &[STRANGER_STAGED, READ_GRANT],
         More::Lax(_) => &[READ_GRANT],
         More::BadGrantTakenOnShape(kind, defect, verb) => match (verb, defect) {
             // A grant that names the base and not the coordinate read is also held by the
@@ -317,11 +325,18 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
             &[COMMIT_READABLE, STAMP, BECOMING],
         ),
         // A read grant that is blind to a coordinate another writer committed is blind on a
-        // private channel too, which the scenarios about a listing that lags and about a race
-        // read with one.
+        // private channel too, which the scenarios about the digest of such a coordinate, a
+        // listing that lags, a race, a second commit and a set that meets it read with one.
         (
             Stub::Flaw(F::GrantedObserveIsBlindToOthers),
-            &[LIST, OTHERS_OBSERVE, RACE],
+            &[
+                NO_DIGEST,
+                LIST,
+                OTHERS_OBSERVE,
+                RACE,
+                SECOND_COMMIT,
+                DUPLICATE_SET,
+            ],
         ),
         (
             Stub::Flaw(F::IndexIsReadBeforeTheGroup),
@@ -336,10 +351,26 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
         // group too: its observe that is told the set, and its observe with a read grant that is
         // told none, are the two promises these stubs break.
         // A channel addressed by group finds staged state only by the set it was staged in, so
-        // each scenario that observes staged state on one is told it.
+        // each scenario that observes staged state on one is told it, and fails the stub that
+        // drops it.
         (
             Stub::Flaw(F::TheDeclaredSetIsDropped),
-            &[ABORT, SET_COMMIT, STAMP, DECLARED_SET, WRITER_READS, ECHO],
+            &[
+                STAGE_OBSERVE,
+                STAGE_GRANT,
+                COMMIT_GRANT,
+                ABORT,
+                SET_COMMIT,
+                LOST,
+                STAMP,
+                DECLARED_SET,
+                COMMIT_CARRIES,
+                DUPLICATE_SET,
+                NAMED_TWICE,
+                WRITER_READS,
+                VANISHED,
+                ECHO,
+            ],
         ),
         (
             Stub::Flaw(F::AnEmptySetSeesStagedState),
@@ -352,7 +383,10 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
         ),
         (Stub::Flaw(F::TransientAfterCommitIsPermanent), &[TRANSIENT]),
         (Stub::Flaw(F::StageOverOtherBytesIsStaged), &[DUP_OTHER]),
-        (Stub::Flaw(F::StrangerObservesPrivate), &[READ_GRANT]),
+        (
+            Stub::Flaw(F::StrangerObservesPrivate),
+            &[STRANGER_STAGED, READ_GRANT],
+        ),
         (Stub::Flaw(F::StrangerFetchesPrivate), &[READ_GRANT]),
         (Stub::Flaw(F::StrangerNewestPrivate), &[READ_GRANT]),
         (Stub::Flaw(F::StrangerListsPrivate), &[READ_GRANT]),
@@ -879,53 +913,6 @@ fn a_rig_that_lacks_what_a_scenario_needs_skips_it_and_passes_the_rest() {
     }
 }
 
-/// The scenarios a rig of one private channel addressed by group runs: those that hold on a
-/// channel of any shape, those about what a channel that stages or commits can do (a lifecycle
-/// scenario is gated by the capability, not by the channel being public or plain), those about a
-/// private or a grouped one, and the one about what it declares.
-const RUN_BY_A_PRIVATE_GROUPED_CHANNEL: [&str; 23] = [
-    COMMIT_READABLE,
-    ABORT,
-    SET_COMMIT,
-    YANK,
-    YANKED_COMMIT,
-    LIST,
-    FOREIGN,
-    PHASE,
-    EXPIRED,
-    NEWEST,
-    STAMP,
-    OTHERS_OBSERVE,
-    GROUP_THEN_INDEX,
-    ANOTHER_GROUP,
-    FAILED_READ,
-    DECLARED_SET,
-    EMPTY_SET,
-    READ_GRANT,
-    RACE,
-    DUP_OTHER,
-    WRITER_READS,
-    ECHO,
-    DECLARES,
-];
-
-/// A rig that builds only a private channel addressed by group has no public channel and no plain
-/// one: it skips every scenario that needs one, and passes every scenario it has the capability
-/// for. A kit that skipped everything is not a kit that passed.
-#[test]
-fn a_rig_with_no_public_channel_skips_what_runs_on_one_and_passes_the_rest() {
-    let rig = FakePublisherRig::conforming().with_shapes(vec![ChannelShape::private_grouped()]);
-    let report = run_publisher_kit(&rig);
-    assert_eq!(report.failed(), Vec::<&str>::new());
-    let passed = RUN_BY_A_PRIVATE_GROUPED_CHANNEL;
-    let in_order: Vec<&str> = names(&publisher_scenarios::<FakePublisherRig>())
-        .into_iter()
-        .filter(|n| passed.contains(n))
-        .collect();
-    assert_eq!(report.passed(), in_order);
-    assert_eq!(report.skipped().len(), report.names().len() - passed.len());
-}
-
 /// A rig that builds public channels only skips exactly the scenarios about private and grouped
 /// channels and about a sealed version, says why, and passes every other: a stranger's reads and
 /// the grants of a public channel are held, and a skip is never a pass.
@@ -990,7 +977,7 @@ fn a_rig_that_declares_no_shape_fails_the_kit() {
     let alone = scenarios.iter().find(|s| s.name == OBSERVE_ABSENT);
     let why = alone.map(|s| s.run_on(&rig));
     assert!(
-        matches!(&why, Some(Err(text)) if text.contains("a public channel to run on")),
+        matches!(&why, Some(Err(text)) if text.contains("a channel to run on")),
         "{why:?}"
     );
 }

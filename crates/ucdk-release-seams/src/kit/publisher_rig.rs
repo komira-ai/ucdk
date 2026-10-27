@@ -332,23 +332,6 @@ pub(super) fn staging_shape<R: PublisherRig>(rig: &R) -> Option<ChannelShape> {
     plain_shapes(rig).into_iter().find(|s| s.stages)
 }
 
-/// The first declared plain shape that does not stage.
-pub(super) fn unstaged_shape<R: PublisherRig>(rig: &R) -> Option<ChannelShape> {
-    plain_shapes(rig).into_iter().find(|s| !s.stages)
-}
-
-/// Runs `scenario` once on each declared plain shape, a fresh channel each: a promise a registry
-/// makes of every channel is held on each shape the rig declares, and not on the first alone. A
-/// rig with no plain shape fails the scenario, which the runner skips before it gets here.
-pub(super) fn on_each_plain_shape<R: PublisherRig>(rig: &R, scenario: fn(&R, &ChannelShape)) {
-    on_each_of(
-        rig,
-        &plain_shapes(rig),
-        "a public channel to run on",
-        scenario,
-    );
-}
-
 /// Runs `scenario` once on each of `shapes`, a fresh channel each. A rig with none of them fails
 /// the scenario, which the runner skips before it gets here.
 pub(super) fn on_each_of<R: PublisherRig>(
@@ -399,6 +382,22 @@ pub(super) fn staging_shapes<R: PublisherRig>(rig: &R) -> Vec<ChannelShape> {
 /// The declared shapes that do not stage, public or private.
 pub(super) fn unstaged_shapes<R: PublisherRig>(rig: &R) -> Vec<ChannelShape> {
     rig.shapes().into_iter().filter(|s| !s.stages).collect()
+}
+
+/// The declared shapes that commit a set at once, public or private, staged or not.
+pub(super) fn set_commit_shapes<R: PublisherRig>(rig: &R) -> Vec<ChannelShape> {
+    rig.shapes()
+        .into_iter()
+        .filter(|s| built(rig, s).commit_unit() == CommitUnit::Set)
+        .collect()
+}
+
+/// The declared shapes that do not stage and whose commit is a conditional put.
+pub(super) fn conditional_shapes<R: PublisherRig>(rig: &R) -> Vec<ChannelShape> {
+    rig.shapes()
+        .into_iter()
+        .filter(|s| !s.stages && built(rig, s).conditional_put())
+        .collect()
 }
 
 /// Runs `scenario` once on each declared shape, a fresh channel each, whatever the shape stages,
@@ -455,95 +454,6 @@ pub(super) fn staging_publisher<R: PublisherRig>(rig: &R) -> R::Publisher {
         rig,
         &must_some(staging_shape(rig), "a public channel that stages"),
     )
-}
-
-/// A fresh channel of the first declared plain shape that does not stage.
-pub(super) fn unstaged_publisher<R: PublisherRig>(rig: &R) -> R::Publisher {
-    built(
-        rig,
-        &must_some(unstaged_shape(rig), "a public channel that does not stage"),
-    )
-}
-
-/// The gate of a scenario that runs on any plain channel.
-pub(super) fn needs_a_plain_channel<R: PublisherRig>(rig: &R) -> Option<&'static str> {
-    plain_shapes(rig)
-        .is_empty()
-        .then_some("the rig declares no public channel without a group address")
-}
-
-/// The gate of a scenario about staged state.
-pub(super) fn needs_staging<R: PublisherRig>(rig: &R) -> Option<&'static str> {
-    staging_shape(rig)
-        .is_none()
-        .then_some("the rig declares no public channel that stages")
-}
-
-/// The gate of a scenario about a channel whose commit carries the bytes.
-pub(super) fn needs_no_staging<R: PublisherRig>(rig: &R) -> Option<&'static str> {
-    unstaged_shape(rig)
-        .is_none()
-        .then_some("the rig declares no public channel that does not stage")
-}
-
-/// The gate of a scenario about a conditional put on a channel whose commit carries the bytes.
-pub(super) fn needs_a_conditional_commit<R: PublisherRig>(rig: &R) -> Option<&'static str> {
-    let Some(shape) = unstaged_shape(rig) else {
-        return Some("the rig declares no public channel that does not stage");
-    };
-    (!built(rig, &shape).conditional_put())
-        .then_some("the channel is not a conditional put: its commit may replace what is there")
-}
-
-/// The gate of a scenario that commits several coordinates in one call.
-pub(super) fn needs_a_set_commit<R: PublisherRig>(rig: &R) -> Option<&'static str> {
-    (!plain_shapes(rig)
-        .iter()
-        .any(|s| built(rig, s).commit_unit() == CommitUnit::Set))
-    .then_some("the rig declares no public channel that commits a set at once")
-}
-
-/// The gate of a scenario about staged state that holds on a channel of any shape that stages,
-/// public or private, addressed by coordinate or by group.
-pub(super) fn needs_a_staging_channel<R: PublisherRig>(rig: &R) -> Option<&'static str> {
-    staging_shapes(rig)
-        .is_empty()
-        .then_some("the rig declares no channel that stages")
-}
-
-/// The gate of a scenario about a channel whose commit carries the bytes, public or private.
-pub(super) fn needs_an_unstaged_channel<R: PublisherRig>(rig: &R) -> Option<&'static str> {
-    unstaged_shapes(rig)
-        .is_empty()
-        .then_some("the rig declares no channel that does not stage")
-}
-
-/// The gate of a scenario about grants that holds on a channel of any shape.
-pub(super) fn needs_a_channel<R: PublisherRig>(rig: &R) -> Option<&'static str> {
-    rig.shapes()
-        .is_empty()
-        .then_some("the rig declares no channel")
-}
-
-/// The gate of a scenario about what a stranger reads of a public channel.
-pub(super) fn needs_a_public_channel<R: PublisherRig>(rig: &R) -> Option<&'static str> {
-    public_shapes(rig)
-        .is_empty()
-        .then_some("the rig declares no public channel")
-}
-
-/// The gate of a scenario about a channel whose every read needs a grant.
-pub(super) fn needs_a_private_channel<R: PublisherRig>(rig: &R) -> Option<&'static str> {
-    private_shapes(rig)
-        .is_empty()
-        .then_some("the rig declares no private channel")
-}
-
-/// The gate of a scenario about staged state addressed by group.
-pub(super) fn needs_a_grouped_channel<R: PublisherRig>(rig: &R) -> Option<&'static str> {
-    grouped_shapes(rig)
-        .is_empty()
-        .then_some("the rig declares no channel that stages and is addressed by group")
 }
 
 // ---- sets ----
@@ -761,6 +671,24 @@ pub(super) fn observed_alone<R: PublisherRig>(
         p.observe(&grant, &set.coords[at], &[]),
         "an observe with a grant and no set",
     )
+}
+
+/// What an observe with a grant of `phase` for the whole of `set` sees of the coordinate at `at`
+/// on a channel of `shape`: told the set the coordinate was staged in when the channel addresses
+/// staged state by group, which finds it only so, and told no set otherwise.
+pub(super) fn observed_as_staged<R: PublisherRig>(
+    rig: &R,
+    shape: &ChannelShape,
+    p: &mut R::Publisher,
+    phase: GrantPhase,
+    set: &Set,
+    at: usize,
+) -> Presence {
+    if shape.group_addressed {
+        observed(rig, p, phase, set, at)
+    } else {
+        observed_alone(rig, p, phase, set, at)
+    }
 }
 
 /// The bytes a stranger fetches for `k`, as the read-back of a publish on a public channel does.

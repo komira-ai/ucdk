@@ -8,10 +8,12 @@ use ucdk_release::codec::GrantPhase;
 use ucdk_release::publish::{Held, Presence};
 use ucdk_release_proto::v1::{Coordinate, Reason, Stamped};
 
+use super::publisher_gates::skips_that_name_a_declared_capability;
+use super::publisher_list::publisher_scenarios;
 use super::publisher_rig::{
     Arrangement, ChannelShape, PublisherRig, Set, built, fetched, fetched_by_a_reader, looked,
-    needs_a_plain_channel, observed, plain_shapes, present_held, publish, sha, siblings_beside,
-    stage, staged_held, staging_publisher, stranger,
+    observed, plain_shapes, present_held, publish, sha, siblings_beside, stage, staged_held,
+    stranger,
 };
 use super::{must, must_err, must_some, same};
 use crate::{
@@ -25,27 +27,6 @@ const LARGEST_SET: usize = 4;
 /// the arrangement makes it readable at the third.
 const LAG: u32 = 2;
 
-pub(super) fn needs_an_unrepresentable_coordinate<R: PublisherRig>(
-    rig: &R,
-) -> Option<&'static str> {
-    needs_a_plain_channel(rig).or_else(|| {
-        rig.unrepresentable()
-            .is_empty()
-            .then_some("the rig names no coordinate its channel cannot hold")
-    })
-}
-
-pub(super) fn needs_a_sealing_registry<R: PublisherRig>(rig: &R) -> Option<&'static str> {
-    needs_a_plain_channel(rig).or_else(|| {
-        (!rig.seals_versions()).then_some("the registry does not seal a version by its first group")
-    })
-}
-
-pub(super) fn needs_a_registry_that_can_burn<R: PublisherRig>(rig: &R) -> Option<&'static str> {
-    needs_a_plain_channel(rig)
-        .or_else(|| (!rig.can_burn()).then_some("the registry cannot burn a number"))
-}
-
 /// A coordinate whose staged state vanished is not committed, and nobody holds it: the commit is
 /// `Refused` or `Permanent` (an answer that asks to be retried, such as `RateLimited`, would be
 /// retried for ever instead of staged again), an observe finds `Absent`, and a new stage of it
@@ -55,8 +36,9 @@ pub(super) fn a_commit_of_staged_state_that_vanished_is_not_committed_and_a_rest
     R: PublisherRig,
 >(
     rig: &R,
+    shape: &ChannelShape,
 ) {
-    let mut p = staging_publisher(rig);
+    let mut p = built(rig, shape);
     let set = Set::of(rig, &["a"]);
     stage(rig, &mut p, &set);
     rig.arrange(&mut p, &Arrangement::LoseStagedState);
@@ -148,7 +130,7 @@ fn a_retry_is_not_a_second_write<R: PublisherRig>(
     );
     let mut seen = None;
     for _ in 0..=LAG + 1 {
-        match stranger(&mut p, &set.coords[0]) {
+        match looked(rig, shape, &mut p, &set.coords[0]) {
             Presence::Present(held) => {
                 seen = Some(held);
                 break;
@@ -230,7 +212,7 @@ pub(super) fn a_coordinate_the_channel_cannot_hold_is_refused_before_anything_is
     // What was refused left the channel as it was: an ordinary coordinate publishes.
     let set = Set::of(rig, &["a"]);
     publish(rig, &mut p, &set);
-    present_held(stranger(&mut p, &set.coords[0]));
+    present_held(looked(rig, shape, &mut p, &set.coords[0]));
 }
 
 /// A set that has a coordinate the channel cannot hold beside one it can is refused whole, at
@@ -306,7 +288,7 @@ pub(super) fn a_sealed_version_refuses_a_later_platform_and_observes_it_absent<R
         "the answer to a later platform of a sealed version",
     );
     same(
-        stranger(&mut p, &platform.coordinate),
+        looked(rig, shape, &mut p, &platform.coordinate),
         Presence::Absent,
         "a later platform of a sealed version",
     );
@@ -315,7 +297,7 @@ pub(super) fn a_sealed_version_refuses_a_later_platform_and_observes_it_absent<R
         None,
         "the bytes of a later platform of a sealed version",
     );
-    present_held(stranger(&mut p, &base));
+    present_held(looked(rig, shape, &mut p, &base));
 }
 
 /// A burned coordinate is neither absent nor present nor committable: an observe says `Burned`,
@@ -334,7 +316,11 @@ pub(super) fn a_burned_coordinate_is_neither_absent_nor_present_nor_committable<
             coordinate: a.clone(),
         },
     );
-    same(stranger(&mut p, a), Presence::Burned, "a burned coordinate");
+    same(
+        looked(rig, shape, &mut p, a),
+        Presence::Burned,
+        "a burned coordinate",
+    );
     same(
         observed(rig, &mut p, GrantPhase::Commit, &set, 0),
         Presence::Burned,
@@ -473,6 +459,11 @@ pub(super) fn the_declarations_of_a_rig_hold_of_what_it_builds<R: PublisherRig>(
     for shape in &shapes {
         built(rig, shape);
     }
+    same(
+        skips_that_name_a_declared_capability(rig, &publisher_scenarios::<R>()),
+        Vec::new(),
+        "the scenarios this rig skips for a capability it declares",
+    );
     for shape in plain_shapes(rig) {
         let mut p = built(rig, &shape);
         same(

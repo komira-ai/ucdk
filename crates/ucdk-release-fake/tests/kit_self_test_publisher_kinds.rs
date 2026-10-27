@@ -40,7 +40,13 @@ fn table() -> Vec<Row> {
     let private_unstaged: &[Behind] = &[Behind::PrivateUnstaged];
     vec![
         // A commit that lost a race replaces the bytes that won.
-        (Wrong::Flaw(F::ARacedCommitOverwrites), staging, &[RACE]),
+        // A second commit of the same bytes is the race of the second commit, which the scenario
+        // about it runs on every channel that stages.
+        (
+            Wrong::Flaw(F::ARacedCommitOverwrites),
+            staging,
+            &[RACE, SECOND_COMMIT],
+        ),
         // A commit of a set that fails leaves its first coordinate readable.
         (Wrong::Flaw(F::SetCommitIsTorn), staging, &[SET_COMMIT]),
         (
@@ -136,12 +142,12 @@ fn table() -> Vec<Row> {
         (
             Wrong::Flaw(F::PresentDigestIsWrong),
             not_public_plain,
-            &[COMMIT_READABLE, ECHO],
+            &[COMMIT_READABLE, BECOMING, ECHO],
         ),
         (
             Wrong::Flaw(F::TheStampIsDropped),
             not_public_plain,
-            &[COMMIT_READABLE, STAMP],
+            &[COMMIT_READABLE, STAMP, BECOMING],
         ),
         (
             Wrong::Flaw(F::TheMarkIsDropped),
@@ -178,6 +184,53 @@ fn table() -> Vec<Row> {
             not_public_plain,
             &[ECHO],
         ),
+        // These scenarios run on every shape that can do what they ask. A coordinate nobody wrote
+        // is not an error.
+        (
+            Wrong::Flaw(F::AbsentIsAnError),
+            not_public_plain,
+            &[OBSERVE_ABSENT],
+        ),
+        // A stage over the bytes that are held, or that the caller staged, is a duplicate.
+        (
+            Wrong::Flaw(F::StageOverTheSameBytesIsStaged),
+            staging,
+            &[STAGE_PRESENT],
+        ),
+        (
+            Wrong::Flaw(F::StageOverOwnStagedSameBytesIsStaged),
+            staging,
+            &[OWN_STAGED],
+        ),
+        (
+            Wrong::Flaw(F::StageOverOwnStagedOverwrites),
+            staging,
+            &[OWN_STAGED],
+        ),
+        // A second commit of the same bytes is a duplicate, on a channel that stages or not.
+        (
+            Wrong::Flaw(F::SecondCommitOfTheSameBytesIsCommitted),
+            not_public_plain,
+            &[SECOND_COMMIT],
+        ),
+        // A failure after a commit landed is not permanent, and a commit of staged state that
+        // vanished is not a commit.
+        (
+            Wrong::Flaw(F::TransientAfterCommitIsPermanent),
+            staging,
+            &[TRANSIENT],
+        ),
+        (
+            Wrong::Flaw(F::VanishedStateIsCommitted),
+            staging,
+            &[VANISHED],
+        ),
+        // A commit repeated while the first is becoming readable is a repeat, not an error.
+        (
+            Wrong::Flaw(F::RetryWhileBecomingReadableIsPermanent),
+            not_public_plain,
+            &[BECOMING],
+        ),
     ]
 }
 
@@ -188,31 +241,78 @@ fn fetches() -> Vec<Row> {
     let nothing = Wrong::More(More::Lax(Lax::FetchFindsNothing));
     let another = Wrong::More(More::Lax(Lax::FetchAnswersAnother));
     let private_staging = &[Behind::PrivateGrouped, Behind::PrivatePlain];
+    // A fetch that finds nothing fails every scenario that reads back what a scenario wrote with
+    // one, on each channel that can do what the scenario asks.
     vec![
         (
             nothing,
             &[Behind::PublicGrouped],
-            &[COMMIT_READABLE, ABORT, YANK, RACE, DUP_OTHER],
+            &[
+                OBSERVE_ABSENT,
+                COMMIT_READABLE,
+                STAGE_PRESENT,
+                ABORT,
+                YANK,
+                RACE,
+                DUP_OTHER,
+                SECOND_COMMIT,
+                OWN_STAGED,
+                COMMIT_CARRIES,
+                DUPLICATE_SET,
+                VANISHED,
+                BECOMING,
+            ],
         ),
         (
             nothing,
             private_staging,
-            &[COMMIT_READABLE, ABORT, YANK, RACE, DUP_OTHER, ECHO],
+            &[
+                OBSERVE_ABSENT,
+                COMMIT_READABLE,
+                STAGE_PRESENT,
+                ABORT,
+                YANK,
+                RACE,
+                DUP_OTHER,
+                SECOND_COMMIT,
+                OWN_STAGED,
+                COMMIT_CARRIES,
+                DUPLICATE_SET,
+                VANISHED,
+                BECOMING,
+                ECHO,
+            ],
         ),
         (
             nothing,
             &[Behind::PrivateUnstaged],
-            &[COMMIT_READABLE, YANK, NOT_STAGING, ECHO],
+            &[
+                OBSERVE_ABSENT,
+                COMMIT_READABLE,
+                COMMIT_OVER,
+                NOT_STAGE_BYTES,
+                YANK,
+                SECOND_COMMIT,
+                DUPLICATE_SET,
+                NOT_STAGING,
+                BECOMING,
+                ECHO,
+            ],
         ),
-        (another, &[Behind::PublicGrouped], &[COMMIT_READABLE]),
         (
             another,
-            &[
-                Behind::PrivateGrouped,
-                Behind::PrivatePlain,
-                Behind::PrivateUnstaged,
-            ],
-            &[COMMIT_READABLE, ECHO],
+            &[Behind::PublicGrouped],
+            &[OBSERVE_ABSENT, COMMIT_READABLE, COMMIT_CARRIES],
+        ),
+        (
+            another,
+            private_staging,
+            &[OBSERVE_ABSENT, COMMIT_READABLE, COMMIT_CARRIES, ECHO],
+        ),
+        (
+            another,
+            &[Behind::PrivateUnstaged],
+            &[OBSERVE_ABSENT, COMMIT_READABLE, ECHO],
         ),
     ]
 }
@@ -221,7 +321,7 @@ fn fetches() -> Vec<Row> {
 fn a_stub_that_is_wrong_behind_one_kind_of_channel_fails_the_scenarios_that_hold_it() {
     let rows: Vec<Row> = table().into_iter().chain(fetches()).collect();
     let runs: usize = rows.iter().map(|(_, kinds, _)| kinds.len()).sum();
-    assert_eq!(runs, 110, "the number of stubs behind one kind of channel");
+    assert_eq!(runs, 137, "the number of stubs behind one kind of channel");
     let mut wrong = Vec::new();
     for (stub, kinds, named) in rows {
         for behind in kinds {

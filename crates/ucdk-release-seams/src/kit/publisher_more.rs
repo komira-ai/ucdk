@@ -9,8 +9,8 @@ use ucdk_release_proto::v1::{Coordinate, Stamped};
 
 use super::publisher_rig::{
     Arrangement, ChannelShape, Placement, PublisherRig, Set, built, commit, fetched,
-    held_by_another, holder_of, is_yanked, looked, observed, plain_shapes, present_held, publish,
-    sets_beside, siblings_beside, stage, staged_held, staging_publisher, staging_shapes, stranger,
+    held_by_another, holder_of, is_yanked, looked, observed, present_held, publish, sets_beside,
+    siblings_beside, stage, staged_held, staging_shapes,
 };
 use super::publisher_visible::found_nothing;
 use super::{must, must_err, same};
@@ -19,8 +19,11 @@ use crate::{CommitAnswer, CommitUnit, ListScope, Publisher, SeamError, StageAnsw
 /// A commit carries what was staged: other bytes, another stamp, or a coordinate nobody staged
 /// on a channel that stages are each refused, and the staged state, which a commit of what was
 /// staged still makes readable, is as it was.
-pub(super) fn a_commit_carries_exactly_what_was_staged<R: PublisherRig>(rig: &R) {
-    let mut p = staging_publisher(rig);
+pub(super) fn a_commit_carries_exactly_what_was_staged<R: PublisherRig>(
+    rig: &R,
+    shape: &ChannelShape,
+) {
+    let mut p = built(rig, shape);
     let set = Set::of(rig, &["a"]);
     stage(rig, &mut p, &set);
     let other_bytes = set.reseeded(rig, 1);
@@ -71,15 +74,16 @@ pub(super) fn a_commit_carries_exactly_what_was_staged<R: PublisherRig>(rig: &R)
         Some(set.bytes(0).to_vec()),
         "the bytes of what was staged, committed after the refusals",
     );
-    a_commit_publishes_the_coordinate_it_names_and_not_another_that_is_staged(rig);
+    a_commit_publishes_the_coordinate_it_names_and_not_another_that_is_staged(rig, shape);
 }
 
 /// With two coordinates staged, a commit that names one publishes the bytes that were staged at
 /// it and nothing of the other, which stays staged and is committed by its own commit.
 fn a_commit_publishes_the_coordinate_it_names_and_not_another_that_is_staged<R: PublisherRig>(
     rig: &R,
+    shape: &ChannelShape,
 ) {
-    let mut p = staging_publisher(rig);
+    let mut p = built(rig, shape);
     let (a, b) = (Set::of(rig, &["a"]), Set::of(rig, &["b"]));
     stage(rig, &mut p, &a);
     stage(rig, &mut p, &b);
@@ -101,7 +105,7 @@ fn a_commit_publishes_the_coordinate_it_names_and_not_another_that_is_staged<R: 
         Some(b.bytes(0).to_vec()),
         "the bytes of the coordinate committed second",
     );
-    a_commit_publishes_the_coordinate_it_names_and_not_a_sibling_that_is_staged(rig);
+    a_commit_publishes_the_coordinate_it_names_and_not_a_sibling_that_is_staged(rig, shape);
 }
 
 /// With a coordinate and a sibling of it that differs in a field staged, each in a set of its own,
@@ -109,6 +113,7 @@ fn a_commit_publishes_the_coordinate_it_names_and_not_another_that_is_staged<R: 
 /// staged.
 fn a_commit_publishes_the_coordinate_it_names_and_not_a_sibling_that_is_staged<R: PublisherRig>(
     rig: &R,
+    shape: &ChannelShape,
 ) {
     let base = rig.coordinate("a");
     for sibling in siblings_beside(rig, &base) {
@@ -116,7 +121,7 @@ fn a_commit_publishes_the_coordinate_it_names_and_not_a_sibling_that_is_staged<R
             continue;
         }
         let field = sibling.field;
-        let mut p = staging_publisher(rig);
+        let mut p = built(rig, shape);
         let (named, other) = (
             Set::at(rig, vec![base.clone()]),
             Set::at(rig, vec![sibling.coordinate.clone()]),
@@ -183,17 +188,12 @@ pub(super) fn a_set_commit_that_is_refused_applies_none_of_it<R: PublisherRig>(
 /// every declared channel that commits a set at once.
 pub(super) fn a_duplicate_answer_leaves_every_coordinate_of_the_set_as_it_was<R: PublisherRig>(
     rig: &R,
+    shape: &ChannelShape,
 ) {
-    let shapes: Vec<ChannelShape> = plain_shapes(rig)
-        .into_iter()
-        .filter(|shape| built(rig, shape).commit_unit() == CommitUnit::Set)
-        .collect();
-    for shape in shapes {
-        if shape.stages {
-            a_stage_of_a_set_that_meets_a_held_coordinate(rig, &shape);
-        }
-        a_commit_of_a_set_that_meets_a_held_coordinate(rig, &shape);
+    if shape.stages {
+        a_stage_of_a_set_that_meets_a_held_coordinate(rig, shape);
     }
+    a_commit_of_a_set_that_meets_a_held_coordinate(rig, shape);
 }
 
 fn a_stage_of_a_set_that_meets_a_held_coordinate<R: PublisherRig>(rig: &R, shape: &ChannelShape) {
@@ -214,13 +214,20 @@ fn a_stage_of_a_set_that_meets_a_held_coordinate<R: PublisherRig>(rig: &R, shape
         Presence::Absent,
         "the free coordinate of a set whose stage was answered Duplicate",
     );
-    the_held_coordinate_is_as_the_other_writer_left_it(rig, &mut p, &two.coords[1], "a stage");
+    the_held_coordinate_is_as_the_other_writer_left_it(
+        rig,
+        shape,
+        &mut p,
+        &two.coords[1],
+        "a stage",
+    );
 }
 
 /// The coordinate another writer holds, after a call that met it was answered `Duplicate`, still
 /// reads as that writer's bytes and is not yanked.
 fn the_held_coordinate_is_as_the_other_writer_left_it<R: PublisherRig>(
     rig: &R,
+    shape: &ChannelShape,
     p: &mut R::Publisher,
     held: &Coordinate,
     after: &str,
@@ -230,7 +237,7 @@ fn the_held_coordinate_is_as_the_other_writer_left_it<R: PublisherRig>(
         Some(set_of_another(rig, held)),
         &format!("the held coordinate after {after} of a set that met it"),
     );
-    present_held(stranger(p, held));
+    present_held(looked(rig, shape, p, held));
 }
 
 fn a_commit_of_a_set_that_meets_a_held_coordinate<R: PublisherRig>(rig: &R, shape: &ChannelShape) {
@@ -254,7 +261,13 @@ fn a_commit_of_a_set_that_meets_a_held_coordinate<R: PublisherRig>(rig: &R, shap
         None,
         &format!("the free coordinate of a set whose commit was Duplicate ({shape:?})"),
     );
-    the_held_coordinate_is_as_the_other_writer_left_it(rig, &mut p, &two.coords[1], "a commit");
+    the_held_coordinate_is_as_the_other_writer_left_it(
+        rig,
+        shape,
+        &mut p,
+        &two.coords[1],
+        "a commit",
+    );
     if shape.stages {
         staged_held(observed(rig, &mut p, GrantPhase::Stage, &b, 0));
     }
@@ -466,8 +479,8 @@ pub(super) fn a_sibling_is_another_coordinate_to_stage_commit_and_observe<R: Pub
         for set in sets_beside(rig, &base, &sibling) {
             publish(rig, &mut p, &set);
         }
-        present_held(stranger(&mut p, &base));
-        present_held(stranger(&mut p, &sibling.coordinate));
+        present_held(looked(rig, shape, &mut p, &base));
+        present_held(looked(rig, shape, &mut p, &sibling.coordinate));
         same(
             fetched(rig, &mut p, &sibling.coordinate),
             Some(rig.payload(&sibling.coordinate, 0).bytes),

@@ -594,8 +594,11 @@ pub(super) fn commit_is_atomic_when_the_coordinate_appears_between_observe_and_c
 
 /// A commit that fails after it landed is not `Permanent`: it may have landed, and an observe
 /// finds out.
-pub(super) fn transient_after_commit_is_observed_before_retry<R: PublisherRig>(rig: &R) {
-    let mut p = staging_publisher(rig);
+pub(super) fn transient_after_commit_is_observed_before_retry<R: PublisherRig>(
+    rig: &R,
+    shape: &ChannelShape,
+) {
+    let mut p = built(rig, shape);
     let set = Set::of(rig, &["a"]);
     stage(rig, &mut p, &set);
     rig.arrange(&mut p, &Arrangement::FailAfterCommit);
@@ -609,9 +612,9 @@ pub(super) fn transient_after_commit_is_observed_before_retry<R: PublisherRig>(r
     same(
         failure.promises_no_effect(),
         false,
-        "a failure after the commit may have landed",
+        &format!("a failure after the commit may have landed ({shape:?})"),
     );
-    present_held(stranger(&mut p, &set.coords[0]));
+    present_held(looked(rig, shape, &mut p, &set.coords[0]));
 }
 
 /// A stage over a coordinate another writer holds or has staged is `Duplicate` and leaves what

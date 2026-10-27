@@ -4,15 +4,15 @@
 
 use std::cell::RefCell;
 
-use ucdk_release_seams::kit::{Beats, Outcome, Report, Scenario, Verdict, run_scenarios};
+use ucdk_release_seams::kit::{Beats, Need, Outcome, Report, Scenario, Verdict, run_scenarios};
 
 fn passes(_: &()) {}
 
-fn lacks_a_thing(_: &()) -> Option<&'static str> {
-    Some("the rig has no thing")
+fn lacks_a_thing(_: &()) -> Option<Need> {
+    Some(Need::BurningRegistry)
 }
 
-fn lacks_nothing(_: &()) -> Option<&'static str> {
+fn lacks_nothing(_: &()) -> Option<Need> {
     None
 }
 
@@ -54,16 +54,16 @@ fn a_gated_scenario_the_rig_lacks_is_skipped_with_the_reason_and_is_not_run() {
     let report = run_scenarios(&(), &gated_kit());
     assert_eq!(
         report.outcomes[1].verdict,
-        Verdict::Skipped("the rig has no thing")
+        Verdict::Skipped(Need::BurningRegistry)
     );
     assert_eq!(report.skipped(), vec!["skipped"]);
     assert_eq!(
         report.skip_reasons(),
-        vec!["skipped: the rig has no thing".to_owned()]
+        vec!["skipped: the registry cannot burn a number".to_owned()]
     );
 }
 
-fn a_gate_that_panics(_: &()) -> Option<&'static str> {
+fn a_gate_that_panics(_: &()) -> Option<Need> {
     panic!("a rig that cannot build the channel the gate asked for");
 }
 
@@ -95,11 +95,32 @@ fn a_report_that_only_skipped_conforms_but_passed_nothing() {
 }
 
 #[test]
-fn a_gate_is_asked_by_skip_reason_and_does_not_stop_a_scenario_run_alone() {
+fn a_gate_is_asked_by_skip_need_and_does_not_stop_a_scenario_run_alone() {
     let gated = Scenario::new("passes", passes).gated(lacks_a_thing);
-    assert_eq!(gated.skip_reason(&()), Some("the rig has no thing"));
+    assert_eq!(gated.skip_need(&()), Some(Need::BurningRegistry));
     assert_eq!(gated.run_on(&()), Ok(()));
-    assert_eq!(Scenario::new("passes", passes).skip_reason(&()), None);
+    assert_eq!(Scenario::new("passes", passes).skip_need(&()), None);
+}
+
+#[test]
+fn every_need_has_its_own_reason() {
+    let needs = [
+        Need::Channel,
+        Need::PublicChannel,
+        Need::PrivateChannel,
+        Need::GroupedChannel,
+        Need::StagingChannel,
+        Need::UnstagedChannel,
+        Need::SetCommit,
+        Need::ConditionalCommit,
+        Need::UnrepresentableCoordinate,
+        Need::SealingRegistry,
+        Need::BurningRegistry,
+    ];
+    let mut reasons: Vec<&str> = needs.iter().map(|need| need.reason()).collect();
+    reasons.sort_unstable();
+    reasons.dedup();
+    assert_eq!(reasons.len(), needs.len());
 }
 
 #[test]

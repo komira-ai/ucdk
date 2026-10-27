@@ -413,7 +413,9 @@ impl Publisher for Flawed {
                 }
                 None => Ok(Presence::Absent),
             },
-            (Some(Flaw::AbsentIsAnError), Ok(Presence::Absent)) if first && !granted => {
+            (Some(Flaw::AbsentIsAnError), Ok(Presence::Absent))
+                if first && (!granted || (self.shape.private && scope == "read")) =>
+            {
                 Err(SeamError::Permanent("not found".to_owned()))
             }
             (Some(Flaw::StagedDigestIsWrong), Ok(Presence::Staged(held))) => {
