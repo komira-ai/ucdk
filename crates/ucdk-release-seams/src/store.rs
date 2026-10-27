@@ -36,6 +36,10 @@ pub trait ArtifactStore: Send {
     /// listed whole.
     fn files(&mut self, key: &StoreKey) -> Result<Vec<String>, SeamError>;
 
+    /// The bytes of the file at `rel`, or `Ok(None)` when the entry holds no file there. A
+    /// directory of the entry is no file: `get` of one is `Ok(None)`. So is `get` of a spelling
+    /// that `put_file` would refuse (a climb, an empty part, a trailing slash, a backslash, a
+    /// control character): it is never an `Err`, which is for a store that failed.
     fn get(&mut self, key: &StoreKey, rel: &str) -> Result<Option<Vec<u8>>, SeamError>;
 
     /// The whole entry.
