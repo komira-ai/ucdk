@@ -15,7 +15,7 @@ use ucdk_release_seams::{
 
 use super::publisher::{FakePublisherRig, Flawed};
 use super::publisher_grant::issue;
-use super::publisher_lax::{Defect, Kind, Verb};
+use super::publisher_lax::{Defect, Kind, Pair, Verb};
 use super::secret::texts;
 
 /// One field of a coordinate.
@@ -125,6 +125,18 @@ pub enum More {
     CommitPublishesSiblingStagedBytes,
     /// An abort also yanks the committed coordinates of the name it names that differ in a field.
     AbortWithdrawsCommittedSibling,
+    /// A stage, a commit or an abort of three coordinates checks the grant for two of them only.
+    CoverageOfTwo(Verb, Pair),
+    /// On a channel of the kind, a read grant is taken for the grant of the write.
+    ReadGrantWrites(Kind, Verb),
+    /// On a channel of the kind, a read that is a `fetch`, a `newest` or a `list` and carries a
+    /// stage or a commit grant answers staged state.
+    WriterSeesStaged(Kind, Verb),
+    /// On a channel of the kind, an observe with a read grant sees the staged state of the
+    /// caller, told the set when the channel is addressed by group.
+    ReadSeesStaged(Kind),
+    /// An observe with a read grant sees the staged state of another writer.
+    ReadSeesOthersStaged,
 }
 
 pub struct MoreRig {
@@ -181,8 +193,10 @@ pub struct Wrapped {
     /// The coordinates of every call that went through, before the call that is running.
     known: Vec<Coordinate>,
     committed: Vec<Coordinate>,
-    staged: Vec<(Coordinate, Vec<u8>)>,
+    pub(super) staged: Vec<(Coordinate, Vec<u8>)>,
     aborted: Vec<Coordinate>,
+    /// Coordinates another writer staged.
+    pub(super) staged_by_others: Vec<Coordinate>,
 }
 
 impl PublisherRig for MoreRig {
@@ -209,6 +223,7 @@ impl PublisherRig for MoreRig {
             committed: Vec::new(),
             staged: Vec::new(),
             aborted: Vec::new(),
+            staged_by_others: Vec::new(),
         }
     }
 
@@ -219,6 +234,9 @@ impl PublisherRig for MoreRig {
         match what {
             Arrangement::ListLags => p.lagging = true,
             Arrangement::HeldByAnother { coordinate, .. } => p.others.push(coordinate.clone()),
+            Arrangement::StagedByAnother { coordinate, .. } => {
+                p.staged_by_others.push(coordinate.clone());
+            }
             _ => {}
         }
         if self.flaw == More::NonStagingSetCommitIsTorn
@@ -480,6 +498,11 @@ impl Publisher for Wrapped {
                 .staged
                 .iter()
                 .any(|(c, _)| differs_only_in(c, k, field) && self.base.inner.is_staged(c))
+        {
+            result = Ok(Presence::Staged(Held::default()));
+        }
+        if matches!(result, Ok(Presence::Absent))
+            && self.read_grant_sees_staged(g, k, !set.is_empty())
         {
             result = Ok(Presence::Staged(Held::default()));
         }
@@ -785,7 +808,7 @@ impl Publisher for Wrapped {
         {
             result = self.base.fetch(&Grant::none(), &longer);
         }
-        if self.is(More::FetchWithWriterGrantSeesStaged)
+        if (self.is(More::FetchWithWriterGrantSeesStaged) || self.writer_sees_staged(Verb::Fetch))
             && matches!(result, Ok(None))
             && is_writer(g)
             && self.base.inner.is_staged(k)
@@ -808,7 +831,10 @@ impl Publisher for Wrapped {
             result = self.base.newest(&grant, ch, name);
         }
         let mut found = result?;
-        if self.is(More::NewestWithWriterGrantIncludesStaged) && is_writer(g) {
+        if (self.is(More::NewestWithWriterGrantIncludesStaged)
+            || self.writer_sees_staged(Verb::Newest))
+            && is_writer(g)
+        {
             for (c, _) in self.staged.clone() {
                 if c.channel == ch
                     && c.name == name
@@ -829,7 +855,9 @@ impl Publisher for Wrapped {
             result = self.base.list(&grant, scope);
         }
         let mut listed = result?;
-        if self.is(More::ListWithWriterGrantIncludesStaged) && is_writer(g) {
+        if (self.is(More::ListWithWriterGrantIncludesStaged) || self.writer_sees_staged(Verb::List))
+            && is_writer(g)
+        {
             for (c, _) in self.staged.clone() {
                 if c.channel == scope.channel
                     && c.name.starts_with(&scope.prefix)

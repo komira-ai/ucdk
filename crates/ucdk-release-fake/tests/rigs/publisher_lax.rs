@@ -67,9 +67,36 @@ pub enum Defect {
     OtherWritePhase,
 }
 
+/// Which two of the three coordinates of a call a stub checks a grant for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pair {
+    FirstAndLast,
+    FirstAndMiddle,
+    MiddleAndLast,
+}
+
+impl Pair {
+    pub const ALL: [Self; 3] = [
+        Self::FirstAndLast,
+        Self::FirstAndMiddle,
+        Self::MiddleAndLast,
+    ];
+
+    /// The positions in the call of the two coordinates.
+    fn at(self) -> (usize, usize) {
+        match self {
+            Self::FirstAndLast => (0, 2),
+            Self::FirstAndMiddle => (0, 1),
+            Self::MiddleAndLast => (1, 2),
+        }
+    }
+}
+
 /// The shape of channel a stub is lax on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
+    /// A public channel that stages and addresses staged state by coordinate.
+    Public,
     /// A private channel that stages and addresses staged state by coordinate.
     Private,
     /// A channel that addresses staged state by group.
@@ -107,6 +134,8 @@ pub fn on_shapes() -> Vec<More> {
                 // that take a read grant for another.
                 let names_nothing = matches!(verb, Verb::Newest | Verb::List);
                 let kept = match kind {
+                    // The public channel that stages is held by the stubs of every channel.
+                    Kind::Public => false,
                     Kind::Private => verb.writes(),
                     Kind::Grouped => {
                         verb.writes()
@@ -129,6 +158,53 @@ pub fn on_shapes() -> Vec<More> {
     all
 }
 
+/// Every stub that checks a grant for two of the three coordinates of a stage, a commit or an
+/// abort and takes a grant that names those two for one that names the three.
+pub fn coverage_of_two() -> Vec<More> {
+    let mut all = Vec::new();
+    for verb in [Verb::Stage, Verb::Commit, Verb::Abort] {
+        for pair in Pair::ALL {
+            all.push(More::CoverageOfTwo(verb, pair));
+        }
+    }
+    all
+}
+
+/// Every stub that takes a read grant for the grant of a write, on a kind of channel.
+pub fn read_grant_writes() -> Vec<More> {
+    let mut all = Vec::new();
+    for kind in [Kind::Public, Kind::Private, Kind::Grouped, Kind::NonStaging] {
+        for verb in Verb::ALL.into_iter().filter(|v| v.writes()) {
+            // A channel that does not stage is never asked to stage or to abort.
+            if kind != Kind::NonStaging || matches!(verb, Verb::Commit | Verb::Yank) {
+                all.push(More::ReadGrantWrites(kind, verb));
+            }
+        }
+    }
+    all
+}
+
+/// Every stub that shows staged state to a stage or a commit grant that reads with `fetch`,
+/// `newest` or `list`, on a private channel and on one addressed by group.
+pub fn writers_see_staged() -> Vec<More> {
+    let mut all = Vec::new();
+    for kind in [Kind::Private, Kind::Grouped] {
+        for verb in [Verb::Fetch, Verb::Newest, Verb::List] {
+            all.push(More::WriterSeesStaged(kind, verb));
+        }
+    }
+    all
+}
+
+/// Every stub that shows the staged state of a writer to an observe with a read grant, on a
+/// kind of channel.
+pub fn read_grants_see_staged() -> Vec<More> {
+    [Kind::Public, Kind::Private, Kind::Grouped]
+        .into_iter()
+        .map(More::ReadSeesStaged)
+        .collect()
+}
+
 /// The coordinate a text of a grant names.
 fn parse_key(key: &str) -> Option<Coordinate> {
     let [channel, kind, name, version, platform] = texts(key.as_bytes()).try_into().ok()?;
@@ -142,8 +218,9 @@ fn parse_key(key: &str) -> Option<Coordinate> {
 }
 
 impl Wrapped {
-    fn on(&self, kind: Kind) -> bool {
+    pub(super) fn on(&self, kind: Kind) -> bool {
         match kind {
+            Kind::Public => self.shape.stages && !self.shape.private && !self.shape.group_addressed,
             Kind::Private => self.shape.private && !self.shape.group_addressed && self.shape.stages,
             Kind::Grouped => self.shape.group_addressed,
             Kind::NonStaging => !self.shape.stages,
@@ -194,6 +271,43 @@ impl Wrapped {
             .all(|c| named.iter().any(|n| differs_only_in(n, c, field)))
     }
 
+    /// Whether `g` names the two coordinates of the call that `pair` stands for.
+    fn names_a_pair(g: &Grant, coordinates: &[Coordinate], pair: Pair) -> bool {
+        let named = texts(g.secret());
+        let (first, second) = pair.at();
+        [first, second].iter().all(|at| {
+            coordinates
+                .get(*at)
+                .is_some_and(|c| named.iter().skip(2).any(|text| *text == coordinate_key(c)))
+        })
+    }
+
+    /// Whether a stub shows a coordinate staged to `verb` when the grant is a stage or a commit
+    /// grant.
+    pub(super) fn writer_sees_staged(&self, verb: Verb) -> bool {
+        match self.flaw() {
+            Some(More::WriterSeesStaged(kind, v)) => v == verb && self.on(kind),
+            _ => false,
+        }
+    }
+
+    /// Whether a stub shows `k` staged to an observe with the read grant `g`, told a set or not.
+    pub(super) fn read_grant_sees_staged(&self, g: &Grant, k: &Coordinate, told: bool) -> bool {
+        if texts(g.secret()).first().map(String::as_str) != Some("read") {
+            return false;
+        }
+        match self.flaw() {
+            Some(More::ReadSeesStaged(kind)) => {
+                self.on(kind)
+                    && self.staged.iter().any(|(c, _)| c == k)
+                    && self.base.inner.is_staged(k)
+                    && (told || !self.shape.group_addressed)
+            }
+            Some(More::ReadSeesOthersStaged) => self.staged_by_others.contains(k),
+            _ => false,
+        }
+    }
+
     /// The grant a lax stub takes `g` for, when it takes it for another: the refusal of `result`
     /// is one it lifts.
     pub(super) fn lenient<T>(
@@ -215,6 +329,17 @@ impl Wrapped {
             }
             Some(More::BadGrantTakenOnShape(kind, defect, v)) => {
                 v == verb && self.on(kind) && self.defect(g, verb, coordinates) == Some(defect)
+            }
+            Some(More::CoverageOfTwo(v, pair)) => {
+                v == verb
+                    && self.defect(g, verb, coordinates) == Some(Defect::Uncovered)
+                    && Self::names_a_pair(g, coordinates, pair)
+            }
+            Some(More::ReadGrantWrites(kind, v)) => {
+                v == verb
+                    && self.on(kind)
+                    && texts(g.secret()).first().map(String::as_str) == Some("read")
+                    && self.defect(g, verb, coordinates).is_none()
             }
             _ => false,
         };
