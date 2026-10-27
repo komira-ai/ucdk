@@ -135,6 +135,18 @@ pub enum Flaw {
     UnstartableTestIsPermanent,
     /// A failed build answers all of its output, the head and then the tail.
     FailurePadded,
+    /// Every build after the first runs the first build's system and target again, so its bytes
+    /// are the first's whatever changed.
+    StickyOutput,
+    /// The revision, the commit and the timestamp are left as written in a base flag.
+    BaseFlagStampPlaceholdersLeft,
+    /// The revision, the commit and the timestamp are left as written in a base environment
+    /// value.
+    BaseEnvStampPlaceholdersLeft,
+    /// An unknown placeholder in a base flag passes through as written.
+    BaseFlagUnknownPlaceholderPasses,
+    /// An unknown placeholder in a target environment value passes through as written.
+    TargetEnvUnknownPlaceholderPasses,
 }
 
 /// The time on the clock of a rig before anything moves it.
@@ -177,6 +189,16 @@ pub struct Flawed {
     ran: Vec<Command>,
     /// How many commands of the fake `ran` already holds.
     synced: usize,
+    /// The system and target of the first build.
+    first_build: Option<(Authored, Target)>,
+}
+
+/// Puts back the placeholders of the revision, the commit and the timestamp in `text`, which
+/// holds their values as the default case of the kit stamps them.
+fn unsubstitute(text: &str) -> String {
+    text.replace("abc123", "{source_commit}")
+        .replace("0123", "{revision}")
+        .replace("1700", "{timestamp_ms}")
 }
 
 impl BuildSystemRig for FakeBuildRig {
@@ -217,6 +239,7 @@ impl BuildSystemRig for FakeBuildRig {
             builds: 0,
             ran: Vec::new(),
             synced: 0,
+            first_build: None,
         }
     }
 
@@ -473,6 +496,20 @@ impl Flawed {
                     }
                 }
             }
+            Some(Flaw::BaseFlagStampPlaceholdersLeft) => {
+                for arg in &mut command.argv {
+                    if arg.starts_with("--ball=") {
+                        *arg = unsubstitute(arg);
+                    }
+                }
+            }
+            Some(Flaw::BaseEnvStampPlaceholdersLeft) => {
+                for (key, value) in &mut command.env {
+                    if key == "BALL" {
+                        *value = unsubstitute(value);
+                    }
+                }
+            }
             Some(Flaw::BaseFlagPlatformUnsubstituted) => {
                 for arg in &mut command.argv {
                     if arg == "--p=linux-x86_64" {
@@ -551,7 +588,11 @@ impl BuildSystem for Flawed {
         let accepts = (self.is(Flaw::TestWithoutReportAccepted)
             && inv.verb == Verb::Test
             && inv.report.is_none())
-            || (self.is(Flaw::UnknownPlaceholderPassedThrough) && report_fits);
+            || (self.is(Flaw::UnknownPlaceholderPassedThrough) && report_fits)
+            || (self.is(Flaw::BaseFlagUnknownPlaceholderPasses)
+                && inv.system.flags.iter().any(|f| f.contains("{nope}")))
+            || (self.is(Flaw::TargetEnvUnknownPlaceholderPasses)
+                && inv.target.env.values().any(|v| v.contains("{nope}")));
         match layered {
             Err(_) if accepts => Ok(Command {
                 argv: Vec::new(),
@@ -571,7 +612,14 @@ impl BuildSystem for Flawed {
         heartbeat: &dyn Heartbeat,
     ) -> Result<Vec<Located>, SeamError> {
         self.builds += 1;
-        let (system, target) = self.seen(inv, true);
+        let (mut system, mut target) = self.seen(inv, true);
+        if self.is(Flaw::StickyOutput) {
+            let first = self
+                .first_build
+                .get_or_insert_with(|| (system.clone(), target.clone()))
+                .clone();
+            (system, target) = first;
+        }
         let run = Invocation {
             system: &system,
             target: &target,

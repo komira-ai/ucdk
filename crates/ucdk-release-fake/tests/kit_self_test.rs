@@ -110,6 +110,12 @@ fn further_build_system() {
                 (Build::SkippedCountedAsRan, &[NOTHING_RAN]),
                 (Build::UnstartableTestIsPermanent, &[UNSTARTABLE]),
                 (Build::FailurePadded, &[FAILED_BUILD]),
+                // What the bytes follow, and every place an author writes a placeholder.
+                (Build::StickyOutput, &[SAME_BYTES]),
+                (Build::BaseFlagStampPlaceholdersLeft, &[PLACEHOLDERS]),
+                (Build::BaseEnvStampPlaceholdersLeft, &[PLACEHOLDERS]),
+                (Build::BaseFlagUnknownPlaceholderPasses, &[PLACEHOLDERS]),
+                (Build::TargetEnvUnknownPlaceholderPasses, &[PLACEHOLDERS]),
                 // The heartbeat.
                 (Build::CapsBeatsAtThree, &[BEATS]),
                 (Build::KeepsBeatingAfterStop, &[BEATS]),

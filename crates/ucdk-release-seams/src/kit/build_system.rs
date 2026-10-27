@@ -332,8 +332,33 @@ fn same_command_same_bytes<R: BuildSystemRig>(rig: &R) {
         );
         same(
             second,
-            first,
+            first.clone(),
             &format!("the bytes of two builds of one command ({world:?})"),
+        );
+        // Another command in the same system: the bytes follow the command, never the first
+        // build's. A flag, a stamp that a flag names and an environment value all change.
+        let mut other = Case::new(bs.kind());
+        other.system.flags.push("--n={build_number}".to_owned());
+        other.stamp.build_number = 99;
+        other.target.env.insert("Y".to_owned(), "two".to_owned());
+        let changed = built_bytes(&mut bs, &other);
+        same(
+            changed == first,
+            false,
+            &format!("a build of another command gave the bytes of the first ({world:?})"),
+        );
+        let wrong: Vec<_> = rig
+            .output_of(&other.inv(Verb::Build, None), world)
+            .into_iter()
+            .filter(|file| !changed.contains(file))
+            .collect();
+        same(
+            wrong.is_empty(),
+            true,
+            &format!(
+                "files of the output ({world:?}) of another command that copy_out did not write \
+                 with their bytes: {wrong:?}"
+            ),
         );
     }
     what_ran_is_what_was_layered(rig);
@@ -440,25 +465,33 @@ fn nothing_is_inherited_from_the_process_environment<R: BuildSystemRig>(rig: &R)
 fn placeholders_are_substituted_in_flag_and_environment_values<R: BuildSystemRig>(rig: &R) {
     let bs = rig.system(&BuildWorld::Normal);
     let mut case = Case::new(bs.kind());
+    // Every placeholder in each of the four places an author writes one: a base flag, a target
+    // flag, a base environment value and a target environment value.
+    const ALL: &str =
+        "{release_version}|{build_number}|{source_commit}|{revision}|{timestamp_ms}|{platform}";
     case.system.flags = vec![
         "--v={release_version}-{build_number}".to_owned(),
         "--p={platform}".to_owned(),
+        format!("--ball={ALL}"),
     ];
     case.system.env = BTreeMap::from([
         ("BASE".to_owned(), "{build_number}".to_owned()),
         ("PLAT".to_owned(), "{platform}".to_owned()),
+        ("BALL".to_owned(), ALL.to_owned()),
     ]);
     case.target.flags = vec![
         "--c={source_commit}".to_owned(),
         "--r={revision}@{platform}".to_owned(),
         "--t={timestamp_ms}".to_owned(),
         "--lit={{x}}".to_owned(),
+        format!("--tall={ALL}"),
     ];
     case.target.env = BTreeMap::from([
         ("STAMP".to_owned(), "{release_version}".to_owned()),
         ("COMMIT".to_owned(), "{source_commit}-{revision}".to_owned()),
         ("TS".to_owned(), "{timestamp_ms}".to_owned()),
         ("ESC".to_owned(), "{{e}}".to_owned()),
+        ("TALL".to_owned(), ALL.to_owned()),
     ]);
     for verb in verbs_of(bs.kind()) {
         let command = layered(&bs, &case, verb);
@@ -469,6 +502,8 @@ fn placeholders_are_substituted_in_flag_and_environment_values<R: BuildSystemRig
             "--r=0123@linux-x86_64",
             "--t=1700",
             "--lit={x}",
+            "--ball=1.2.3|41|abc123|0123|1700|linux-x86_64",
+            "--tall=1.2.3|41|abc123|0123|1700|linux-x86_64",
         ] {
             same(
                 command.argv.iter().any(|a| a == flag),
@@ -483,6 +518,8 @@ fn placeholders_are_substituted_in_flag_and_environment_values<R: BuildSystemRig
             ("ESC", "{e}"),
             ("BASE", "41"),
             ("PLAT", "linux-x86_64"),
+            ("BALL", "1.2.3|41|abc123|0123|1700|linux-x86_64"),
+            ("TALL", "1.2.3|41|abc123|0123|1700|linux-x86_64"),
         ] {
             same(
                 env_of(&command, key),
@@ -523,7 +560,23 @@ fn unknown_placeholders_are_refused<R: BuildSystemRig>(rig: &R) {
     flag.target.flags = vec!["--x={nope}".to_owned()];
     let mut brace = Case::new(kind);
     brace.system.env = BTreeMap::from([("E".to_owned(), "a}".to_owned())]);
-    for case in [&flag, &brace] {
+    // The same in each of the other places an author writes a flag or a value.
+    let mut base_flag = Case::new(kind);
+    base_flag.system.flags = vec!["--x={nope}".to_owned()];
+    let mut target_env = Case::new(kind);
+    target_env.target.env = BTreeMap::from([("E".to_owned(), "{nope}".to_owned())]);
+    let mut base_env = Case::new(kind);
+    base_env.system.env = BTreeMap::from([("E".to_owned(), "{nope}".to_owned())]);
+    let mut target_brace = Case::new(kind);
+    target_brace.target.flags = vec!["--x=a}".to_owned()];
+    for case in [
+        &flag,
+        &brace,
+        &base_flag,
+        &target_env,
+        &base_env,
+        &target_brace,
+    ] {
         for answer in refused(case) {
             same(
                 answer.starts_with("Err(Permanent("),
