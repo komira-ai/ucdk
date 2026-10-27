@@ -6,6 +6,7 @@
 mod rigs;
 
 use rigs::hostile::{HostileRig, Wrong};
+use rigs::loose::LooseRig;
 use rigs::output_files::{FakeFilesRig, Flaw as Files};
 use rigs::store::{FakeStoreRig, Flaw as Store};
 use rigs::{each_fails_alone, further_stubs_fail_exactly, names};
@@ -31,6 +32,7 @@ fn further_store() {
     const KEYS: &str = "keys_of_two_scopes_are_listed_apart";
     const TWO: &str = "two_entries_do_not_touch_each_other";
     const DISCARD: &str = "discard_removes_every_path_of_an_entry";
+    const MISSING: &str = "a_missing_entry_lists_as_empty";
     further_stubs_fail_exactly(
         "store",
         &names(&store_scenarios::<FakeStoreRig>()),
@@ -38,22 +40,25 @@ fn further_store() {
             (Store::EmptyFileIsDropped, &[READ_BACK]),
             (Store::GetIsLossy, &[READ_BACK]),
             (Store::GetTruncatesAt4k, &[READ_BACK]),
-            (Store::GetOfADirectoryIsEmpty, &[READ_BACK]),
+            (Store::GetOfADirectoryIsEmpty, &[READ_BACK, ESCAPES]),
             (Store::GetIgnoresTheKey, &[LISTED, TWO, DISCARD]),
-            (Store::GetLosesNestedPaths, &[READ_BACK, TWO, DISCARD]),
+            (
+                Store::GetLosesNestedPaths,
+                &[READ_BACK, LISTED, ESCAPES, TWO, DISCARD],
+            ),
             (Store::WriterAcceptsATrailingSlash, &[ESCAPES]),
             (Store::WriterAcceptsADotPart, &[ESCAPES]),
             (Store::WriterAcceptsControlCharacters, &[ESCAPES]),
             (Store::GetResolvesClimbs, &[ESCAPES]),
             (Store::DiscardWipesEveryEntry, &[DISCARD]),
             (Store::DiscardOfAMissingEntryIsAnError, &[DISCARD]),
-            (Store::FilesMatchedByKeyPrefix, &[KEYS, DISCARD]),
+            (Store::FilesMatchedByKeyPrefix, &[KEYS, TWO, DISCARD]),
             (Store::PathsAreCaseFolded, &[LISTED]),
             (Store::GetTakesATrailingSlash, &[ESCAPES]),
             (Store::EmptyEntryIsNoEntry, &[SECOND_BEGIN]),
-            (Store::DeepPathsDropped, &[READ_BACK, DISCARD]),
-            (Store::DeepPathsNotListed, &[READ_BACK]),
-            (Store::DeepPathsGetNone, &[READ_BACK, DISCARD]),
+            (Store::DeepPathsDropped, &[READ_BACK, ESCAPES, DISCARD]),
+            (Store::DeepPathsNotListed, &[READ_BACK, ESCAPES]),
+            (Store::DeepPathsGetNone, &[READ_BACK, ESCAPES, DISCARD]),
             (Store::DiscardDeepSurvives, &[DISCARD]),
             (Store::PutTruncatesAt64k, &[READ_BACK]),
             (Store::GetTruncatesAt64k, &[READ_BACK]),
@@ -101,8 +106,39 @@ fn further_store() {
             (Store::EqualLengthRewriteIgnored, &[READ_BACK]),
             (Store::DiscardSetKeyTakesTheMembers, &[DISCARD]),
             (Store::DiscardMemberTakesSetDocument, &[DISCARD]),
+            (Store::GetSameMemberFallback, &[TWO]),
+            (Store::FilesFallBackToTheSameMember, &[TWO]),
+            (Store::WriterRefusesAnyDoubleDot, &[LISTED]),
+            (Store::WriterRefusesAColon, &[LISTED]),
+            (Store::WriterRefusesUrlCharacters, &[LISTED]),
+            (Store::WriterRefusesPatternCharacters, &[LISTED]),
+            (Store::WriterRefusesQuotesAndSeparators, &[LISTED]),
+            (Store::WriterRefusesAnInnerSpace, &[LISTED]),
+            (Store::WriterRewritesReservedCharacters, &[LISTED]),
+            (Store::WriterEncodesASpace, &[LISTED]),
+            (Store::WriterPercentDecodes, &[LISTED]),
+            (Store::GetOfEmptyOrDotIsTheEntryRoot, &[ESCAPES]),
+            (Store::GetCollapsesSlashes, &[ESCAPES]),
+            (Store::GetTakesADoubledTrailingSlash, &[ESCAPES]),
+            (Store::GetReadsABackslashAsASlash, &[ESCAPES]),
+            (Store::GetTrimsTrailingControls, &[ESCAPES]),
+            (Store::FilesCappedAt1000, &[LISTED]),
+            (Store::KeysCappedAt1000, &[KEYS]),
+            (Store::KeysCollapseAcrossGenerations, &[KEYS, TWO]),
+            (Store::MissingEntryIsAnError, &[TWO, MISSING]),
+            (Store::TruncatesAt16MiB, &[READ_BACK]),
         ],
         |flaw| run_store_kit(&FakeStoreRig::flawed(flaw)),
+    );
+}
+
+#[test]
+fn a_store_that_lets_a_file_and_a_directory_share_a_name_fails_the_kit() {
+    // The store is the fake in all else: only the scenario of refused paths holds it to the
+    // promise that the paths of an entry form a tree.
+    assert_eq!(
+        run_store_kit(&LooseRig).failed(),
+        ["paths_that_escape_an_entry_are_refused"]
     );
 }
 
@@ -129,7 +165,7 @@ fn each_wrong_store_stub_fails_the_scenario_that_holds_it() {
             (Wrong::GetSetKeyAliasesMemberSet, &[TWO]),
             (Wrong::DiscardRemovesThePathsOfEveryEntry, &[DISCARD]),
             (Wrong::DiscardRemovesSharedBytes, &[DISCARD]),
-            (Wrong::GetClimbsIntoASibling, &[ESCAPES]),
+            (Wrong::GetClimbsIntoASibling, &[LISTED, ESCAPES]),
             (Wrong::OnlyFiveControlsRefused, &[ESCAPES]),
             (Wrong::DirectoriesCaseFolded, &[LISTED]),
             (Wrong::DirectoriesUnicodeFolded, &[LISTED]),
@@ -274,7 +310,7 @@ fn store() {
             ),
             (
                 "keys_of_two_scopes_are_listed_apart",
-                Store::KeysCollapseAcrossGenerations,
+                Store::KeysCappedAt100,
             ),
             (
                 "paths_that_escape_an_entry_are_refused",
@@ -290,7 +326,7 @@ fn store() {
             ),
             (
                 "a_missing_entry_lists_as_empty",
-                Store::MissingEntryIsAnError,
+                Store::KeysOfAnEmptyStoreIsAnError,
             ),
         ],
         |flaw| run_store_kit(&FakeStoreRig::flawed(flaw)),

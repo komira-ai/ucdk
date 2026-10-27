@@ -161,6 +161,81 @@ pub enum Flaw {
     DiscardSetKeyTakesTheMembers,
     /// `discard` of a member discards the set document of its scope too.
     DiscardMemberTakesSetDocument,
+    /// `get` of a path the entry does not hold answers the same path of an entry with the same
+    /// member name in another generation, stage, platform or revision.
+    GetSameMemberFallback,
+    /// `files` of a key that was never begun lists the files of an entry with the same member
+    /// name in another generation, stage, platform or revision.
+    FilesFallBackToTheSameMember,
+    /// A writer that refuses any path with two dots in it, though only a `..` part is barred.
+    WriterRefusesAnyDoubleDot,
+    /// A writer that refuses a path with a colon in it.
+    WriterRefusesAColon,
+    /// A writer that refuses a path with a question mark, a number sign or a percent sign in it.
+    WriterRefusesUrlCharacters,
+    /// A writer that refuses a path with an asterisk, a less-than or greater-than sign or a bar
+    /// in it.
+    WriterRefusesPatternCharacters,
+    /// A writer that refuses a path with a quote, a dollar sign, a comma or a semicolon in it.
+    WriterRefusesQuotesAndSeparators,
+    /// A writer that refuses a path with a space inside a name.
+    WriterRefusesAnInnerSpace,
+    /// A writer that writes a colon, an asterisk, a question mark, a less-than or greater-than
+    /// sign, a bar or a double quote as an underscore.
+    WriterRewritesReservedCharacters,
+    /// A writer that writes a space inside a name as `%20`.
+    WriterEncodesASpace,
+    /// A writer that reads `%2e` as a dot and `%20` as a space in the path it is given.
+    WriterPercentDecodes,
+    /// `get` of the empty path or `.` answers an empty file, as the entry itself.
+    GetOfEmptyOrDotIsTheEntryRoot,
+    /// `get` reads a doubled slash inside a path as one.
+    GetCollapsesSlashes,
+    /// `get` drops a doubled slash at the end of a path.
+    GetTakesADoubledTrailingSlash,
+    /// `get` of a path with a backslash in it reads the backslash as a slash and resolves the
+    /// `..` parts of the result.
+    GetReadsABackslashAsASlash,
+    /// `get` drops the control characters at the end of a path.
+    GetTrimsTrailingControls,
+    /// `files` lists no more than 1,000 paths.
+    FilesCappedAt1000,
+    /// `keys` lists no more than 1,000 keys.
+    KeysCappedAt1000,
+    /// `keys` of a store that holds nothing is an error.
+    KeysOfAnEmptyStoreIsAnError,
+    /// A writer keeps no more than the first 16 MiB of a file.
+    TruncatesAt16MiB,
+}
+
+/// The name a stub that refuses or rewrites names writes `rel` under, or `None` when it
+/// refuses `rel`.
+fn named(flaw: Flaw, rel: &str) -> Option<String> {
+    let without = |bad: &[char]| (!rel.contains(bad)).then(|| rel.to_owned());
+    // A space that is followed by a name, and not by the end of the path or a slash.
+    let inner_space = rel
+        .as_bytes()
+        .windows(2)
+        .any(|pair| pair[0] == b' ' && pair[1] != b'/');
+    match flaw {
+        Flaw::WriterRefusesAnyDoubleDot => (!rel.contains("..")).then(|| rel.to_owned()),
+        Flaw::WriterRefusesAColon => without(&[':']),
+        Flaw::WriterRefusesUrlCharacters => without(&['?', '#', '%']),
+        Flaw::WriterRefusesPatternCharacters => without(&['*', '<', '>', '|']),
+        Flaw::WriterRefusesQuotesAndSeparators => without(&['"', '\'', '$', ',', ';']),
+        Flaw::WriterRefusesAnInnerSpace => (!inner_space).then(|| rel.to_owned()),
+        Flaw::WriterRewritesReservedCharacters => {
+            Some(rel.replace([':', '*', '?', '<', '>', '|', '"'], "_"))
+        }
+        Flaw::WriterEncodesASpace if inner_space => Some(rel.replace(' ', "%20")),
+        Flaw::WriterEncodesASpace => Some(rel.to_owned()),
+        _ => Some(rel.replace("%2e", ".").replace("%20", " ")),
+    }
+}
+
+/// The member name of a key, which is the whole text of the key of a set document.
+fn member_of(key: &StoreKey) -> &str {
+    key.as_str().rsplit("/m/").next().unwrap_or_default()
 }
 
 /// The bytes a stub that changes what is written keeps of `bytes`.
@@ -191,6 +266,7 @@ fn altered(flaw: Flaw, bytes: &[u8]) -> Vec<u8> {
             bytes[..bytes.len() - 1].to_vec()
         }
         Flaw::TruncatesAt1MiB => bytes[..bytes.len().min(1 << 20)].to_vec(),
+        Flaw::TruncatesAt16MiB => bytes[..bytes.len().min(16 << 20)].to_vec(),
         _ => bytes.to_vec(),
     }
 }
@@ -406,6 +482,17 @@ impl Flawed {
                 }
                 Ok(None)
             }
+            Some(Flaw::GetSameMemberFallback) => {
+                for other in self.inner.keys()? {
+                    if other != *key
+                        && member_of(&other) == member_of(key)
+                        && let Some(bytes) = self.inner.get(&other, rel)?
+                    {
+                        return Ok(Some(bytes));
+                    }
+                }
+                Ok(None)
+            }
             Some(Flaw::GetCaseFallback) => self.inner.get(key, &rel.to_lowercase()),
             Some(Flaw::GetUnicodeFallback) => {
                 if let Some(bytes) = self.inner.get(key, &rel.replace("e\u{301}", "\u{e9}"))? {
@@ -484,6 +571,21 @@ impl EntryWriter for Dropping<'_> {
     }
 }
 
+/// A writer that refuses a path or writes it under another name, as `named` says.
+struct Naming<'a> {
+    inner: Box<dyn EntryWriter + 'a>,
+    flaw: Flaw,
+}
+
+impl EntryWriter for Naming<'_> {
+    fn put_file(&mut self, rel: &str, bytes: &[u8]) -> Result<(), SeamError> {
+        match named(self.flaw, rel) {
+            Some(name) => self.inner.put_file(&name, bytes),
+            None => Err(SeamError::Refused(Reason::SetMember)),
+        }
+    }
+}
+
 impl ArtifactStore for Flawed {
     fn begin(&mut self, key: &StoreKey) -> Result<Box<dyn EntryWriter + '_>, SeamError> {
         let key = &self.resolve(key)?;
@@ -547,9 +649,29 @@ impl ArtifactStore for Flawed {
                     | Flaw::AllZeroStoredEmpty
                     | Flaw::LosesTheLastByteAtA4kMultiple
                     | Flaw::TruncatesAt1MiB
+                    | Flaw::TruncatesAt16MiB
             )
         {
             return Ok(Box::new(Altering {
+                inner: writer,
+                flaw,
+            }));
+        }
+        if let Some(flaw) = self.flaw
+            && matches!(
+                flaw,
+                Flaw::WriterRefusesAnyDoubleDot
+                    | Flaw::WriterRefusesAColon
+                    | Flaw::WriterRefusesUrlCharacters
+                    | Flaw::WriterRefusesPatternCharacters
+                    | Flaw::WriterRefusesQuotesAndSeparators
+                    | Flaw::WriterRefusesAnInnerSpace
+                    | Flaw::WriterRewritesReservedCharacters
+                    | Flaw::WriterEncodesASpace
+                    | Flaw::WriterPercentDecodes
+            )
+        {
+            return Ok(Box::new(Naming {
                 inner: writer,
                 flaw,
             }));
@@ -615,6 +737,19 @@ impl ArtifactStore for Flawed {
         if self.flaw == Some(Flaw::FilesCappedAt100) {
             files.truncate(100);
         }
+        if self.flaw == Some(Flaw::FilesCappedAt1000) {
+            files.truncate(1000);
+        }
+        if self.flaw == Some(Flaw::FilesFallBackToTheSameMember)
+            && files.is_empty()
+            && !self.begun.contains(key)
+        {
+            for other in self.inner.keys()? {
+                if other != *key && member_of(&other) == member_of(key) {
+                    return self.inner.files(&other);
+                }
+            }
+        }
         if self.flaw == Some(Flaw::FilesNaturalSort) {
             files.sort_by_key(|rel| (natural(rel), rel.clone()));
         }
@@ -637,8 +772,31 @@ impl ArtifactStore for Flawed {
                 kept = folded(self.flaw, rel);
                 kept.as_str()
             }
+            Some(Flaw::GetCollapsesSlashes) => {
+                kept = rel.replace("//", "/");
+                kept.as_str()
+            }
+            Some(Flaw::GetTakesADoubledTrailingSlash) => rel.strip_suffix("//").unwrap_or(rel),
+            Some(Flaw::GetReadsABackslashAsASlash) if rel.contains('\\') => {
+                let mut parts: Vec<&str> = Vec::new();
+                for part in rel.split(['/', '\\']) {
+                    match part {
+                        "" | "." => {}
+                        ".." => {
+                            parts.pop();
+                        }
+                        _ => parts.push(part),
+                    }
+                }
+                kept = parts.join("/");
+                kept.as_str()
+            }
+            Some(Flaw::GetTrimsTrailingControls) => rel.trim_end_matches(char::is_control),
             _ => rel,
         };
+        if self.flaw == Some(Flaw::GetOfEmptyOrDotIsTheEntryRoot) && matches!(rel, "" | ".") {
+            return Ok(Some(Vec::new()));
+        }
         if self.flaw == Some(Flaw::DeepPathsGetNone) && deep(rel) {
             return Ok(None);
         }
@@ -816,6 +974,12 @@ impl ArtifactStore for Flawed {
         }
         if self.flaw == Some(Flaw::KeysCappedAt100) {
             keys.truncate(100);
+        }
+        if self.flaw == Some(Flaw::KeysCappedAt1000) {
+            keys.truncate(1000);
+        }
+        if self.flaw == Some(Flaw::KeysOfAnEmptyStoreIsAnError) && keys.is_empty() {
+            return Err(SeamError::Permanent("the store is empty".to_owned()));
         }
         if self.flaw == Some(Flaw::KeysCollapseAcrossGenerations) {
             let mut seen: Vec<String> = Vec::new();

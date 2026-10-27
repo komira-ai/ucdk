@@ -8,6 +8,7 @@
 use ucdk_release_seams::kit::{Report, Scenario};
 
 pub mod hostile;
+pub mod loose;
 pub mod output_files;
 pub mod store;
 

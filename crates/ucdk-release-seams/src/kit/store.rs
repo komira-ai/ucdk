@@ -44,11 +44,19 @@ fn key_on(platform: &str, revision: &str, member: &str) -> StoreKey {
 
 /// Payloads that a store gets wrong when it treats bytes as text or sizes a buffer: one that ends
 /// in a line feed, in a carriage return and a line feed, or in a NUL; one that starts with a
-/// UTF-8 byte order mark; one of zero bytes alone; one of exactly 4096 bytes and one of 8192; and
-/// one just past 1 MiB. Each name is a path of its own.
+/// UTF-8 byte order mark; one of zero bytes alone; one of exactly 4096 bytes and one of 8192; one
+/// just past 1 MiB; and one just past 16 MiB. Each name is a path of its own.
 fn edge_payloads() -> Vec<(&'static str, Vec<u8>)> {
     // Never zero, and different at every few positions, so that a lost byte shows.
-    let patterned = |len: usize| -> Vec<u8> { (0..len).map(|n| (n % 251) as u8 + 1).collect() };
+    let patterned = |len: usize| -> Vec<u8> {
+        let unit: Vec<u8> = (1..=251).collect();
+        let mut bytes = Vec::with_capacity(len + unit.len());
+        while bytes.len() < len {
+            bytes.extend_from_slice(&unit);
+        }
+        bytes.truncate(len);
+        bytes
+    };
     vec![
         ("edge_ends_in_lf", b"text\n".to_vec()),
         ("edge_ends_in_crlf", b"text\r\n".to_vec()),
@@ -58,6 +66,7 @@ fn edge_payloads() -> Vec<(&'static str, Vec<u8>)> {
         ("edge_4096_bytes", patterned(4096)),
         ("edge_8192_bytes", patterned(8192)),
         ("edge_just_over_1_mib", patterned((1 << 20) + 10)),
+        ("edge_just_over_16_mib", patterned((16 << 20) + 10)),
     ]
 }
 
@@ -245,10 +254,13 @@ fn an_entry_is_listed_exactly<R: StoreRig>(rig: &R) {
     let k = key("build", "g1", "image");
     // Paths that differ only in case, in a trailing space, in a trailing dot or in the
     // composition of a character, in the file name or in a directory of the path, are different
-    // paths, a dotfile is a file, and more than a hundred paths are all listed.
+    // paths, a dotfile is a file, and more than a thousand paths are all listed, whatever page
+    // a store might list at most. No path is a file and a directory both: a file and a directory
+    // of one name cannot share an entry (`paths_that_escape_an_entry_are_refused`), so none of
+    // these is the directory of another.
     // The order is the bytewise one: digits count as characters, and a character above U+FFFF
     // comes after U+FF5E, as it does in UTF-8 and not in UTF-16.
-    let mut names: Vec<String> = ["z", "a/b", "m", "X", "x", "a", "a ", ".hidden", ".d/e"]
+    let mut names: Vec<String> = ["z", "q/b", "m", "X", "x", "a", "a ", ".hidden", ".d/e"]
         .map(str::to_owned)
         .to_vec();
     names.extend(["e\u{301}", "\u{e9}", "\u{fc}"].map(str::to_owned));
@@ -256,11 +268,11 @@ fn an_entry_is_listed_exactly<R: StoreRig>(rig: &R) {
     // The same differences in the directory part of a path, and a trailing dot.
     names.extend(
         [
-            "A/b",
+            "Q/b",
             "d/f",
             "d /f",
-            "e\u{301}/f",
-            "\u{e9}/f",
+            "e\u{301}d/f",
+            "\u{e9}d/f",
             "a.",
             "b/c",
             "b./c",
@@ -268,7 +280,18 @@ fn an_entry_is_listed_exactly<R: StoreRig>(rig: &R) {
         ]
         .map(str::to_owned),
     );
-    names.extend((0..120).map(|n| format!("many/f{n:03}")));
+    // Paths the contract allows, though they look like a climb, a URL, a pattern or an option:
+    // only a part that is `..` is barred, and a store neither refuses, decodes nor rewrites a
+    // character of a name. Each is written, listed and read back as it was given.
+    names.extend(
+        [
+            "a..b", "..a", "a..", "...", "a b", "a:b", "a?b", "a#b", "a%20b", "%2e%2e/x", "a*b",
+            "a|b", "a<b", "a>b", "a\"b", "a'b", "a$b", "a,b", "a;b", "con", "~", "-rf", "$x",
+            "w/a..b", "w/..a", "w/a b", "w/a:b",
+        ]
+        .map(str::to_owned),
+    );
+    names.extend((0..1100).map(|n| format!("many/f{n:04}")));
     {
         let mut writer = must(store.begin(&k), "begin");
         for rel in &names {
@@ -282,8 +305,7 @@ fn an_entry_is_listed_exactly<R: StoreRig>(rig: &R) {
         want,
         "the paths of the entry, sorted bytewise",
     );
-    // What a read of a nested path does is the business of `an_entry_reads_back_what_was_written`.
-    for rel in names.iter().filter(|rel| !rel.contains('/')) {
+    for rel in &names {
         same(
             must(store.get(&k, rel), "get"),
             Some(rel.as_bytes().to_vec()),
@@ -351,8 +373,8 @@ fn keys_of_two_scopes_are_listed_apart<R: StoreRig>(rig: &R) {
     // Scopes that share a member name and differ in the stage, the platform, the revision or the
     // generation alone, a member whose name starts with another's, member names that differ only
     // in case, in a trailing space, in a trailing dot, in composition or in a character that is not ASCII, the key
-    // of the set document beside the key of a member called `set`, and more keys than a store
-    // might list at most.
+    // of the set document beside the key of a member called `set`, and more than a thousand
+    // keys, more than a store might list on a page.
     let mut made = vec![
         key("build", "g1", "tool"),
         key("build", "g1", "tool2"),
@@ -372,7 +394,7 @@ fn keys_of_two_scopes_are_listed_apart<R: StoreRig>(rig: &R) {
             "the key of a set document",
         ),
     ];
-    made.extend((0..120).map(|n| key("build", "g3", &format!("m{n:03}"))));
+    made.extend((0..1100).map(|n| key("build", "g3", &format!("m{n:04}"))));
     for (n, k) in made.iter().enumerate() {
         must(
             must(store.begin(k), "begin").put_file(&format!("f{n}"), &[n as u8]),
@@ -398,7 +420,7 @@ fn paths_that_escape_an_entry_are_refused<R: StoreRig>(rig: &R) {
     let k = key("build", "g1", "tool");
     // Files that a refused path may name once its climb, its dot parts or its slashes are
     // taken away, each with bytes of its own.
-    let safe = ["x", "b", "c", "abs", "d"];
+    let safe = ["x", "b", "c", "abs", "d", "a/x"];
     {
         let mut writer = must(store.begin(&k), "begin");
         for rel in safe {
@@ -458,9 +480,13 @@ fn paths_that_escape_an_entry_are_refused<R: StoreRig>(rig: &R) {
             "put_file",
         );
     }
-    let mut climbing: Vec<String> = ["../x", "a/../x", "./x", "/x", "x/"]
-        .map(str::to_owned)
-        .to_vec();
+    // The empty path and `.` name the entry itself, which is no file; a doubled slash, a
+    // backslash and a control character at the end are no spelling of `x`.
+    let mut climbing: Vec<String> = [
+        "../x", "a/../x", "./x", "/x", "x/", "", ".", "a//x", "x//", "\\x", "..\\x", "x\0", "x\n",
+    ]
+    .map(str::to_owned)
+    .to_vec();
     for other in &beside {
         let climb = climb_to(&k, other, "secret");
         climbing.push(format!("./{climb}"));
@@ -476,9 +502,57 @@ fn paths_that_escape_an_entry_are_refused<R: StoreRig>(rig: &R) {
             &format!("get of {rel:?} reads no file"),
         );
     }
+    // The paths of an entry form a tree, as the output of a build does: a file and a directory
+    // of one name cannot both be in an entry. The second write of such a pair is Refused,
+    // whichever of the two came first and however deep the clash lies, it changes nothing, and
+    // a name that only starts with another's is no directory of it.
+    let clash = key("build", "g1", "clash");
+    {
+        let mut writer = must(store.begin(&clash), "begin");
+        for (rel, bytes) in [("f", "file"), ("p/q/r", "deep"), ("m/n", "nested")] {
+            must(writer.put_file(rel, bytes.as_bytes()), "put_file");
+        }
+        for bad in ["f/g", "f/g/h", "p", "p/q", "m/n/o/p"] {
+            let refusal = must_err(writer.put_file(bad, b"x"), &format!("put_file of {bad:?}"));
+            same(
+                matches!(refusal, SeamError::Refused(_)),
+                true,
+                &format!(
+                    "the path {bad:?}, a file where a directory is or the reverse, is Refused"
+                ),
+            );
+        }
+        for rel in ["fg", "f.g", "p/qq", "p/q/s"] {
+            must(writer.put_file(rel, rel.as_bytes()), "put_file");
+        }
+    }
+    // The order is the business of `an_entry_is_listed_exactly`.
+    let mut listed = must(store.files(&clash), "files");
+    listed.sort();
+    same(
+        listed,
+        ["f", "f.g", "fg", "m/n", "p/q/r", "p/q/s", "p/qq"]
+            .map(str::to_owned)
+            .to_vec(),
+        "the files after a file and a directory of one name were refused",
+    );
+    for (rel, want) in [("f", "file"), ("p/q/r", "deep"), ("m/n", "nested")] {
+        same(
+            must(store.get(&clash, rel), "get"),
+            Some(want.as_bytes().to_vec()),
+            &format!("{rel} after a path that clashes with it was refused"),
+        );
+    }
+    for directory in ["p", "p/q", "m"] {
+        same(
+            must(store.get(&clash, directory), "get"),
+            None,
+            &format!("{directory}, a directory of the entry, is no file"),
+        );
+    }
     let mut kept = must(store.keys(), "keys");
     kept.sort();
-    let mut want = vec![k, beside[0].clone(), beside[1].clone()];
+    let mut want = vec![k, beside[0].clone(), beside[1].clone(), clash];
     want.sort();
     same(kept, want, "the keys after only refused paths");
 }
@@ -536,7 +610,8 @@ fn two_entries_do_not_touch_each_other<R: StoreRig>(rig: &R) {
         "a path that only the entry of a longer key holds",
     );
     // Entries that differ in one part of the key alone, each with the same two paths and bytes
-    // of its own: a read answers for the entry it was asked of, whichever part is the one.
+    // of its own, and a file no other holds: a read answers for the entry it was asked of,
+    // whichever part is the one, and a path another holds is nothing in this one.
     let near = [
         key("build", "g1", "box"),
         key("test", "g1", "box"),
@@ -566,6 +641,10 @@ fn two_entries_do_not_touch_each_other<R: StoreRig>(rig: &R) {
             writer.put_file("d/f", format!("d/f of {n}").as_bytes()),
             "put_file of a nested path",
         );
+        must(
+            writer.put_file(&format!("only{n}"), format!("only{n}").as_bytes()),
+            "put_file of a path of its own",
+        );
     }
     for (n, entry) in near.iter().enumerate() {
         same(
@@ -578,7 +657,64 @@ fn two_entries_do_not_touch_each_other<R: StoreRig>(rig: &R) {
             Some(format!("d/f of {n}").into_bytes()),
             &format!("the file d/f of {entry}"),
         );
+        same(
+            must(store.get(entry, &format!("only{n}")), "get"),
+            Some(format!("only{n}").into_bytes()),
+            &format!("the file of its own of {entry}"),
+        );
+        let mut own = vec!["d/f".to_owned(), "f".to_owned(), format!("only{n}")];
+        own.sort();
+        let mut listed = must(store.files(entry), "files");
+        listed.sort();
+        same(
+            listed,
+            own,
+            &format!("the files of {entry}, and no file of an entry beside it"),
+        );
+        for m in (0..near.len()).filter(|m| *m != n) {
+            same(
+                must(store.get(entry, &format!("only{m}")), "get"),
+                None,
+                &format!("only{m}, a file of another entry, in {entry}"),
+            );
+        }
     }
+    // An entry that was never begun, whose key differs from a populated one in the stage, the
+    // platform, the revision, the generation or the member name alone, holds nothing, answers
+    // nothing for a path that the entry beside it holds, and is no entry afterwards.
+    let never = [
+        key("deploy", "g1", "box"),
+        key_on("linux-riscv64", "abc", "box"),
+        key_on("linux-x86_64", "xyz", "box"),
+        key("build", "g9", "box"),
+        key("build", "g1", "bo"),
+        key("build", "g1", "BOX"),
+        key("build", "g1", "box3"),
+    ];
+    for missing in &never {
+        same(
+            must(store.files(missing), "files"),
+            Vec::new(),
+            &format!("the files of {missing}, which was never begun"),
+        );
+        for rel in ["f", "d/f", "only0", "only4"] {
+            same(
+                must(store.get(missing, rel), "get"),
+                None,
+                &format!("{rel} of {missing}, which was never begun and has entries beside it"),
+            );
+        }
+    }
+    let mut kept = must(store.keys(), "keys");
+    kept.sort();
+    let mut want = vec![one, two, longer];
+    want.extend(near.iter().cloned());
+    want.sort();
+    same(
+        kept,
+        want,
+        "the keys after reads of keys that were never begun",
+    );
 }
 
 fn discard_removes_every_path_of_an_entry<R: StoreRig>(rig: &R) {
