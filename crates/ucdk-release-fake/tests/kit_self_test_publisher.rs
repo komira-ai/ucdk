@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The self-test of the publisher kit, first part: for every scenario a stub of the registry that
-//! breaks the promise it holds and is failed by it, the further stubs that a first version of a
-//! scenario let pass, the declarations a rig can get wrong, and a rig that can build one kind of
+//! breaks the promise it holds and is failed by it, further stubs, each a wrong implementation that
+//! fails exactly the scenarios its row names, the declarations a rig can get wrong, and a rig that can build one kind of
 //! channel only, which must skip exactly the scenarios that need another and fail every stub of the
 //! ones it still runs.
 
