@@ -411,6 +411,58 @@ pub fn check_tree(files: &[(String, String)]) -> Vec<Finding> {
         .collect()
 }
 
+/// The one file of production code that reads the wall clock: the home of `SystemClock`.
+pub const CLOCK_HOME: &str = "crates/ucdk-ledger/src/lease.rs";
+
+/// What reads the wall clock, or a monotonic one.
+const CLOCK_READS: [&str; 2] = ["SystemTime::now", "Instant::now"];
+
+/// Whether `path` is production source: a `.rs` file under the `src` directory of a crate.
+fn is_production_source(path: &str) -> bool {
+    path.ends_with(".rs") && path.starts_with("crates/") && path.split('/').nth(2) == Some("src")
+}
+
+/// The wall-clock rule: `SystemTime::now` and `Instant::now` are read in production code only
+/// in [`CLOCK_HOME`], so time reaches every other crate through the `Clock` it is given and a
+/// test moves it by hand. Test code, which is a file outside `src` or what follows a
+/// `#[cfg(test)]` line that gates a module of one (the unit-test module, last in its file),
+/// and comment lines are not production code. A `#[cfg(test)]` on any other item hides
+/// nothing after it.
+///
+/// Its limits: it scans only `crates/*/src` (not `xtask`, `sdk` or any other directory), and it
+/// matches the literal text of the two paths, so a read through a renamed import
+/// (`use std::time::Instant as Tick`) is not seen. It is a guard against the plain mistake, not a proof.
+pub fn check_wall_clock(files: &[(String, String)]) -> Vec<Finding> {
+    // The limits are the ones in the doc comment: `crates/*/src` only, and the literal paths.
+    files
+        .iter()
+        .filter(|(path, _)| is_production_source(path) && path != CLOCK_HOME)
+        .flat_map(|(path, text)| {
+            let lines: Vec<&str> = text.lines().collect();
+            let test_module_at = lines.windows(2).position(|w| {
+                w[0].trim() == "#[cfg(test)]"
+                    && (w[1].trim_start().starts_with("mod ")
+                        || w[1].trim_start().starts_with("pub mod "))
+            });
+            lines
+                .into_iter()
+                .enumerate()
+                .take(test_module_at.unwrap_or(usize::MAX))
+                .filter(|(_, line)| {
+                    !line.trim_start().starts_with("//")
+                        && CLOCK_READS.iter().any(|read| line.contains(read))
+                })
+                .map(move |(n, _)| {
+                    Finding::new(
+                        "wall-clock",
+                        format!("{path}:{}", n + 1),
+                        format!("the clock is read only in {CLOCK_HOME}; take a `Clock`"),
+                    )
+                })
+        })
+        .collect()
+}
+
 /// The name part of a trailer that carries an identity the lint lets through: the sign-off of
 /// the commit's own author (`Signed-off-by: Name <author email>`), and the assistant's no-reply
 /// co-author line. The address must be exactly that one; the name is still scanned by the rules.

@@ -17,13 +17,18 @@ use crate::{Finding, purity};
 
 /// Each crate, with the crates it must never depend on. A crate named here that does not exist
 /// yet (`ucdk-release-engine`) is a row that holds from the day it is added.
-pub const LAYERS: [(&str, &[&str]); 3] = [
+pub const LAYERS: [(&str, &[&str]); 5] = [
     ("ucdk-core", &["ucdk-ledger"]),
     (
         "ucdk-release-proto",
         &["ucdk-ledger", "ucdk-release-engine"],
     ),
     ("ucdk-release", &["ucdk-ledger", "ucdk-release-engine"]),
+    (
+        "ucdk-release-seams",
+        &["ucdk-ledger", "ucdk-release-engine"],
+    ),
+    ("ucdk-release-fake", &["ucdk-ledger", "ucdk-release-engine"]),
 ];
 
 /// What a manifest line sits under.
