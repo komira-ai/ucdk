@@ -11,16 +11,18 @@ use ucdk_release::test_report;
 use ucdk_release_proto::v1::{BuildSystemKind, Reason};
 use ucdk_release_seams::{
     BuildSystem, Command, EntryWriter, Heartbeat, Invocation, Located, SeamError, Shape,
-    TestOutcome,
+    TestOutcome, Verb,
 };
 
 #[derive(Default)]
 struct Faults {
     fail_at_call: Option<u32>,
+    failure_tail: String,
     die_at_call: Option<u32>,
     unstartable: bool,
     no_output: BTreeSet<String>,
     two_outputs: BTreeSet<String>,
+    unreadable_output: BTreeSet<String>,
     wrong_shape: BTreeSet<String>,
     directory_output: BTreeSet<String>,
     symlink_in_output: BTreeSet<String>,
@@ -30,6 +32,7 @@ struct Faults {
     test_fails: BTreeSet<String>,
     report_missing: BTreeSet<String>,
     report_unparseable: BTreeSet<String>,
+    report_skipped: BTreeSet<String>,
     beats: Option<(u32, Duration)>,
     silent_for: Option<Duration>,
 }
@@ -47,14 +50,15 @@ pub struct FakeBuildSystem {
 
 /// The directory and the file name an output of `label` is made at. The directory spells the
 /// label with `_` as `__`, `:` as `_c` and `/` as `_s`: every character has one spelling and
-/// no spelling starts another, so two labels never share a directory.
+/// no spelling starts another, so two labels never share a directory. The directory is under a
+/// root that holds a space, as a real path may.
 fn output_at(label: &str, suffix: &str) -> (String, String) {
     let name = label.rsplit([':', '/']).next().unwrap_or_default();
     let dir = label
         .replace('_', "__")
         .replace(':', "_c")
         .replace('/', "_s");
-    (format!("/out/{dir}"), format!("{name}{suffix}"))
+    (format!("/build out/{dir}"), format!("{name}{suffix}"))
 }
 
 /// What a build of `label` with `command` writes: it names every argument and every
@@ -69,6 +73,17 @@ fn render(label: &str, command: &Command) -> Vec<u8> {
         text.push_str(&format!("{pair:?}\n"));
     }
     text.into_bytes()
+}
+
+/// A report of `kind` whose results are all skipped, or of a target that was not built, so none
+/// of them ran.
+fn skipped_report(kind: BuildSystemKind) -> &'static [u8] {
+    match kind {
+        BuildSystemKind::Bazel => {
+            br#"{"testSummary":{"overallStatus":"FAILED_TO_BUILD","totalRunCount":4}}"#
+        }
+        _ => br#"{"TestResult":{"status":"SKIP"}}"#,
+    }
 }
 
 impl FakeBuildSystem {
@@ -92,6 +107,13 @@ impl FakeBuildSystem {
         self.faults.fail_at_call = Some(n);
     }
 
+    /// What an invocation that exits nonzero prints last; the `Permanent` answer of a build and
+    /// the tail of a test that did not pass carry it, as the seam promises the tail of the
+    /// output.
+    pub fn failure_tail(&mut self, tail: &str) {
+        self.faults.failure_tail = tail.to_owned();
+    }
+
     /// The `n`th invocation is a build killed under the runner: `Unknown`.
     pub fn die_at_call(&mut self, n: u32) {
         self.faults.die_at_call = Some(n);
@@ -110,6 +132,12 @@ impl FakeBuildSystem {
     /// The build of `label` lists two outputs; the seam refuses it as `Refused(BUILD_OUTPUT)`.
     pub fn two_outputs(&mut self, label: &str) {
         self.faults.two_outputs.insert(label.to_owned());
+    }
+
+    /// The listing of the build of `label` names another target, or a path that is relative,
+    /// climbs or holds a control character; the seam refuses it as `Refused(BUILD_OUTPUT)`.
+    pub fn lists_unreadable_output(&mut self, label: &str) {
+        self.faults.unreadable_output.insert(label.to_owned());
     }
 
     /// The output of `label` is a directory where a file is expected.
@@ -159,6 +187,11 @@ impl FakeBuildSystem {
         self.faults.report_unparseable.insert(label.to_owned());
     }
 
+    /// The report of the test target `label` holds only results that are skipped or untested.
+    pub fn report_skipped_only(&mut self, label: &str) {
+        self.faults.report_skipped.insert(label.to_owned());
+    }
+
     /// Each invocation beats `n` times, moving the clock by `step` before each beat.
     pub fn beats(&mut self, n: u32, step: Duration) {
         self.faults.beats = Some((n, step));
@@ -206,7 +239,8 @@ impl FakeBuildSystem {
         }
         if self.faults.fail_at_call == Some(n) {
             return Err(SeamError::Permanent(format!(
-                "the invocation of {label} exited 1"
+                "the invocation of {label} exited 1, and printed last: {}",
+                self.faults.failure_tail
             )));
         }
         Ok(command)
@@ -224,6 +258,18 @@ impl BuildSystem for FakeBuildSystem {
         heartbeat: &dyn Heartbeat,
     ) -> Result<Vec<Located>, SeamError> {
         let command = self.invoke(inv, heartbeat)?;
+        // A Bazel build locates its output with two more calls, with the flags of the build.
+        // They are not counted among the invocations that faults number, and do not beat.
+        if self.kind == BuildSystemKind::Bazel {
+            let located = [Verb::Query, Verb::Info].map(|verb| {
+                self.command(&Invocation {
+                    verb,
+                    report: None,
+                    ..*inv
+                })
+            });
+            self.commands.extend(located.into_iter().flatten());
+        }
         let label = inv.target.label.as_str();
         if self.faults.symlink_in_output.contains(label) {
             return Err(SeamError::Refused(Reason::BuildOutput));
@@ -253,7 +299,10 @@ impl BuildSystem for FakeBuildSystem {
             }
         };
         // The seam refuses a listing that is not exactly one output.
-        if self.faults.no_output.contains(label) || self.faults.two_outputs.contains(label) {
+        if self.faults.no_output.contains(label)
+            || self.faults.two_outputs.contains(label)
+            || self.faults.unreadable_output.contains(label)
+        {
             return Err(SeamError::Refused(Reason::BuildOutput));
         }
         let out = located("");
@@ -278,6 +327,8 @@ impl BuildSystem for FakeBuildSystem {
             test_report::ran(self.kind, None)
         } else if self.faults.report_unparseable.contains(label) {
             test_report::ran(self.kind, Some(b"this is not a report"))
+        } else if self.faults.report_skipped.contains(label) {
+            test_report::ran(self.kind, Some(skipped_report(self.kind)))
         } else {
             u32::from(!self.faults.test_runs_nothing.contains(label))
         };
@@ -288,7 +339,10 @@ impl BuildSystem for FakeBuildSystem {
             tail: if passed {
                 format!("{label} passed")
             } else {
-                format!("{label} did not pass")
+                format!(
+                    "{label} did not pass, and printed last: {}",
+                    self.faults.failure_tail
+                )
             },
         })
     }
