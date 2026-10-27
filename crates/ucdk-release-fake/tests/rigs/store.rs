@@ -15,12 +15,14 @@ pub enum Flaw {
     FilesAreNotSorted,
     /// A second `begin` on a key empties the entry and succeeds.
     SecondBeginResets,
-    /// `keys` lists one key for each member name.
-    KeysCollapseByMemberName,
+    /// `keys` lists one key for two keys that differ only in the generation.
+    KeysCollapseAcrossGenerations,
     /// A writer that accepts a path that climbs, and writes it somewhere else.
     WriterAcceptsClimbingPaths,
     /// `get` looks in every entry for the path and answers the first it finds.
     GetIgnoresTheKey,
+    /// `get` of a path the entry holds answers the bytes of the first entry that holds the path.
+    EntriesShareTheBytesOfAPath,
     /// `discard` leaves the first path of the entry in place.
     DiscardLeavesTheFirstPath,
     /// `files` of an entry that does not exist is an error.
@@ -93,6 +95,52 @@ pub enum Flaw {
     RewriteKeepsTheOldTail,
     /// A writer that takes a path that ends in a `.` or a `..` part and writes nothing.
     WriterAcceptsAPathEndingInADotPart,
+    /// A key of the set document is the key of the member called `set`.
+    SetKeyAliasesMemberSet,
+    /// `begin` of the key of a set document is refused.
+    SetKeyRefused,
+    /// Two keys that differ only in the platform are one entry.
+    PlatformIgnored,
+    /// Two keys that differ only in the revision are one entry.
+    RevisionIgnored,
+    /// Keys are folded to lower case, so two keys that differ only in case are one entry.
+    KeysAreCaseFolded,
+    /// Keys are put in one Unicode composition, so two that differ only in it are one entry.
+    KeysAreUnicodeFolded,
+    /// Trailing spaces of a key are trimmed, so two keys that differ in them are one entry.
+    KeysTrailingSpaceTrimmed,
+    /// Characters of a key that are not ASCII are all one character, so two keys that differ
+    /// only in them are one entry.
+    KeysNonAsciiAlike,
+    /// `discard` of a key discards every entry with the same member name.
+    DiscardSameMember,
+    /// `discard` of an entry that is not there discards every entry.
+    DiscardMissingWipes,
+    /// `discard` of an entry that is not there discards the entry begun last.
+    DiscardMissingRemovesLast,
+    /// `discard` of an entry that is not there begins it, empty.
+    DiscardMissingCreatesEmpty,
+    /// A writer that refuses a path that climbs, after it wrote the bytes over the file that the
+    /// path names without its climb.
+    RefusedPutOverwrites,
+    /// `get` of a path the entry does not hold answers the same path of a longer key.
+    GetPrefixFallback,
+    /// `get` of a path the entry does not hold answers the path in lower case.
+    GetCaseFallback,
+    /// `get` of a path the entry does not hold answers the path in the other Unicode composition.
+    GetUnicodeFallback,
+    /// A second write of a nested path that is shorter than the first keeps the old tail.
+    NestedRewriteKeepsTheOldTail,
+    /// A writer that takes an empty file at a nested path and writes nothing.
+    NestedEmptyIsDropped,
+    /// A path that was written empty keeps no later bytes.
+    EmptyThenNonEmptyIgnored,
+    /// A second write of a nested path that is empty is ignored.
+    NestedEmptyRewriteIgnored,
+    /// `files` sorts runs of digits by their value, so `f2` comes before `f10`.
+    FilesNaturalSort,
+    /// `files` sorts by UTF-16 code unit, so a character above U+FFFF comes before U+FF5E.
+    FilesUtf16Sort,
 }
 
 fn deep(rel: &str) -> bool {
@@ -106,6 +154,54 @@ fn folded(flaw: Option<Flaw>, rel: &str) -> String {
         Some(Flaw::UnicodeFolded) => rel.replace("e\u{301}", "\u{e9}"),
         _ => rel.to_owned(),
     }
+}
+
+/// The key as a store that confuses keys of one kind compares it, or `None` for a store that
+/// confuses none.
+fn alias(flaw: Option<Flaw>, key: &StoreKey) -> Option<String> {
+    let text = key.as_str();
+    let without = |index: usize| {
+        text.split('/')
+            .enumerate()
+            .filter(|(at, _)| *at != index)
+            .map(|(_, part)| part)
+            .collect::<Vec<_>>()
+            .join("/")
+    };
+    match flaw? {
+        Flaw::SetKeyAliasesMemberSet => Some(text.replace("/m/", "/")),
+        Flaw::PlatformIgnored => Some(without(1)),
+        Flaw::RevisionIgnored => Some(without(2)),
+        Flaw::KeysAreCaseFolded => Some(text.to_lowercase()),
+        Flaw::KeysAreUnicodeFolded => Some(text.replace("e\u{301}", "\u{e9}")),
+        Flaw::KeysTrailingSpaceTrimmed => Some(text.trim_end_matches(' ').to_owned()),
+        Flaw::KeysNonAsciiAlike => Some(
+            text.chars()
+                .map(|c| if c.is_ascii() { c } else { '?' })
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+/// A path as a natural sort reads it: a run of digits stands for its value.
+fn natural(rel: &str) -> Vec<(u8, u128, String)> {
+    let mut tokens = Vec::new();
+    let mut rest = rel;
+    while !rest.is_empty() {
+        let digits = rest.starts_with(|c: char| c.is_ascii_digit());
+        let end = rest
+            .find(|c: char| c.is_ascii_digit() != digits)
+            .unwrap_or(rest.len());
+        let (run, tail) = rest.split_at(end);
+        tokens.push(if digits {
+            (0, run.parse().unwrap_or(0), String::new())
+        } else {
+            (1, 0, run.to_owned())
+        });
+        rest = tail;
+    }
+    tokens
 }
 
 /// A writer for the stubs that change what a write does.
@@ -129,6 +225,19 @@ impl EntryWriter for Shaping<'_> {
             }
             return Ok(());
         }
+        let held = self.written.get(rel);
+        let ignored = match self.flaw {
+            Some(Flaw::EmptyThenNonEmptyIgnored) => {
+                !bytes.is_empty() && held.is_some_and(Vec::is_empty)
+            }
+            Some(Flaw::NestedEmptyRewriteIgnored) => {
+                bytes.is_empty() && rel.contains('/') && held.is_some()
+            }
+            _ => false,
+        };
+        if ignored {
+            return Ok(());
+        }
         let kept = match self.flaw {
             Some(Flaw::PutTruncatesAt64k) => &bytes[..bytes.len().min(65_536)],
             _ => bytes,
@@ -141,7 +250,9 @@ impl EntryWriter for Shaping<'_> {
                 self.written.insert(rel.to_owned(), all);
             }
             put
-        } else if self.flaw == Some(Flaw::RewriteKeepsTheOldTail) {
+        } else if self.flaw == Some(Flaw::RewriteKeepsTheOldTail)
+            || (self.flaw == Some(Flaw::NestedRewriteKeepsTheOldTail) && rel.contains('/'))
+        {
             let mut all = kept.to_vec();
             if let Some(old) = self.written.get(rel) {
                 all.extend_from_slice(old.get(kept.len()..).unwrap_or_default());
@@ -152,7 +263,11 @@ impl EntryWriter for Shaping<'_> {
             }
             put
         } else {
-            self.inner.put_file(rel, kept)
+            let put = self.inner.put_file(rel, kept);
+            if put.is_ok() {
+                self.written.insert(rel.to_owned(), kept.to_vec());
+            }
+            put
         };
         self.refused |= result.is_err();
         result
@@ -176,6 +291,48 @@ impl FakeStoreRig {
 pub struct Flawed {
     inner: FakeStore,
     flaw: Option<Flaw>,
+    /// The key last begun.
+    last: Option<StoreKey>,
+}
+
+impl Flawed {
+    /// The entry a key names in a store that confuses keys of one kind: the one that already
+    /// holds the place, if there is one.
+    fn resolve(&mut self, key: &StoreKey) -> Result<StoreKey, SeamError> {
+        if let Some(wanted) = alias(self.flaw, key) {
+            for other in self.inner.keys()? {
+                if alias(self.flaw, &other).as_deref() == Some(wanted.as_str()) {
+                    return Ok(other);
+                }
+            }
+        }
+        Ok(key.clone())
+    }
+
+    /// What `get` answers, in the stubs that answer for a path the entry does not hold.
+    fn fallback(&mut self, key: &StoreKey, rel: &str) -> Result<Option<Vec<u8>>, SeamError> {
+        match self.flaw {
+            Some(Flaw::GetPrefixFallback) => {
+                for other in self.inner.keys()? {
+                    if other != *key
+                        && other.as_str().starts_with(key.as_str())
+                        && let Some(bytes) = self.inner.get(&other, rel)?
+                    {
+                        return Ok(Some(bytes));
+                    }
+                }
+                Ok(None)
+            }
+            Some(Flaw::GetCaseFallback) => self.inner.get(key, &rel.to_lowercase()),
+            Some(Flaw::GetUnicodeFallback) => {
+                if let Some(bytes) = self.inner.get(key, &rel.replace("e\u{301}", "\u{e9}"))? {
+                    return Ok(Some(bytes));
+                }
+                self.inner.get(key, &rel.replace('\u{e9}', "e\u{301}"))
+            }
+            _ => Ok(None),
+        }
+    }
 }
 
 impl StoreRig for FakeStoreRig {
@@ -185,6 +342,7 @@ impl StoreRig for FakeStoreRig {
         Flawed {
             inner: FakeStore::new(),
             flaw: self.flaw,
+            last: None,
         }
     }
 }
@@ -210,6 +368,22 @@ impl EntryWriter for Folding<'_> {
     }
 }
 
+/// A writer that refuses a path that climbs, after it wrote the bytes over the file that the
+/// path names without its climb.
+struct WritesBeforeRefusing<'a>(Box<dyn EntryWriter + 'a>);
+
+impl EntryWriter for WritesBeforeRefusing<'_> {
+    fn put_file(&mut self, rel: &str, bytes: &[u8]) -> Result<(), SeamError> {
+        let refused = self.0.put_file(rel, bytes);
+        if let Some(name) = rel.strip_prefix("../")
+            && refused.is_err()
+        {
+            self.0.put_file(name, bytes).ok();
+        }
+        refused
+    }
+}
+
 /// A writer that takes, and drops, what `drops` says it takes, and passes on the rest.
 struct Dropping<'a> {
     inner: Box<dyn EntryWriter + 'a>,
@@ -228,6 +402,13 @@ impl EntryWriter for Dropping<'_> {
 
 impl ArtifactStore for Flawed {
     fn begin(&mut self, key: &StoreKey) -> Result<Box<dyn EntryWriter + '_>, SeamError> {
+        let key = &self.resolve(key)?;
+        if self.flaw == Some(Flaw::SetKeyRefused)
+            && key.as_str().ends_with("/set")
+            && !key.as_str().contains("/m/")
+        {
+            return Err(SeamError::Refused(Reason::SetMember));
+        }
         if self.flaw == Some(Flaw::SecondBeginResets) {
             self.inner.discard(key)?;
         }
@@ -243,6 +424,7 @@ impl ArtifactStore for Flawed {
         {
             return Err(SeamError::Refused(Reason::SetMember));
         }
+        self.last = Some(key.clone());
         let writer = self.inner.begin(key)?;
         if matches!(
             self.flaw,
@@ -251,6 +433,9 @@ impl ArtifactStore for Flawed {
                     | Flaw::PutTruncatesAt64k
                     | Flaw::AppendOnRewrite
                     | Flaw::RewriteKeepsTheOldTail
+                    | Flaw::NestedRewriteKeepsTheOldTail
+                    | Flaw::EmptyThenNonEmptyIgnored
+                    | Flaw::NestedEmptyRewriteIgnored
                     | Flaw::WriterPoisonedAfterRefusal
                     | Flaw::TrailingSpaceTrimmed
                     | Flaw::UnicodeFolded
@@ -278,6 +463,9 @@ impl ArtifactStore for Flawed {
                 Some(|rel, _| rel.ends_with("/.") || rel.ends_with("/.."))
             }
             Some(Flaw::EmptyFileIsDropped) => Some(|_, bytes| bytes.is_empty()),
+            Some(Flaw::NestedEmptyIsDropped) => {
+                Some(|rel, bytes| bytes.is_empty() && rel.contains('/'))
+            }
             _ => None,
         };
         if let Some(drops) = drops {
@@ -286,6 +474,9 @@ impl ArtifactStore for Flawed {
                 drops,
             }));
         }
+        if self.flaw == Some(Flaw::RefusedPutOverwrites) {
+            return Ok(Box::new(WritesBeforeRefusing(writer)));
+        }
         if self.flaw == Some(Flaw::WriterAcceptsClimbingPaths) {
             return Ok(Box::new(Climbing(writer)));
         }
@@ -293,6 +484,7 @@ impl ArtifactStore for Flawed {
     }
 
     fn files(&mut self, key: &StoreKey) -> Result<Vec<String>, SeamError> {
+        let key = &self.resolve(key)?;
         if self.flaw == Some(Flaw::MissingEntryIsAnError) && !self.inner.keys()?.contains(key) {
             return Err(SeamError::Permanent(format!("{key} does not exist")));
         }
@@ -320,10 +512,17 @@ impl ArtifactStore for Flawed {
         if self.flaw == Some(Flaw::FilesCappedAt100) {
             files.truncate(100);
         }
+        if self.flaw == Some(Flaw::FilesNaturalSort) {
+            files.sort_by_key(|rel| (natural(rel), rel.clone()));
+        }
+        if self.flaw == Some(Flaw::FilesUtf16Sort) {
+            files.sort_by_key(|rel| rel.encode_utf16().collect::<Vec<u16>>());
+        }
         Ok(files)
     }
 
     fn get(&mut self, key: &StoreKey, rel: &str) -> Result<Option<Vec<u8>>, SeamError> {
+        let key = &self.resolve(key)?;
         let kept;
         let rel = match self.flaw {
             Some(Flaw::PathsAreCaseFolded) => {
@@ -348,6 +547,15 @@ impl ArtifactStore for Flawed {
             }
             return Ok(None);
         }
+        if self.flaw == Some(Flaw::EntriesShareTheBytesOfAPath)
+            && self.inner.get(key, rel)?.is_some()
+        {
+            for other in self.inner.keys()? {
+                if let Some(bytes) = self.inner.get(&other, rel)? {
+                    return Ok(Some(bytes));
+                }
+            }
+        }
         if self.flaw == Some(Flaw::GetLosesNestedPaths) && rel.contains('/') {
             return Ok(None);
         }
@@ -362,7 +570,10 @@ impl ArtifactStore for Flawed {
             }
             return self.inner.get(key, &parts.join("/"));
         }
-        let found = self.inner.get(key, rel)?;
+        let mut found = self.inner.get(key, rel)?;
+        if found.is_none() {
+            found = self.fallback(key, rel)?;
+        }
         if found.is_none()
             && self.flaw == Some(Flaw::GetOfADirectoryIsEmpty)
             && self
@@ -387,6 +598,44 @@ impl ArtifactStore for Flawed {
     }
 
     fn discard(&mut self, key: &StoreKey) -> Result<(), SeamError> {
+        let key = &self.resolve(key)?;
+        if !self.inner.keys()?.contains(key) {
+            match self.flaw {
+                Some(Flaw::DiscardMissingWipes) => {
+                    for each in self.inner.keys()? {
+                        self.inner.discard(&each)?;
+                    }
+                    return Ok(());
+                }
+                Some(Flaw::DiscardMissingRemovesLast) => {
+                    if let Some(last) = self.last.clone() {
+                        self.inner.discard(&last)?;
+                    }
+                    return Ok(());
+                }
+                Some(Flaw::DiscardMissingCreatesEmpty) => {
+                    drop(self.inner.begin(key)?);
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+        if self.flaw == Some(Flaw::DiscardSameMember) {
+            let member = |key: &StoreKey| {
+                key.as_str()
+                    .rsplit("/m/")
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            let wanted = member(key);
+            for other in self.inner.keys()? {
+                if member(&other) == wanted {
+                    self.inner.discard(&other)?;
+                }
+            }
+            return Ok(());
+        }
         if self.flaw == Some(Flaw::DiscardWipesEveryEntry) {
             for each in self.inner.keys()? {
                 self.inner.discard(&each)?;
@@ -451,17 +700,19 @@ impl ArtifactStore for Flawed {
         if self.flaw == Some(Flaw::KeysCappedAt100) {
             keys.truncate(100);
         }
-        if self.flaw == Some(Flaw::KeysCollapseByMemberName) {
+        if self.flaw == Some(Flaw::KeysCollapseAcrossGenerations) {
             let mut seen: Vec<String> = Vec::new();
             keys.retain(|key| {
-                let member = key
+                let without_generation = key
                     .as_str()
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or_default()
-                    .to_owned();
-                let fresh = !seen.contains(&member);
-                seen.push(member);
+                    .split('/')
+                    .enumerate()
+                    .filter(|(at, _)| *at != 3)
+                    .map(|(_, part)| part)
+                    .collect::<Vec<_>>()
+                    .join("/");
+                let fresh = !seen.contains(&without_generation);
+                seen.push(without_generation);
                 fresh
             });
         }

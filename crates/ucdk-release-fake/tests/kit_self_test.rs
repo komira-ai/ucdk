@@ -20,6 +20,7 @@ fn further_store() {
     const LISTED: &str = "an_entry_is_listed_exactly";
     const SECOND_BEGIN: &str = "a_second_begin_on_one_key_is_refused";
     const KEYS: &str = "keys_of_two_scopes_are_listed_apart";
+    const TWO: &str = "two_entries_do_not_touch_each_other";
     const DISCARD: &str = "discard_removes_every_path_of_an_entry";
     further_stubs_fail_exactly(
         "store",
@@ -29,6 +30,7 @@ fn further_store() {
             (Store::GetIsLossy, &[READ_BACK]),
             (Store::GetTruncatesAt4k, &[READ_BACK]),
             (Store::GetOfADirectoryIsEmpty, &[READ_BACK]),
+            (Store::GetIgnoresTheKey, &[LISTED, TWO]),
             (Store::WriterAcceptsATrailingSlash, &[ESCAPES]),
             (Store::WriterAcceptsADotPart, &[ESCAPES]),
             (Store::WriterAcceptsControlCharacters, &[ESCAPES]),
@@ -57,6 +59,28 @@ fn further_store() {
             (Store::KeysCappedAt100, &[KEYS]),
             (Store::RewriteKeepsTheOldTail, &[READ_BACK]),
             (Store::WriterAcceptsAPathEndingInADotPart, &[ESCAPES]),
+            (Store::SetKeyAliasesMemberSet, &[KEYS]),
+            (Store::SetKeyRefused, &[KEYS]),
+            (Store::PlatformIgnored, &[KEYS, DISCARD]),
+            (Store::RevisionIgnored, &[KEYS, DISCARD]),
+            (Store::KeysAreCaseFolded, &[KEYS]),
+            (Store::KeysAreUnicodeFolded, &[KEYS]),
+            (Store::KeysTrailingSpaceTrimmed, &[KEYS]),
+            (Store::KeysNonAsciiAlike, &[KEYS]),
+            (Store::DiscardSameMember, &[DISCARD]),
+            (Store::DiscardMissingWipes, &[DISCARD]),
+            (Store::DiscardMissingRemovesLast, &[DISCARD]),
+            (Store::DiscardMissingCreatesEmpty, &[DISCARD]),
+            (Store::RefusedPutOverwrites, &[ESCAPES]),
+            (Store::GetPrefixFallback, &[TWO]),
+            (Store::GetCaseFallback, &[LISTED]),
+            (Store::GetUnicodeFallback, &[LISTED]),
+            (Store::NestedRewriteKeepsTheOldTail, &[READ_BACK]),
+            (Store::NestedEmptyIsDropped, &[READ_BACK]),
+            (Store::EmptyThenNonEmptyIgnored, &[READ_BACK]),
+            (Store::NestedEmptyRewriteIgnored, &[READ_BACK]),
+            (Store::FilesNaturalSort, &[LISTED]),
+            (Store::FilesUtf16Sort, &[LISTED]),
         ],
         |flaw| run_store_kit(&FakeStoreRig::flawed(flaw)),
     );
@@ -83,7 +107,7 @@ fn store() {
             ),
             (
                 "keys_of_two_scopes_are_listed_apart",
-                Store::KeysCollapseByMemberName,
+                Store::KeysCollapseAcrossGenerations,
             ),
             (
                 "paths_that_escape_an_entry_are_refused",
@@ -91,7 +115,7 @@ fn store() {
             ),
             (
                 "two_entries_do_not_touch_each_other",
-                Store::GetIgnoresTheKey,
+                Store::EntriesShareTheBytesOfAPath,
             ),
             (
                 "discard_removes_every_path_of_an_entry",
