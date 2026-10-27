@@ -228,9 +228,18 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
         (Stub::Flaw(F::ObserveIgnoresVersion), &[OBSERVE_ABSENT]),
         (Stub::Flaw(F::ObserveIgnoresPlatform), &[OBSERVE_ABSENT]),
         (Stub::Flaw(F::ObserveIgnoresChannel), &[OBSERVE_ABSENT]),
-        (Stub::Flaw(F::FetchIgnoresVersion), &[OBSERVE_ABSENT]),
-        (Stub::Flaw(F::FetchIgnoresPlatform), &[OBSERVE_ABSENT]),
-        (Stub::Flaw(F::FetchIgnoresChannel), &[OBSERVE_ABSENT]),
+        (
+            Stub::Flaw(F::FetchIgnoresVersion),
+            &[OBSERVE_ABSENT, COMMIT_CARRIES],
+        ),
+        (
+            Stub::Flaw(F::FetchIgnoresPlatform),
+            &[OBSERVE_ABSENT, COMMIT_CARRIES],
+        ),
+        (
+            Stub::Flaw(F::FetchIgnoresChannel),
+            &[OBSERVE_ABSENT, COMMIT_CARRIES],
+        ),
         (Stub::Flaw(F::ListDropsTheStamp), &[LIST]),
         (Stub::Flaw(F::ListWrongDigest), &[LIST]),
         (Stub::Flaw(F::ListIgnoresTheChannel), &[LIST]),
@@ -292,7 +301,10 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
         (Stub::Odd(Odd::DeclaresSealsOnly), &[SEALED]),
         (Stub::Odd(Odd::SealedIsDuplicate), &[SEALED]),
         (Stub::Odd(Odd::SealedIsDuplicateOnOneCall), &[SEALED]),
-        (Stub::Odd(Odd::SealsUndeclared), &[OBSERVE_ABSENT, YANK]),
+        (
+            Stub::Odd(Odd::SealsUndeclared),
+            &[OBSERVE_ABSENT, ABORT, YANK, COMMIT_CARRIES],
+        ),
         (Stub::Flaw(F::BurnedReadsAsAbsent), &[BURNED]),
         (Stub::Flaw(F::BurnedCommitIsCommitted), &[BURNED]),
         (Stub::Flaw(F::EchoesTheDeclaredDigest), &[ECHO]),
@@ -324,7 +336,7 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
         (Stub::Hook(Hook::SiblingDiffersInTwoFields), &[DECLARES]),
         (
             Stub::Hook(Hook::SiblingIsTheBase),
-            &[OBSERVE_ABSENT, ABORT, YANK, LIST, DECLARES],
+            &[OBSERVE_ABSENT, ABORT, YANK, LIST, COMMIT_CARRIES, DECLARES],
         ),
         (Stub::Odd(Odd::NoShapes), &[DECLARES]),
         (
@@ -348,6 +360,14 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
         ),
         (Stub::More(More::EchoesOnAMultiMemberSet), &[ECHO]),
         (Stub::More(More::EchoesOnAYankedCoordinate), &[ECHO]),
+        (Stub::More(More::StageDupOverwritesHeld), &[DUPLICATE_SET]),
+        (Stub::More(More::StageDupYanksHeld), &[DUPLICATE_SET]),
+        (Stub::More(More::CommitDupYanksHeld), &[DUPLICATE_SET]),
+        (
+            Stub::More(More::CommitPublishesSiblingStagedBytes),
+            &[COMMIT_CARRIES],
+        ),
+        (Stub::More(More::AbortWithdrawsCommittedSibling), &[ABORT]),
     ];
     for field in Field::ALL {
         table.extend([
@@ -355,11 +375,11 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
             (Stub::More(More::AbortSiblings(field)), &[ABORT][..]),
             (
                 Stub::More(More::StageSiblingTaken(field)),
-                &[OBSERVE_ABSENT, ABORT, YANK][..],
+                &[OBSERVE_ABSENT, ABORT, YANK, COMMIT_CARRIES][..],
             ),
             (
                 Stub::More(More::CommitSiblingTaken(field)),
-                &[OBSERVE_ABSENT, YANK][..],
+                &[OBSERVE_ABSENT, YANK, COMMIT_CARRIES][..],
             ),
             (
                 Stub::More(More::ObserveStagedSibling(field)),

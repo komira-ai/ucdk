@@ -105,6 +105,18 @@ pub enum More {
     EchoesOnAMultiMemberSet,
     /// An observe of a yanked coordinate echoes the digest the writer declared.
     EchoesOnAYankedCoordinate,
+    /// A stage of a set that is answered `Duplicate` replaces the bytes of the coordinate another
+    /// writer holds with its own.
+    StageDupOverwritesHeld,
+    /// A stage of a set that is answered `Duplicate` yanks the coordinate another writer holds.
+    StageDupYanksHeld,
+    /// A commit of a set that is answered `Duplicate` yanks the coordinate another writer holds.
+    CommitDupYanksHeld,
+    /// A commit of one coordinate publishes the bytes staged at a coordinate of its name that
+    /// differs in a field.
+    CommitPublishesSiblingStagedBytes,
+    /// An abort also yanks the committed coordinates of the name it names that differ in a field.
+    AbortWithdrawsCommittedSibling,
 }
 
 pub struct MoreRig {
@@ -347,6 +359,23 @@ impl Wrapped {
         )
     }
 
+    /// The coordinates of `items` that another writer holds.
+    fn held_of_others(&self, items: &[StageItem<'_>]) -> Vec<Coordinate> {
+        items
+            .iter()
+            .filter(|i| self.others.contains(i.coordinate))
+            .map(|i| i.coordinate.clone())
+            .collect()
+    }
+
+    /// Yanks each of `coordinates`, which the registry has no business to touch.
+    fn yank_all(&mut self, coordinates: &[Coordinate]) {
+        for k in coordinates {
+            let grant = self.internal(GrantPhase::Commit, std::slice::from_ref(k));
+            let _ = self.base.yank(&grant, k, "a wrong implementation");
+        }
+    }
+
     /// Whether a coordinate a call went through with is held or staged and is of the name of
     /// `c`, differing in `field`.
     fn sibling_in_place(&self, c: &Coordinate, field: Field, held_only: bool) -> bool {
@@ -470,6 +499,19 @@ impl Publisher for Wrapped {
                 let _ = self.base.stage(&grant, std::slice::from_ref(item));
             }
         }
+        if result == Ok(StageAnswer::Duplicate) && items.len() > 1 {
+            let held = self.held_of_others(items);
+            if self.is(More::StageDupOverwritesHeld) {
+                for item in items.iter().filter(|i| held.contains(i.coordinate)) {
+                    self.base
+                        .inner
+                        .present_different(item.coordinate, item.file.bytes);
+                }
+            }
+            if self.is(More::StageDupYanksHeld) {
+                self.yank_all(&held);
+            }
+        }
         if result == Ok(StageAnswer::Staged) {
             let taken = match self.flaw() {
                 Some(More::StageAfterAbortIsDuplicate) => {
@@ -504,6 +546,15 @@ impl Publisher for Wrapped {
                     .cloned()
                     .collect();
                 self.dropped.extend(unnamed);
+            }
+            if self.is(More::AbortWithdrawsCommittedSibling) {
+                let siblings: Vec<Coordinate> = self
+                    .committed
+                    .iter()
+                    .filter(|c| !ks.contains(c) && ks.iter().any(|k| c.name == k.name))
+                    .cloned()
+                    .collect();
+                self.yank_all(&siblings);
             }
             if let Some(More::AbortSiblings(field)) = self.flaw() {
                 let siblings: Vec<Coordinate> = self
@@ -564,6 +615,10 @@ impl Publisher for Wrapped {
             result = self.base.commit(g, items);
         }
         if result == Ok(CommitAnswer::Duplicate) {
+            if items.len() > 1 && self.is(More::CommitDupYanksHeld) {
+                let held = self.held_of_others(items);
+                self.yank_all(&held);
+            }
             if self.is(More::DuplicateRestamps) {
                 for item in items {
                     self.restamped
@@ -610,6 +665,16 @@ impl Publisher for Wrapped {
                     .staged
                     .iter()
                     .find(|(c, _)| c != item.coordinate && self.base.inner.is_staged(c))
+            {
+                self.base.inner.present_different(item.coordinate, theirs);
+            }
+            if self.is(More::CommitPublishesSiblingStagedBytes)
+                && let [item] = items
+                && let Some((_, theirs)) = self.staged.iter().find(|(c, _)| {
+                    c != item.coordinate
+                        && c.name == item.coordinate.name
+                        && self.base.inner.is_staged(c)
+                })
             {
                 self.base.inner.present_different(item.coordinate, theirs);
             }
