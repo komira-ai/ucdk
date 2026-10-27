@@ -16,9 +16,13 @@ pub enum Presence {
     Staged(Held),
     /// It is published, with what the registry holds.
     Present(Held),
-    /// It was published and then withdrawn: burned, whatever its bytes. A registry may report a
+    /// It was published and then withdrawn, whatever its bytes. A registry may report a
     /// coordinate withdrawn by someone else.
     Yanked(Held),
+    /// The coordinate was claimed and can never be published: the number of a group that failed.
+    /// It holds no bytes, so there is no digest to compare and no `Held` to carry. It is not
+    /// `Absent` (nothing may be put there) and not a withdrawal (nothing was ever published).
+    Burned,
 }
 
 /// What to do with one coordinate.
@@ -37,7 +41,8 @@ pub enum PublishDecision {
 /// Decides the coordinate whose bytes have the identity digest `ours`, given what the registry
 /// reports. Digests are compared byte for byte. A held coordinate, staged or published, that
 /// exposes no digest cannot be compared, and a comparison with no common field is a refusal,
-/// never equality (`CHANNEL`). A yanked coordinate is refused whatever its bytes.
+/// never equality (`CHANNEL`). A yanked coordinate is refused whatever its bytes, and a burned
+/// one is refused with `PUBLISH_BURNED`: it is never put, never retried and never read as absent.
 ///
 /// This is the decision of the preflight observation and of the stage phase. The commit phase
 /// reads a staged coordinate with another digest as `PUBLISH_STAGE`, because there the staged
@@ -46,6 +51,7 @@ pub fn decide_publish(ours: &str, presence: &Presence) -> PublishDecision {
     match presence {
         Presence::Absent => PublishDecision::Put,
         Presence::Yanked(_) => PublishDecision::Refused(Reason::PublishYanked),
+        Presence::Burned => PublishDecision::Refused(Reason::PublishBurned),
         Presence::Staged(held) | Presence::Present(held) => {
             if held.digest.is_empty() {
                 PublishDecision::Refused(Reason::Channel)

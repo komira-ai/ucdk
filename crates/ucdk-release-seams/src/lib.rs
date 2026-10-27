@@ -28,13 +28,13 @@ mod store;
 mod time;
 
 pub use build::{BuildSystem, Command, Invocation, Located, Shape, TestOutcome, Verb};
-pub use error::{Backoff, SeamError};
+pub use error::{Backoff, ObserveFailure, ObserveWhen, SeamError};
 pub use files::{DirEntry, FileKind, OutputFiles, check_path, entry_path, valid_rel};
 pub use grant::{Grant, GrantRequest, GrantSource};
 pub use process::{Exit, ProcessResult, ProcessRunner, ProcessSpec};
 pub use publisher::{
-    Blob, CommitAnswer, CommitUnit, ListScope, Listed, Publisher, StageAnswer, StageItem,
+    Blob, CommitAnswer, CommitUnit, ListScope, Listed, Publisher, StageAnswer, StageItem, YankUnit,
 };
 pub use source::{Source, SourceStamp};
 pub use store::{ArtifactStore, EntryWriter};
-pub use time::{Heartbeat, Pause, Stop};
+pub use time::{Heartbeat, PAUSE_TICK_MS, Pause, Stop};

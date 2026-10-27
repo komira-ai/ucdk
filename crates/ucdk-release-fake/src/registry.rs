@@ -12,7 +12,7 @@ use ucdk_release::publish::{Held, Presence};
 use ucdk_release_proto::v1::{ArtifactType, Coordinate, Reason};
 use ucdk_release_seams::{
     Backoff, CommitAnswer, CommitUnit, Grant, ListScope, Listed, Publisher, SeamError, StageAnswer,
-    StageItem,
+    StageItem, YankUnit,
 };
 
 use crate::token::{coordinate_key, decode};
@@ -97,6 +97,7 @@ pub struct FakeRegistry {
     committed: BTreeMap<String, Stored>,
     staged: BTreeMap<String, Staged>,
     others_staged: BTreeMap<String, Stored>,
+    burned: BTreeSet<String>,
     commit_calls: u32,
     observes: u32,
     commits: Vec<Vec<String>>,
@@ -164,6 +165,7 @@ impl FakeRegistry {
             committed: BTreeMap::new(),
             staged: BTreeMap::new(),
             others_staged: BTreeMap::new(),
+            burned: BTreeSet::new(),
             commit_calls: 0,
             observes: 0,
             commits: Vec::new(),
@@ -269,6 +271,19 @@ impl FakeRegistry {
                 yanked: false,
             },
         );
+    }
+
+    /// `coordinate` is burned: a failed group claimed its number and it can never be published.
+    /// An observe answers `Burned`, a `stage` or a `commit` over it answers `Duplicate`, `fetch`
+    /// finds nothing, `newest` and `list` do not return it and `yank` is refused (`Permanent`).
+    /// Burned wins over everything the registry held there: a committed or staged coordinate of
+    /// that name is dropped, so it is no longer readable, listable or yankable.
+    pub fn burn(&mut self, coordinate: &Coordinate) {
+        let key = coordinate_key(coordinate);
+        self.committed.remove(&key);
+        self.staged.remove(&key);
+        self.others_staged.remove(&key);
+        self.burned.insert(key);
     }
 
     /// Another writer commits the first coordinate of the next commit call with `bytes`, just
@@ -476,6 +491,10 @@ impl Publisher for FakeRegistry {
         self.limit
     }
 
+    fn yank_unit(&self) -> YankUnit {
+        YankUnit::Coordinate
+    }
+
     fn observe(
         &mut self,
         g: &Grant,
@@ -511,6 +530,9 @@ impl Publisher for FakeRegistry {
         self.reads.push(Read::Index);
         if self.faults.fail_index_read {
             return Err(SeamError::Unknown("the index read failed".to_owned()));
+        }
+        if self.burned.contains(&key) {
+            return Ok(Presence::Burned);
         }
         if self.committed.contains_key(&key) && self.faults.read_lag > 0 {
             self.faults.read_lag -= 1;
@@ -554,6 +576,7 @@ impl Publisher for FakeRegistry {
         self.stages.push(ks.clone());
         let taken = |k: &String| {
             self.committed.contains_key(k)
+                || self.burned.contains(k)
                 || self.staged.contains_key(k)
                 || self.others_staged.contains_key(k)
         };
@@ -615,7 +638,10 @@ impl Publisher for FakeRegistry {
         if self.faults.commit_set_fails_whole {
             return Err(SeamError::Permanent("the set commit failed".to_owned()));
         }
-        if ks.iter().any(|k| self.committed.contains_key(k)) {
+        if ks
+            .iter()
+            .any(|k| self.committed.contains_key(k) || self.burned.contains(k))
+        {
             return Ok(CommitAnswer::Duplicate);
         }
         if self.staging {

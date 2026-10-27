@@ -3,7 +3,107 @@
 
 use ucdk_release::codec::GrantFault;
 use ucdk_release_proto::v1::Reason;
-use ucdk_release_seams::{Backoff, Grant, SeamError};
+use ucdk_release_seams::{Backoff, Grant, ObserveFailure, ObserveWhen, PAUSE_TICK_MS, SeamError};
+
+#[test]
+fn a_failed_preflight_observe_that_promises_no_effect_is_refused_not_indeterminate() {
+    // Before any write, `Refused(r)` is refused with its own reason `r`, `Permanent` is refused
+    // with `CHANNEL` (the same call fails again), and a denied grant is `CREDENTIAL`. Every other
+    // failure leaves the registry unread and is `INDETERMINATE`.
+    let want = [
+        ObserveFailure::Refused(Reason::Credential),
+        ObserveFailure::Refused(Reason::Channel),
+        ObserveFailure::Indeterminate,
+        ObserveFailure::Indeterminate,
+        ObserveFailure::Indeterminate,
+        ObserveFailure::Indeterminate,
+        ObserveFailure::Indeterminate,
+    ];
+    let got: Vec<ObserveFailure> = every_variant()
+        .iter()
+        .map(|e| e.observe_failure(ObserveWhen::Preflight))
+        .collect();
+    assert_eq!(got, want);
+}
+
+#[test]
+fn a_preflight_refusal_keeps_the_reason_the_registry_gave() {
+    for reason in [Reason::Channel, Reason::Credential, Reason::PublishBurned] {
+        assert_eq!(
+            SeamError::Refused(reason).observe_failure(ObserveWhen::Preflight),
+            ObserveFailure::Refused(reason)
+        );
+    }
+}
+
+#[test]
+fn a_denied_grant_at_preflight_is_a_credential_refusal_and_any_other_grant_fault_is_not() {
+    let got: Vec<ObserveFailure> = [
+        GrantFault::Denied,
+        GrantFault::Expired,
+        GrantFault::Used,
+        GrantFault::Unreachable,
+    ]
+    .into_iter()
+    .map(|f| SeamError::GrantRefused(f).observe_failure(ObserveWhen::Preflight))
+    .collect();
+    assert_eq!(
+        got,
+        [
+            ObserveFailure::Refused(Reason::Credential),
+            ObserveFailure::Indeterminate,
+            ObserveFailure::Indeterminate,
+            ObserveFailure::Indeterminate,
+        ]
+    );
+}
+
+#[test]
+fn a_failed_observe_after_an_effect_may_have_landed_is_always_indeterminate() {
+    // After the S3 `Duplicate`, a commit answer or a read-back poll, the outcome concerns the
+    // effect, which is unknown: a refusal of the observe, a permanent failure and a denied grant
+    // say nothing about it, so none of them is a refusal of the action.
+    let mut every = every_variant();
+    every.extend([
+        SeamError::Refused(Reason::Channel),
+        SeamError::GrantRefused(GrantFault::Denied),
+        SeamError::GrantRefused(GrantFault::Used),
+        SeamError::GrantRefused(GrantFault::Unreachable),
+    ]);
+    for error in every {
+        assert_eq!(
+            error.observe_failure(ObserveWhen::AfterEffect),
+            ObserveFailure::Indeterminate,
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn a_pause_tick_is_one_second_and_a_backoff_converts_a_wait_through_it() {
+    // The documented value of the tick, and the one conversion every registry uses: a wait told
+    // in milliseconds or seconds becomes whole ticks of `PAUSE_TICK_MS`, rounded up so a
+    // registry never asks for less than it was told, and saturating.
+    assert_eq!(PAUSE_TICK_MS, 1000);
+    let tick = u64::from(PAUSE_TICK_MS);
+    for (ms, ticks) in [
+        (0, 0),
+        (1, 1),
+        (tick - 1, 1),
+        (tick, 1),
+        (tick + 1, 2),
+        (7 * tick, 7),
+        (u64::MAX, u32::MAX),
+    ] {
+        assert_eq!(Backoff::after_millis(ms), Backoff { ticks }, "{ms} ms");
+    }
+    assert_eq!(Backoff::after_seconds(0), Backoff { ticks: 0 });
+    assert_eq!(Backoff::after_seconds(7), Backoff { ticks: 7 });
+    assert_eq!(
+        Backoff::after_seconds(u32::MAX),
+        Backoff { ticks: u32::MAX }
+    );
+}
 
 fn every_variant() -> Vec<SeamError> {
     vec![

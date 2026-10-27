@@ -37,10 +37,11 @@ impl SupersedeDecision {
 /// so one member with a newer build decides for the set.
 ///
 /// Exceptional builds are not counted, and neither is a coordinate that is only staged, which
-/// is not published. Yanked builds are counted: a yank withdraws a coordinate, it does not
-/// un-build it. A held build is newer than ours when its build number is greater. With an equal
-/// build number and another commit it is newer unless it is an ancestor of ours (a commit that
-/// changes nothing a build reads keeps its parent's number), so the source is asked
+/// is not published, nor one that is burned: nothing was built there. Yanked builds are
+/// counted: a yank withdraws a coordinate, it does not un-build it. A held build is newer than
+/// ours when its build number is greater. With an equal build number and another commit it is
+/// newer unless it is an ancestor of ours (a commit that changes nothing a build reads keeps its
+/// parent's number), so the source is asked
 /// `ancestry(theirs, ours)` first and `ancestry(ours, theirs)` after it; `ancestry(a, b)` says
 /// whether commit `a` is an ancestor of commit `b`. For every newer build that is not our
 /// ancestor the run is `Superseded` when ours is an ancestor of all of them, `Refused` when any
@@ -57,7 +58,7 @@ pub fn decide_supersede(
     for build in held
         .iter()
         .filter_map(|p| match p {
-            Presence::Absent | Presence::Staged(_) => None,
+            Presence::Absent | Presence::Staged(_) | Presence::Burned => None,
             Presence::Present(h) | Presence::Yanked(h) => Some(h),
         })
         .filter(|h| !h.exceptional)
