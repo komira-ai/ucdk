@@ -18,6 +18,8 @@ pub const SCRATCH: &str = "/scratch";
 pub const OWN_PATH: &str = "/runner/bin";
 /// The working directory of the runner itself, which is not the one a run is given.
 pub const RUNNER_CWD: &str = "/runner";
+/// One chunk of a child that chatters, as the kit documents it.
+const CHATTER: &[u8] = b"chunk\n";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Flaw {
@@ -131,12 +133,23 @@ pub enum Flaw {
     /// The program name is cut into words at its spaces, so a program whose path holds a space
     /// cannot be started.
     Argv0ReSplitOnSpace,
+    /// The last `limit` bytes of each chunk read are kept, and the kept pieces are joined.
+    LimitKeptPerChunk,
+    /// Standard output of exactly the limit is dropped, as if the test were `>=` where `>` is
+    /// meant.
+    StdoutAtTheLimitIsDropped,
+    /// A run beats after the child starts and for each chunk of output, and on no exit poll.
+    NoBeatOnAnExitPoll,
+    /// A stopped child is killed and never waited for, so it stays in the process table.
+    KillsWithoutReaping,
 }
 
 pub struct FakeProcessRig {
     clock: ManualClock,
     flaw: Option<Flaw>,
     alive: Arc<Mutex<BTreeSet<String>>>,
+    /// The grandchildren that a child has not started yet.
+    forking: Arc<Mutex<BTreeSet<String>>>,
 }
 
 impl FakeProcessRig {
@@ -145,6 +158,7 @@ impl FakeProcessRig {
             clock: ManualClock::at(1_000),
             flaw: None,
             alive: Arc::default(),
+            forking: Arc::default(),
         }
     }
 
@@ -161,6 +175,7 @@ pub struct Scripted {
     flaw: Option<Flaw>,
     programs: BTreeMap<String, Behavior>,
     alive: Arc<Mutex<BTreeSet<String>>>,
+    forking: Arc<Mutex<BTreeSet<String>>>,
     /// Whether a run of this runner was stopped.
     stopped: bool,
     /// The environment of the previous run.
@@ -188,6 +203,7 @@ impl ProcessRig for FakeProcessRig {
             flaw: self.flaw,
             programs: BTreeMap::new(),
             alive: Arc::clone(&self.alive),
+            forking: Arc::clone(&self.forking),
             stopped: false,
             previous_env: Vec::new(),
             first: None,
@@ -213,10 +229,19 @@ impl ProcessRig for FakeProcessRig {
     }
 
     fn alive(&self, process: &str) -> bool {
-        self.alive
+        // A grandchild that is still being started is not there the first time it is asked
+        // for, and is there from the next.
+        let starting = self
+            .forking
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .contains(process)
+            .remove(process);
+        let mut alive = self.alive.lock().unwrap_or_else(PoisonError::into_inner);
+        if starting {
+            alive.insert(process.to_owned());
+            return false;
+        }
+        alive.contains(process)
     }
 }
 
@@ -386,13 +411,29 @@ impl Scripted {
 
     fn set_alive(&self, names: &[String], alive: bool) {
         let mut set = self.alive.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut forking = self.forking.lock().unwrap_or_else(PoisonError::into_inner);
         for name in names {
+            forking.remove(name);
             if alive {
                 set.insert(name.clone());
             } else {
                 set.remove(name);
             }
         }
+    }
+
+    /// The grandchildren among `names` are started a little after their child is: they are not
+    /// there the first time they are asked for.
+    fn start(&self, names: &[String]) {
+        let (grandchildren, children): (Vec<String>, Vec<String>) = names
+            .iter()
+            .cloned()
+            .partition(|name| name.ends_with(".group"));
+        self.set_alive(&children, true);
+        self.forking
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .extend(grandchildren);
     }
 }
 
@@ -549,11 +590,9 @@ impl ProcessRunner for Scripted {
             Some(Behavior::Reports) => {
                 (Exit::Code(0), report(&command, cwd, self.flaw), Vec::new())
             }
-            Some(Behavior::Chatters { chunks }) => (
-                Exit::Code(0),
-                b"chunk\n".repeat(*chunks as usize),
-                Vec::new(),
-            ),
+            Some(Behavior::Chatters { chunks }) => {
+                (Exit::Code(0), CHATTER.repeat(*chunks as usize), Vec::new())
+            }
             Some(Behavior::Holds { .. }) | None => (Exit::Code(0), Vec::new(), Vec::new()),
         };
         let beats = match &behavior {
@@ -561,6 +600,7 @@ impl ProcessRunner for Scripted {
                 (*chunks).min(2)
             }
             Some(Behavior::Chatters { chunks }) => *chunks,
+            Some(Behavior::Holds { .. }) if self.is(Flaw::NoBeatOnAnExitPoll) => 1,
             Some(Behavior::Holds { .. }) => 3,
             _ => 0,
         };
@@ -570,7 +610,7 @@ impl ProcessRunner for Scripted {
             Some(Behavior::Holds { name }) => vec![name.clone(), format!("{name}.group")],
             _ => Vec::new(),
         };
-        self.set_alive(&held, true);
+        self.start(&held);
         let mut result = self.inner.run(&ProcessSpec {
             command: &command,
             cwd,
@@ -601,6 +641,11 @@ impl ProcessRunner for Scripted {
                 .filter(|name| name.ends_with(".group"))
                 .cloned()
                 .collect()
+        } else if self.is(Flaw::KillsWithoutReaping) && stopped {
+            held.iter()
+                .filter(|name| !name.ends_with(".group"))
+                .cloned()
+                .collect()
         } else {
             Vec::new()
         };
@@ -609,6 +654,7 @@ impl ProcessRunner for Scripted {
             .filter(|n| !survivors.contains(n))
             .collect();
         self.set_alive(&ended, false);
+        self.set_alive(&survivors, true);
         match (self.flaw, &mut result) {
             (Some(Flaw::SignalIsAnExitCode), Ok(done)) => {
                 if let Exit::Signal(n) = done.exit {
@@ -665,6 +711,17 @@ impl ProcessRunner for Scripted {
             }
             (Some(Flaw::BareNameNotFoundIsPermanent), Err(SeamError::Unknown(why))) if bare => {
                 result = Err(SeamError::Permanent(why.clone()));
+            }
+            (Some(Flaw::LimitKeptPerChunk), Ok(done))
+                if matches!(behavior, Some(Behavior::Chatters { .. })) =>
+            {
+                done.stdout = stdout
+                    .chunks(CHATTER.len())
+                    .flat_map(|chunk| chunk[chunk.len().saturating_sub(limit)..].to_vec())
+                    .collect();
+            }
+            (Some(Flaw::StdoutAtTheLimitIsDropped), Ok(done)) if stdout.len() == limit => {
+                done.stdout.clear();
             }
             (Some(Flaw::KeepsTheHead), Ok(done)) => {
                 done.stdout = stdout[..stdout.len().min(limit)].to_vec();

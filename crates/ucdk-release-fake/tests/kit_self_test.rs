@@ -38,6 +38,7 @@ fn further_process_runner() {
     const OUTPUT: &str = "output_is_bounded_and_its_tail_is_kept";
     const NOWHERE: &str = "a_name_found_nowhere_on_the_childs_path_is_unstartable";
     const BEATS: &str = "the_runner_beats_on_progress_and_stops_the_child_when_told";
+    const HELD: &str = "a_stopped_child_and_its_process_group_are_gone";
     further_stubs_fail_exactly(
         "process runner",
         &names(&process_runner_scenarios::<FakeProcessRig>()),
@@ -99,6 +100,10 @@ fn further_process_runner() {
             (Process::EnvValueBackslashEaten, &[ARGV]),
             (Process::EnvValueNonAscii, &[ARGV]),
             (Process::Argv0ReSplitOnSpace, &[ARGV]),
+            (Process::LimitKeptPerChunk, &[OUTPUT]),
+            (Process::StdoutAtTheLimitIsDropped, &[OUTPUT]),
+            (Process::NoBeatOnAnExitPoll, &[HELD]),
+            (Process::KillsWithoutReaping, &[HELD]),
         ],
         |flaw| run_process_runner_kit(&FakeProcessRig::flawed(flaw)),
     );

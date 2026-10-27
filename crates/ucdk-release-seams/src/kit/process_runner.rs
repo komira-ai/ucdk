@@ -8,7 +8,7 @@ use ucdk_release::invocation::Command;
 use ucdk_release_proto::v1::Reason;
 
 use super::{Beats, Report, Scenario, must, must_err, run_scenarios, same};
-use crate::{Exit, ProcessResult, ProcessRunner, ProcessSpec, SeamError};
+use crate::{Exit, Heartbeat, ProcessResult, ProcessRunner, ProcessSpec, SeamError, Stop};
 
 /// What an installed program does when it is run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,10 +28,19 @@ pub enum Behavior {
     /// that holds a newline is written over more than one line.
     Reports,
     /// Writes `chunks` chunks of output one after the other, each written and flushed on its
-    /// own, then ends with code 0.
+    /// own, then ends with code 0. Each chunk is the six bytes `chunk` and a newline, so the
+    /// whole output is `chunks` times those six bytes and its tail of any length is known.
     Chatters { chunks: u32 },
-    /// Starts a grandchild in its own process group, then waits until it is killed. The child is
-    /// alive as `name` and the grandchild as `<name>.group` for as long as they run.
+    /// Starts a grandchild that stays in the process group of the child, the one the runner
+    /// started (a rig must not move it to another group), writes nothing, and waits until it is
+    /// killed. The child is alive as `name` and the grandchild as `<name>.group` for as long as
+    /// they run.
+    ///
+    /// The grandchild may be started a little after the child is, so the kit does not take the
+    /// first moment either is alive as the moment both are: it counts the pair as running once
+    /// both have been seen alive together at a beat, and it answers a `Stop` only after that and
+    /// from the second beat on. A rig can make a child that is slow to start its grandchild, and
+    /// a correct runner, slow or fast, passes.
     Holds { name: String },
 }
 
@@ -52,7 +61,9 @@ pub trait ProcessRig {
     /// when it is run, whatever the argument vector.
     fn install(&self, runner: &mut Self::Runner, path: &str, behavior: Behavior);
 
-    /// Whether the child or grandchild called `process` (see [`Behavior::Holds`]) is running.
+    /// Whether the child or grandchild called `process` (see [`Behavior::Holds`]) is still in the
+    /// process table. A process that has ended and that nobody has waited for, a zombie, is still
+    /// in it and is alive: a runner that kills a child and does not wait for it leaves it alive.
     fn alive(&self, process: &str) -> bool;
 }
 
@@ -671,6 +682,21 @@ fn output_is_bounded_and_its_tail_is_kept<R: ProcessRig>(rig: &R) {
         stdout[stdout.len() - 100..].to_vec(),
         "the kept standard output",
     );
+    // Just under, at and just over what the child wrote: at the limit nothing is lost.
+    for limit in [stdout.len() - 1, stdout.len(), stdout.len() + 1] {
+        let edge = must(
+            run_with(&mut runner, &given, &rig.scratch(), limit),
+            "a run with a limit next to the length of the output",
+        );
+        same(
+            edge.stdout,
+            stdout[stdout.len().saturating_sub(limit)..].to_vec(),
+            &format!(
+                "the output kept under a limit of {limit} for {} bytes",
+                stdout.len()
+            ),
+        );
+    }
     same(
         result.stderr_tail.is_empty(),
         false,
@@ -690,6 +716,27 @@ fn output_is_bounded_and_its_tail_is_kept<R: ProcessRig>(rig: &R) {
         Vec::new(),
         "the output kept under a limit of 0",
     );
+    // The limit is on the whole of the output and not on each chunk read: a child that writes 50
+    // chunks of 6 bytes, under limits inside a chunk, next to the 300 bytes, and above them.
+    let chatter = format!("{}/bin/chatter-bounded", rig.scratch());
+    rig.install(&mut runner, &chatter, Behavior::Chatters { chunks: 50 });
+    let chunks = b"chunk\n".repeat(50);
+    for limit in [7, 100, chunks.len() - 1, chunks.len(), chunks.len() + 1] {
+        let kept = must(
+            run_with(
+                &mut runner,
+                &command(&[&chatter], &[]),
+                &rig.scratch(),
+                limit,
+            ),
+            "a run of a child that writes many chunks, under a limit",
+        );
+        same(
+            kept.stdout,
+            chunks[chunks.len().saturating_sub(limit)..].to_vec(),
+            &format!("the output kept of 50 chunks under a limit of {limit}"),
+        );
+    }
     // The error tail is that of the run: a run that wrote none has none.
     let quiet = format!("{}/bin/quiet", rig.scratch());
     rig.install(&mut runner, &quiet, prints("quiet"));
@@ -787,6 +834,31 @@ fn the_runner_beats_on_progress_and_stops_the_child_when_told<R: ProcessRig>(rig
     );
 }
 
+/// A heartbeat for [`Behavior::Holds`] under the name `held`. At each beat it looks whether the
+/// child and its grandchild are alive together, and remembers that it saw them. It answers
+/// `Stop` from the second beat on, once it has seen them, and not before: a runner that beats
+/// once after it starts the child, and never on a poll for its end, is not told to stop; and a
+/// child that is slow to start its grandchild is not stopped before it has.
+struct StopOnceHeld<'a, R: ProcessRig> {
+    rig: &'a R,
+    beats: Cell<u32>,
+    seen: Cell<bool>,
+}
+
+impl<R: ProcessRig> Heartbeat for StopOnceHeld<'_, R> {
+    fn beat(&self) -> Result<(), Stop> {
+        let n = self.beats.get() + 1;
+        self.beats.set(n);
+        let together = self.rig.alive("held") & self.rig.alive("held.group");
+        self.seen.set(self.seen.get() | together);
+        if (n >= 2) & self.seen.get() {
+            Err(Stop)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 fn a_stopped_child_and_its_process_group_are_gone<R: ProcessRig>(rig: &R) {
     let mut runner = rig.runner();
     let program = format!("{}/bin/holder", rig.scratch());
@@ -797,10 +869,16 @@ fn a_stopped_child_and_its_process_group_are_gone<R: ProcessRig>(rig: &R) {
             name: "held".to_owned(),
         },
     );
-    let running = Cell::new(false);
-    let watcher = |_: u32| running.set(rig.alive("held") & rig.alive("held.group"));
-    let beats = Beats::stopping_at(1).watched_by(&watcher);
+    let beats = StopOnceHeld {
+        rig,
+        beats: Cell::new(0),
+        seen: Cell::new(false),
+    };
     let given = command(&[&program], &[]);
+    // The child writes nothing, so only the runner's polls for its end give it a beat after the
+    // first, and the Stop can come on no other beat. A runner that beats on no exit poll is never
+    // told to stop: a rig that runs real processes waits on it for ever, and one that does not
+    // sees fewer than two beats.
     let _ = runner.run(&ProcessSpec {
         command: &given,
         cwd: &rig.scratch(),
@@ -808,7 +886,12 @@ fn a_stopped_child_and_its_process_group_are_gone<R: ProcessRig>(rig: &R) {
         stdout_limit: 1 << 20,
     });
     same(
-        running.get(),
+        beats.beats.get() >= 2,
+        true,
+        "the runner beats on an exit poll of a child that writes nothing",
+    );
+    same(
+        beats.seen.get(),
         true,
         "the child and its group ran when the Stop came",
     );
