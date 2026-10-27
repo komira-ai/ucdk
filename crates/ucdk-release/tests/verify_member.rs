@@ -80,7 +80,6 @@ fn type_must_equal_the_declaration() {
 #[test]
 fn a_type_that_names_no_identity_is_refused() {
     for kind in [
-        ArtifactType::Conda,
         ArtifactType::Python,
         ArtifactType::Npm,
         ArtifactType::Unspecified,
@@ -177,6 +176,32 @@ fn the_identity_digest_is_recomputed_from_the_bytes() {
     let mut text = file_member();
     text.1.sha256 = hex(BYTES).to_uppercase();
     assert_eq!(refused(&text), (Check::Identity, Reason::SetMember));
+}
+
+fn conda_member() -> Member {
+    let mut m = file_member();
+    m.0.r#type = ArtifactType::Conda as i32;
+    m.1.r#type = ArtifactType::Conda as i32;
+    m
+}
+
+#[test]
+fn a_conda_member_is_identified_by_the_sha256_of_its_file_bytes() {
+    // It is no longer refused as a type with no identity: its digest is that of the bytes.
+    assert_eq!(verdict(&conda_member()), Ok(()));
+    // The digest is recomputed from the bytes, as for a file: a digest of other bytes of the
+    // same length is refused as an identity mismatch, not as a type.
+    let mut wrong = conda_member();
+    wrong.2.insert(
+        "tool.bin".to_owned(),
+        b"other bytes of the same length..".to_vec(),
+    );
+    wrong.1.size = 32;
+    assert_eq!(refused(&wrong), (Check::Identity, Reason::SetMember));
+    // The run's platform is held to as for a file.
+    let mut other = conda_member();
+    other.1.platform = "linux-aarch64".to_owned();
+    assert_eq!(refused(&other), (Check::Platform, Reason::PlatformMismatch));
 }
 
 #[test]

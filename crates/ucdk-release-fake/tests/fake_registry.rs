@@ -940,3 +940,50 @@ fn a_secret_that_is_not_a_run_of_whole_texts_covers_nothing() {
         Err(SeamError::GrantRefused(GrantFault::Denied))
     );
 }
+
+#[test]
+fn a_burned_committed_coordinate_is_no_longer_readable_listable_or_yankable() {
+    // Burned wins over committed: a coordinate that was published and is then burned answers as
+    // a burned one in every reader and writer, not only in `observe`.
+    let (mut w, set) = staged(&["a", "b"]);
+    assert_eq!(commit(&mut w, &set), Ok(CommitAnswer::Committed));
+    let read = w.grant(GrantPhase::Read, &set.coords);
+    assert_eq!(
+        w.registry.fetch(&read, &set.coords[0]),
+        Ok(Some(b"a".to_vec()))
+    );
+    w.registry.burn(&set.coords[0]);
+    // It reads as burned and holds no bytes.
+    assert_eq!(stranger(&mut w, &set, 0), Presence::Burned);
+    assert_eq!(w.registry.bytes(&set.coords[0]), None);
+    assert_eq!(w.registry.fetch(&read, &set.coords[0]), Ok(None));
+    // `newest` and `list` show the sibling and not the burned coordinate.
+    let newest = w.registry.newest(&read, "stable", "b").expect("newest");
+    assert_eq!(newest.len(), 1);
+    let scope = ListScope {
+        channel: "stable".to_owned(),
+        prefix: String::new(),
+    };
+    let listed: Vec<String> = w
+        .registry
+        .list(&read, &scope)
+        .expect("a listing")
+        .into_iter()
+        .map(|l| l.coordinate.name)
+        .collect();
+    assert_eq!(listed, ["b"]);
+    assert_eq!(
+        w.registry.newest(&read, "stable", "a"),
+        Ok(Vec::new()),
+        "the burned name holds nothing"
+    );
+    // A yank is refused and marks nothing; the sibling is unaffected and still readable.
+    let g = w.grant(GrantPhase::Commit, &set.coords);
+    assert!(matches!(
+        w.registry.yank(&g, &set.coords[0], "why"),
+        Err(SeamError::Permanent(_))
+    ));
+    assert!(!w.registry.is_yanked(&set.coords[0]));
+    assert!(matches!(stranger(&mut w, &set, 1), Presence::Present(_)));
+    assert_eq!(w.registry.bytes(&set.coords[1]), Some(&b"b"[..]));
+}

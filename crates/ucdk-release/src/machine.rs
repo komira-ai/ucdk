@@ -231,7 +231,7 @@ impl fmt::Display for ReadError {
 /// How an artifact type is identified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Identity {
-    /// The SHA-256 of the file's bytes.
+    /// The SHA-256 of the file's bytes. A `FILE` and a `CONDA` package are identified this way.
     FileBytes,
     /// The image manifest digest of the layout.
     OciManifestDigest,
@@ -242,11 +242,8 @@ pub enum Identity {
 /// does not compile until it is placed here.
 pub fn identity(kind: ArtifactType) -> Option<Identity> {
     match kind {
-        ArtifactType::Unspecified
-        | ArtifactType::Conda
-        | ArtifactType::Python
-        | ArtifactType::Npm => None,
-        ArtifactType::File => Some(Identity::FileBytes),
+        ArtifactType::Unspecified | ArtifactType::Python | ArtifactType::Npm => None,
+        ArtifactType::File | ArtifactType::Conda => Some(Identity::FileBytes),
         ArtifactType::Oci => Some(Identity::OciManifestDigest),
     }
 }

@@ -38,6 +38,17 @@ pub enum CommitUnit {
     Coordinate,
 }
 
+/// The set of coordinates one `yank` call withdraws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum YankUnit {
+    /// Only the coordinate the call names.
+    Coordinate,
+    /// Every held coordinate that agrees with the named one in channel, type, name and version,
+    /// whatever its platform. A caller that yanks by version names every such sibling and holds
+    /// a grant that covers them all, or does not call: a publisher never widens a yank silently.
+    Version,
+}
+
 /// One coordinate of a Publish action, with the bytes and the `Held` it is written with, so a
 /// registry can store the stamp and the exceptional mark beside the bytes.
 #[derive(Debug, Clone, Copy)]
@@ -75,7 +86,22 @@ pub trait Publisher: Send {
     /// The most coordinates one grant may cover; `usize::MAX` when the channel has no limit.
     fn grant_limit(&self) -> usize;
 
-    /// A point read of `k`, decided by fetching and hashing. `set` is the declared items of
+    /// What one `yank` call withdraws. A `Version` registry withdraws every held sibling of the
+    /// named coordinate that shares its version, so the engine refuses to call `yank` unless the
+    /// grant covers all of them and each is named.
+    fn yank_unit(&self) -> YankUnit;
+
+    /// A point read of `k`. The digest it reports is the one the registry itself verified over
+    /// the stored bytes at upload, never one that only the writer declared; a registry that
+    /// reports a writer-declared digest is not a conforming home. Observing does not fetch or
+    /// hash the bytes, and no verdict of "published" rests on the digest it reports alone:
+    /// `CHANNEL_READBACK`, a smoke action and the read-back of a publish `fetch` the bytes and
+    /// hash them themselves (through a read grant for a private channel, the read-back of a
+    /// publish included and never the commit grant, and as a stranger for a public one), and
+    /// they pass only when the hash of the fetched bytes is the set's digest. A registry that
+    /// echoes the writer's declared digest therefore fails the read-back. A coordinate whose
+    /// number a failed group burned
+    /// reads as `Burned`, never `Absent`. `set` is the declared items of
     /// the action `k` belongs to, `k` among them: a registry that addresses staged state by a
     /// group derived from the whole set finds "staged with our digest" only when told the set.
     /// It is empty when the caller has no set, and then only what is readable by coordinate can
@@ -105,7 +131,8 @@ pub trait Publisher: Send {
     fn fetch(&mut self, g: &Grant, k: &Coordinate) -> Result<Option<Vec<u8>>, SeamError>;
 
     /// Every coordinate of the name the channel holds, of any version and platform, yanked ones
-    /// included, each with its `Held`. It compares nothing.
+    /// included, each with its `Held`. It compares nothing. A burned coordinate holds no `Held`
+    /// and is not returned.
     fn newest(
         &mut self,
         g: &Grant,

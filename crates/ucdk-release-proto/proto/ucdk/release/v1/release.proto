@@ -451,6 +451,9 @@ enum Reason {
   // registry: the bytes went away out of band. Never put again, because a confirmed publication
   // is audit data.
   PUBLISH_VANISHED = 35;
+  // The registry reports the coordinate as burned: a failed group claimed its number and the
+  // number can never be published. A new version is needed; nothing is retried.
+  PUBLISH_BURNED = 36;
 }
 
 enum RowState {
