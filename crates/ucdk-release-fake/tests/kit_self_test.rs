@@ -7,9 +7,17 @@ mod rigs;
 
 use rigs::hostile::{HostileRig, Wrong};
 use rigs::loose::{LooseRig, ShallowRig};
+use rigs::output_files::{FakeFilesRig, Flaw as Files};
 use rigs::store::{FakeStoreRig, Flaw as Store};
 use rigs::{each_fails_alone, further_stubs_fail_exactly, names};
-use ucdk_release_seams::kit::{run_store_kit, store_scenarios};
+use ucdk_release_seams::kit::{
+    output_files_scenarios, run_output_files_kit, run_store_kit, store_scenarios,
+};
+
+#[test]
+fn each_further_output_files_stub_fails_the_scenarios_that_hold_it() {
+    further_output_files();
+}
 
 #[test]
 fn each_further_store_stub_fails_the_scenarios_that_hold_it() {
@@ -191,9 +199,159 @@ fn each_wrong_store_stub_fails_the_scenario_that_holds_it() {
     );
 }
 
+fn further_output_files() {
+    const READ_THROUGH: &str = "an_entry_of_a_listed_directory_is_read_through_its_joined_path";
+    const KINDS: &str = "a_listing_names_the_kind_of_every_entry";
+    const REFUSED: &str = "listing_a_file_and_reading_a_directory_or_a_symlink_are_refused";
+    const STAT: &str = "stat_tells_a_file_a_directory_a_symlink_and_nothing_apart";
+    const DESCENDED: &str = "a_listed_symlink_is_never_descended";
+    const SORTED: &str = "a_listing_is_sorted_relative_paths";
+    const CLIMB: &str = "a_path_that_is_relative_or_climbs_is_refused";
+    const CHANGED: &str = "a_read_returns_the_file_as_it_is_at_the_call";
+    const UNCHANGED: &str = "no_call_changes_the_tree";
+    const DOTS: &str =
+        "a_dot_part_a_repeated_slash_and_a_trailing_slash_name_the_path_they_stand_in";
+    further_stubs_fail_exactly(
+        "output files",
+        &names(&output_files_scenarios::<FakeFilesRig>()),
+        &[
+            (Files::LossyRead, &[READ_THROUGH]),
+            (Files::EmptyFileIsMissing, &[READ_THROUGH]),
+            (Files::ReadTruncatesAt4k, &[READ_THROUGH]),
+            (Files::DotfilesHidden, &[KINDS, READ_THROUGH]),
+            (Files::DeepEntriesOmitted, &[KINDS, READ_THROUGH]),
+            (Files::LinkToDirListedAsDirectory, &[KINDS]),
+            (Files::DanglingLinkOmitted, &[KINDS]),
+            (Files::ListOfSymlinkToDirFollows, &[REFUSED]),
+            (Files::TrailingSlashFollowsRead, &[REFUSED]),
+            (Files::TrailingSlashFollowsStat, &[STAT]),
+            (Files::ReadRefusesDotDotNames, &[READ_THROUGH]),
+            (Files::FollowsNestedLinks, &[KINDS, DESCENDED]),
+            (Files::StatBelowAFileIsAnError, &[STAT]),
+            (Files::ListOfAnEmptyDirectoryIsPermanent, &[KINDS]),
+            (Files::ReadTruncatesAt64k, &[READ_THROUGH]),
+            (Files::ReadTruncatesAt128k, &[READ_THROUGH]),
+            (Files::ReadTruncatesAt1M, &[READ_THROUGH]),
+            (Files::ListCappedAt256, &[SORTED]),
+            (Files::DeepEntriesOmittedBeyond5, &[READ_THROUGH]),
+            (Files::ReadOfDanglingLinkIsEmpty, &[REFUSED]),
+            (Files::ReadOfLinkToDirIsEmpty, &[REFUSED]),
+            (Files::ListOfDanglingLinkIsEmpty, &[REFUSED]),
+            (Files::ListTrailingSlashFails, &[DOTS]),
+            (Files::ListTrailingSlashRelsLeadingSlash, &[DOTS]),
+            (Files::RefusesDoubleSlash, &[DOTS]),
+            (Files::ReadFailsOnSpaceInPath, &[READ_THROUGH]),
+            (Files::ListOmitsNamesWithSpace, &[READ_THROUGH]),
+            (Files::ListOmitsNonAscii, &[READ_THROUGH]),
+            (Files::ListNamesPercentEncoded, &[READ_THROUGH]),
+            (Files::ReadOfFileWithNewlineNameFails, &[READ_THROUGH]),
+            (Files::NaturalSort, &[SORTED]),
+            (Files::ReadOfEmptyFileInSubdirIsMissing, &[READ_THROUGH]),
+            (Files::ReadBelowAFileAnswersTheParent, &[REFUSED]),
+            (Files::ListBelowAFileIsEmpty, &[REFUSED]),
+            (Files::ReadNormalisesCrlf, &[READ_THROUGH]),
+            (Files::ReadStripsBom, &[READ_THROUGH]),
+            (Files::ReadStripsTrailingCrlf, &[READ_THROUGH]),
+            (Files::ReadTrimsTrailingNuls, &[READ_THROUGH]),
+            (Files::ReadDropsTheLastByteAtA4kMultiple, &[READ_THROUGH]),
+            (Files::ListNestedKindsAreFiles, &[KINDS]),
+            (Files::ListDeepEntriesTwice, &[KINDS]),
+            (Files::ListAddsAPhantomEntry, &[KINDS]),
+            (Files::ListOmitsNestedEmptyDirectories, &[KINDS]),
+            (Files::ListDeepDirectoriesHaveATrailingSlash, &[KINDS]),
+            (Files::StatOfASlashedLinkIsNone, &[STAT]),
+            (Files::StatOfASlashedDanglingLinkFails, &[STAT]),
+            (Files::StatRefusesDotDotNames, &[STAT]),
+            (Files::ListRefusesDotDotNames, &[KINDS]),
+            (Files::LeadingClimbIsResolved, &[CLIMB]),
+            (Files::ListFollowsASlashedLinkToADirectory, &[REFUSED]),
+            (Files::ReadFollowsALinkInAnotherDirectory, &[REFUSED]),
+            (Files::ReadFollowsALinkAtTheRoot, &[REFUSED]),
+            (Files::ReadFollowsADeepLink, &[REFUSED]),
+            (Files::ReadOfADirectoryAtTheRootIsEmpty, &[REFUSED]),
+            (Files::ReadOfADeepDirectoryIsEmpty, &[REFUSED]),
+            (Files::ReadDeepBelowAFileAnswersTheAncestor, &[REFUSED]),
+            (Files::ListDeepBelowAFileIsEmpty, &[REFUSED]),
+            (Files::StatDeepBelowAFileIsAnError, &[STAT]),
+            (Files::StatBelowAMissingDirectoryIsAnError, &[STAT]),
+            (Files::ListBelowAMissingDirectoryIsEmpty, &[REFUSED]),
+            (Files::ReadBelowAMissingDirectoryIsEmpty, &[REFUSED]),
+            (Files::ReadAcceptsADotSlashPath, &[CLIMB]),
+            (Files::ReadAcceptsARootlessPath, &[CLIMB]),
+            (Files::ReadTruncatesAt4M, &[READ_THROUGH]),
+            (Files::ReadDropsTheLastByteAtA128kMultiple, &[READ_THROUGH]),
+            (Files::ReadTrimsTrailingBlanks, &[READ_THROUGH]),
+            (Files::CachesReadsByLength, &[CHANGED]),
+            (Files::ReadLowercasesTheFile, &[UNCHANGED]),
+            (Files::ListIncludesPrefixSiblings, &[KINDS]),
+            (Files::StatFollowsALinkToClassifyIt, &[STAT]),
+            (Files::SlashedFileIsNothing, &[DOTS]),
+        ],
+        |flaw| run_output_files_kit(&FakeFilesRig::flawed(flaw)),
+    );
+}
+
 #[test]
 fn each_scenario_fails_on_its_nonconforming_stub() {
+    output_files();
     store();
+}
+
+fn output_files() {
+    each_fails_alone(
+        "output files",
+        &names(&output_files_scenarios::<FakeFilesRig>()),
+        &[
+            ("a_listing_is_sorted_relative_paths", Files::WalkOrder),
+            (
+                "a_listing_names_the_kind_of_every_entry",
+                Files::EveryEntryIsAFile,
+            ),
+            ("a_listed_symlink_is_never_descended", Files::FollowsLinks),
+            (
+                "stat_tells_a_file_a_directory_a_symlink_and_nothing_apart",
+                Files::StatFollows,
+            ),
+            (
+                "a_missing_path_is_none_from_stat_and_permanent_from_list_and_read",
+                Files::ListOfMissingIsEmpty,
+            ),
+            (
+                "listing_a_file_and_reading_a_directory_or_a_symlink_are_refused",
+                Files::ReadFollowsLink,
+            ),
+            (
+                "a_single_file_output_is_read_without_a_rel",
+                Files::NeedsListedDirAtTheRoot,
+            ),
+            (
+                "a_report_file_is_read_directly",
+                Files::NeedsListedDirBelowTheRoot,
+            ),
+            (
+                "reading_a_directory_is_refused_even_when_it_is_the_located_output",
+                Files::ReadOfAStattedDirectoryIsEmpty,
+            ),
+            (
+                "a_path_that_is_relative_or_climbs_is_refused",
+                Files::ReadResolvesClimbs,
+            ),
+            (
+                "an_entry_of_a_listed_directory_is_read_through_its_joined_path",
+                Files::NestedEntryIsUnreadable,
+            ),
+            (
+                "a_read_returns_the_file_as_it_is_at_the_call",
+                Files::CachesReads,
+            ),
+            ("no_call_changes_the_tree", Files::ReadTouches),
+            (
+                "a_dot_part_a_repeated_slash_and_a_trailing_slash_name_the_path_they_stand_in",
+                Files::RefusesDotPart,
+            ),
+        ],
+        |flaw| run_output_files_kit(&FakeFilesRig::flawed(flaw)),
+    );
 }
 
 fn store() {

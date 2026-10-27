@@ -11,9 +11,10 @@
 //! so a kit reports every scenario that failed, not only the first. The kits read no clock and
 //! wait for nothing: time moves only when a scenario asks its rig to move it.
 //!
-//! - [`run_store_kit`] runs a whole kit and returns its [`Report`]; the kits of the other
-//!   seams join it in the parts that follow.
-//! - [`store_scenarios`] gives the scenarios one by one, for a test per scenario.
+//! - [`run_output_files_kit`] and [`run_store_kit`] run a whole kit and return its [`Report`];
+//!   the kits of the other seams join them in the parts that follow.
+//! - [`output_files_scenarios`] and [`store_scenarios`] give the scenarios one by one, for a
+//!   test per scenario.
 
 use std::any::Any;
 use std::fmt::Debug;
@@ -22,8 +23,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::{Heartbeat, SeamError, Stop};
 
+mod output_files;
 mod store;
 
+pub use output_files::{Node, OutputFilesRig, output_files_scenarios, run_output_files_kit};
 pub use store::{StoreRig, run_store_kit, store_scenarios};
 
 /// How a scenario ends when it fails: the text says what was expected and what was seen.
@@ -57,6 +60,20 @@ fn must_err<T>(result: Result<T, SeamError>, what: &str) -> SeamError {
         Ok(_) => fail(format!("{what} succeeded")),
         Err(error) => error,
     }
+}
+
+/// The value a scenario needs to be there.
+fn must_some<T>(value: Option<T>, what: &str) -> T {
+    match value {
+        Some(value) => value,
+        None => fail(format!("{what} is missing")),
+    }
+}
+
+/// Whether `error` is a `Permanent` one that names `path`. Both halves are always asked, so
+/// that no scenario holds a branch of its own for the answer.
+fn permanent_naming(error: &SeamError, path: &str) -> bool {
+    matches!(error, SeamError::Permanent(_)) & error.to_string().contains(path)
 }
 
 /// One named scenario of a kit over the rig type `R`.

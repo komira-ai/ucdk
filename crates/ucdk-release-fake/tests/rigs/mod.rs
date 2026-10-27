@@ -9,6 +9,7 @@ use ucdk_release_seams::kit::{Report, Scenario};
 
 pub mod hostile;
 pub mod loose;
+pub mod output_files;
 pub mod store;
 
 /// The names of the scenarios of a kit, in its order.
