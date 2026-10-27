@@ -224,6 +224,40 @@ fn a_test_passes_only_when_it_ran_something_and_did_not_fail() {
 }
 
 #[test]
+fn a_failed_invocation_carries_the_tail_it_printed() {
+    let (system, target, stamp) = (system(), target(LABEL, &[]), stamp("1"));
+    let (_, mut fake, hb) = fake();
+    fake.fail_at_call(1);
+    fake.failure_tail("error: boom");
+    let failure = fake.build(&invocation(&system, &target, &stamp, Verb::Build), &hb);
+    assert!(
+        matches!(failure, Err(SeamError::Permanent(why)) if why.contains(LABEL) && why.ends_with("error: boom"))
+    );
+}
+
+#[test]
+fn a_failing_test_carries_the_tail_it_printed_and_skipped_results_are_not_runs() {
+    let (system, target, stamp) = (system(), target(LABEL, &[]), stamp("1"));
+    for kind in [BuildSystemKind::Buck2, BuildSystemKind::Bazel] {
+        let clock = ManualClock::at(1_000);
+        let hb = FakeHeartbeat::new(&clock);
+        let mut fake = FakeBuildSystem::new(kind, &clock);
+        fake.test_fails(LABEL);
+        fake.failure_tail("FAILED 1 of 3");
+        let failed = fake
+            .test(&invocation(&system, &target, &stamp, Verb::Test), &hb)
+            .unwrap();
+        assert!(failed.tail.ends_with("FAILED 1 of 3"));
+        let mut fake = FakeBuildSystem::new(kind, &clock);
+        fake.report_skipped_only(LABEL);
+        let skipped = fake
+            .test(&invocation(&system, &target, &stamp, Verb::Test), &hb)
+            .unwrap();
+        assert_eq!((skipped.ran, skipped.passed), (0, false));
+    }
+}
+
+#[test]
 fn a_build_that_fails_dies_or_cannot_start() {
     let (system, target, stamp) = (system(), target(LABEL, &[]), stamp("1"));
     let (_, mut fake, hb) = fake();
@@ -278,7 +312,56 @@ fn the_build_system_refuses_none_or_two_outputs_and_reports_the_shape_of_one() {
     assert_eq!(one(listing("//a:twice").unwrap()).shape, Shape::File);
     let plain = one(listing("//a:plain").unwrap());
     assert_eq!(plain.label, "//a:plain");
-    assert_eq!(plain.path, "/out/_s_sa_cplain/plain");
+    assert_eq!(plain.path, "/build out/_s_sa_cplain/plain");
+}
+
+#[test]
+fn a_listing_of_another_target_or_a_hostile_path_is_build_output() {
+    let (system, target, stamp) = (system(), target(LABEL, &[]), stamp("1"));
+    let (_, mut fake, hb) = fake();
+    fake.lists_unreadable_output(LABEL);
+    assert_eq!(
+        fake.build(&invocation(&system, &target, &stamp, Verb::Build), &hb),
+        Err(SeamError::Refused(Reason::BuildOutput))
+    );
+}
+
+#[test]
+fn a_bazel_build_runs_the_calls_that_locate_its_output_and_a_buck2_build_does_not() {
+    let (system, target, stamp) = (system(), target(LABEL, &["--x"]), stamp("1"));
+    let word = |fake: &FakeBuildSystem| -> Vec<String> {
+        fake.commands().iter().map(|c| c.argv[1].clone()).collect()
+    };
+    for (kind, words) in [
+        (BuildSystemKind::Buck2, vec!["build"]),
+        (BuildSystemKind::Bazel, vec!["build", "cquery", "info"]),
+    ] {
+        let clock = ManualClock::at(1_000);
+        let hb = FakeHeartbeat::new(&clock);
+        let mut fake = FakeBuildSystem::new(kind, &clock);
+        let mut system = system.clone();
+        system.kind = kind as i32;
+        fake.build(&invocation(&system, &target, &stamp, Verb::Build), &hb)
+            .unwrap();
+        assert_eq!(word(&fake), words, "{kind:?}");
+        // They carry the flags of the build.
+        assert!(
+            fake.commands()
+                .iter()
+                .all(|c| c.argv.contains(&"--x".to_owned()))
+        );
+        // A build that fails runs only itself, and the calls are not invocations to number.
+        let mut failing = FakeBuildSystem::new(kind, &clock);
+        failing.fail_at_call(1);
+        failing
+            .build(&invocation(&system, &target, &stamp, Verb::Build), &hb)
+            .unwrap_err();
+        assert_eq!(word(&failing), ["build"], "{kind:?}");
+        failing
+            .build(&invocation(&system, &target, &stamp, Verb::Build), &hb)
+            .unwrap();
+        assert_eq!(word(&failing).len(), words.len() + 1, "{kind:?}");
+    }
 }
 
 #[test]

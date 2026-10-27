@@ -509,11 +509,22 @@ fn exceptional_needs_exceptional() {
 #[test]
 fn every_artifact_type_names_its_identity() {
     assert_eq!(identity(ArtifactType::File), Some(Identity::FileBytes));
+    assert_eq!(identity(ArtifactType::Conda), Some(Identity::FileBytes));
     assert_eq!(
         identity(ArtifactType::Oci),
         Some(Identity::OciManifestDigest)
     );
-    for kind in [ArtifactType::Conda, ArtifactType::Python, ArtifactType::Npm] {
+    // A conda package is accepted, with its repository, as a file is.
+    accepts(|m| {
+        artifact_mut(m, "ucdk-lib").r#type = ArtifactType::Conda as i32;
+        m.channels[0].repositories.push(repo(
+            ArtifactType::Conda,
+            "https://packages.example.com/conda",
+            Visibility::Public,
+            anonymous_push(),
+        ));
+    });
+    for kind in [ArtifactType::Python, ArtifactType::Npm] {
         assert_eq!(identity(kind), None, "{kind:?}");
         refuses_only(Rule::EveryArtifactTypeNamesItsIdentity, |m| {
             artifact_mut(m, "ucdk-lib").r#type = kind as i32;

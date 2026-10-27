@@ -67,6 +67,9 @@ fn table_over_history_and_ancestry() {
             Presence::Staged(held(11, "new", false)),
             [Proceed; 4],
         ),
+        // A burned number holds no build: it is not counted, whatever the source says, and its
+        // lack of a stamp is not an unstamped build.
+        ("burned", Presence::Burned, [Proceed; 4]),
         (
             "newer",
             present(11, "new"),
@@ -215,6 +218,26 @@ fn any_member_with_a_newer_build_decides_for_the_set() {
     let history = [Presence::Absent, present(9, "old"), present(12, "new")];
     assert_eq!(decide(&history, Tri::Yes), Superseded);
     assert_eq!(decide(&history, Tri::No), Refused);
+}
+
+#[test]
+fn a_burned_member_is_not_a_held_build_and_does_not_turn_the_set_indeterminate() {
+    // A burned member has no stamp, but nothing was built there: the set is decided by the
+    // builds that exist, as if the burned member held nothing.
+    for answer in [Tri::Yes, Tri::No, Tri::Unknown] {
+        let with = [Presence::Burned, present(12, "new")];
+        let without = [Presence::Absent, present(12, "new")];
+        assert_eq!(
+            decide(&with, answer),
+            decide(&without, answer),
+            "{answer:?}"
+        );
+    }
+    assert_eq!(decide(&[Presence::Burned], Tri::No), Proceed);
+    assert_eq!(
+        decide(&[Presence::Burned, present(12, "new")], Tri::Yes),
+        Superseded
+    );
 }
 
 #[test]
