@@ -175,7 +175,7 @@ fn an_absurd_budget_fails_the_check_and_does_not_wrap() {
 #[test]
 fn a_zero_duration_that_cannot_be_zero_is_refused_by_name() {
     type Edit = fn(&mut Config);
-    let edits: [(&str, Edit); 5] = [
+    let edits: [(&str, Edit); 7] = [
         ("request_timeout", |c| c.request_timeout = secs(0)),
         ("connect_timeout", |c| c.connect_timeout = secs(0)),
         ("poll_interval", |c| c.poll_interval = secs(0)),
@@ -183,17 +183,20 @@ fn a_zero_duration_that_cannot_be_zero_is_refused_by_name() {
         ("commit_request_timeout", |c| {
             c.commit_request_timeout = secs(0);
         }),
+        // A zero abort budget leaves an abort no time at all, and a zero margin leaves no room
+        // for the exchange-to-call gap and a connect timeout.
+        ("abort_timeout", |c| c.abort_timeout = secs(0)),
+        ("margin", |c| c.margin = secs(0)),
     ];
     for (name, edit) in edits {
         let mut config = config();
         edit(&mut config);
         assert_eq!(config.check(), Err(ConfigError::ZeroDuration(name)));
     }
-    // These may be zero: a zero poll deadline returns as soon as the commit is accepted.
+    // These may be zero: a zero poll deadline returns as soon as the commit is accepted, and a
+    // zero ceiling turns every `Retry-After` into a refusal instead of a wait.
     let mut config = config();
     config.poll_deadline = secs(0);
-    config.abort_timeout = secs(0);
-    config.margin = secs(0);
     config.retry_after_ceiling = secs(0);
     assert_eq!(config.check(), Ok(()));
 }
