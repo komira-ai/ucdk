@@ -28,6 +28,25 @@ pub enum OpenError {
     NewerMajor { path: PathBuf, found: u32 },
     /// The file or its directory could not be read or locked.
     Io { path: PathBuf, why: String },
+    /// The file name ends in a suffix the file ledger keeps for the temporary and lock files
+    /// of another ledger in the same directory (`.tmp` and `.lock`).
+    /// Nothing is touched.
+    ReservedName { path: PathBuf },
+}
+
+/// The suffixes of the files a ledger at `<path>` keeps beside it: `<path>.tmp` and
+/// `<path>.lock`. A ledger whose own name ends in one could be another ledger's temporary or
+/// lock file, so [`FileLedger::open`] refuses it.
+const RESERVED_SUFFIXES: [&str; 2] = [".tmp", ".lock"];
+
+/// Whether the last component of `path` ends in one of `RESERVED_SUFFIXES`.
+fn is_reserved(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| {
+        let name = name.to_string_lossy();
+        RESERVED_SUFFIXES
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
+    })
 }
 
 impl fmt::Display for OpenError {
@@ -45,6 +64,14 @@ impl fmt::Display for OpenError {
                 path.display()
             ),
             Self::Io { path, why } => write!(f, "{}: {why}", path.display()),
+            Self::ReservedName { path } => write!(
+                f,
+                "{}: a ledger file name may not end in {} or {}, which a ledger keeps for its \
+                 temporary and lock files; nothing was changed",
+                path.display(),
+                RESERVED_SUFFIXES[0],
+                RESERVED_SUFFIXES[1]
+            ),
         }
     }
 }
@@ -149,12 +176,13 @@ impl FileLedger {
     /// Opens the ledger at `path`, which need not exist yet (it is made by the first write; its
     /// directory must exist). Reads it once to refuse a file that is not a whole ledger, and
     /// removes a `<path>.tmp` left by a write that never finished. Another handle may be open
-    /// on the same path.
+    /// on the same path. A file name that ends in `.tmp` or `.lock` is refused, because it
+    /// could be the temporary or lock file of another ledger in the directory.
     ///
     /// # Errors
     ///
-    /// [`OpenError`] when the file is corrupt or newer than this build reads, or the file
-    /// system refuses.
+    /// [`OpenError`] when the name is reserved, the file is corrupt or newer than this build
+    /// reads, or the file system refuses.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, OpenError> {
         Self::open_with_clock(path, Arc::new(SystemClock))
     }
@@ -169,6 +197,9 @@ impl FileLedger {
         clock: Arc<dyn Clock>,
     ) -> Result<Self, OpenError> {
         let path = path.as_ref().to_owned();
+        if is_reserved(&path) {
+            return Err(OpenError::ReservedName { path });
+        }
         let lock_path = sibling(&path, ".lock");
         let lock = private_file()
             .read(true)
