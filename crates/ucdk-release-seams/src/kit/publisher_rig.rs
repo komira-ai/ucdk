@@ -282,14 +282,15 @@ pub(super) fn unstaged_shape<R: PublisherRig>(rig: &R) -> Option<ChannelShape> {
     plain_shapes(rig).into_iter().find(|s| !s.stages)
 }
 
-/// The shape a scenario that does not care runs on: a staging one when the rig has it, so that
-/// the scenario is held to the whole of the protocol, and otherwise the first plain one. A rig
-/// with no plain shape fails the kit, and every scenario that needs one is skipped.
-pub(super) fn fixture<R: PublisherRig>(rig: &R) -> ChannelShape {
-    must_some(
-        staging_shape(rig).or_else(|| plain_shapes(rig).first().copied()),
-        "a public channel to run on",
-    )
+/// Runs `scenario` once on each declared plain shape, a fresh channel each: a promise a registry
+/// makes of every channel is held on each shape the rig declares, and not on the first alone. A
+/// rig with no plain shape fails the scenario, which the runner skips before it gets here.
+pub(super) fn on_each_plain_shape<R: PublisherRig>(rig: &R, scenario: fn(&R, &ChannelShape)) {
+    let shapes = plain_shapes(rig);
+    must_some(shapes.first(), "a public channel to run on");
+    for shape in &shapes {
+        scenario(rig, shape);
+    }
 }
 
 /// A fresh channel of `shape`, held to what the shape says.
@@ -301,11 +302,6 @@ pub(super) fn built<R: PublisherRig>(rig: &R, shape: &ChannelShape) -> R::Publis
         &format!("stages() of the channel built for {shape:?}"),
     );
     p
-}
-
-/// A fresh channel of the fixture shape.
-pub(super) fn fixture_publisher<R: PublisherRig>(rig: &R) -> R::Publisher {
-    built(rig, &fixture(rig))
 }
 
 /// A fresh channel of the first declared plain shape that stages.
@@ -487,6 +483,13 @@ pub(super) fn present_held(presence: Presence) -> Held {
     match presence {
         Presence::Present(held) => held,
         other => fail(format!("expected Present, got {other:?}")),
+    }
+}
+
+pub(super) fn yanked_held(presence: Presence) -> Held {
+    match presence {
+        Presence::Yanked(held) => held,
+        other => fail(format!("expected Yanked, got {other:?}")),
     }
 }
 

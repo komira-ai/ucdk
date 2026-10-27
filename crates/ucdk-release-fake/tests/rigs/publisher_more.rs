@@ -312,6 +312,16 @@ impl Wrapped {
     }
 
     /// The digest the writer declared for `k`, when there was one.
+    /// Whether `result` is a refusal, which promises that nothing happened, of a set that does
+    /// not name a coordinate twice: a registry that checks that first and then applies the
+    /// members one at a time.
+    fn refused_for_a_member(result: &Result<impl Sized, SeamError>) -> bool {
+        result.as_ref().is_err_and(|e| {
+            e.promises_no_effect()
+                && !matches!(e, SeamError::Permanent(why) if why.contains("twice"))
+        })
+    }
+
     fn declared_for(&self, k: &Coordinate) -> Option<&(Coordinate, String, usize)> {
         self.declared.iter().rev().find(|(c, _, _)| c == k)
     }
@@ -446,7 +456,7 @@ impl Publisher for Wrapped {
         let mut result = self.base.stage(g, &used);
         if self.is(More::StagePartialOnRefusal)
             && items.len() > 1
-            && result.as_ref().is_err_and(SeamError::promises_no_effect)
+            && Self::refused_for_a_member(&result)
         {
             for item in items {
                 let grant = self.internal(GrantPhase::Stage, std::slice::from_ref(item.coordinate));
@@ -528,7 +538,7 @@ impl Publisher for Wrapped {
         let mut result = self.base.commit(g, &used);
         if self.is(More::CommitPartialOnRefusal)
             && items.len() > 1
-            && result.as_ref().is_err_and(SeamError::promises_no_effect)
+            && Self::refused_for_a_member(&result)
         {
             for item in items {
                 let grant =
@@ -634,7 +644,7 @@ impl Publisher for Wrapped {
             } else if self.is(More::YankByNamePrefix) {
                 self.committed
                     .iter()
-                    .filter(|c| *c != k && c.name.starts_with(&k.name))
+                    .filter(|c| c.name != k.name && c.name.starts_with(&k.name))
                     .cloned()
                     .collect()
             } else {

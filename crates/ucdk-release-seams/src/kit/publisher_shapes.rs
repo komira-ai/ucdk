@@ -9,9 +9,9 @@ use ucdk_release::publish::Presence;
 use ucdk_release_proto::v1::{Coordinate, Reason};
 
 use super::publisher_rig::{
-    Arrangement, PublisherRig, Set, built, fetched, fixture_publisher, needs_a_plain_channel,
-    observed, plain_shapes, present_held, publish, sha, stage, staged_held, staging_publisher,
-    stranger,
+    Arrangement, ChannelShape, PublisherRig, Set, built, fetched, needs_a_plain_channel, observed,
+    plain_shapes, present_held, publish, sha, stage, staged_held, staging_publisher, stranger,
+    yanked_held,
 };
 use super::{must, must_err, must_some, same};
 use crate::{
@@ -99,8 +99,9 @@ pub(super) fn a_retry_of_a_commit_that_is_becoming_readable_is_committed_or_dupl
     R: PublisherRig,
 >(
     rig: &R,
+    shape: &ChannelShape,
 ) {
-    let mut p = fixture_publisher(rig);
+    let mut p = built(rig, shape);
     let set = Set::of(rig, &["a"]);
     stage(rig, &mut p, &set);
     rig.arrange(&mut p, &Arrangement::CommitVisibleAfter(LAG));
@@ -162,8 +163,9 @@ pub(super) fn a_coordinate_the_channel_cannot_hold_is_refused_before_anything_is
     R: PublisherRig,
 >(
     rig: &R,
+    shape: &ChannelShape,
 ) {
-    let mut p = fixture_publisher(rig);
+    let mut p = built(rig, shape);
     for k in rig.unrepresentable() {
         let one = std::slice::from_ref(&k);
         let set = Set::at(rig, one.to_vec());
@@ -189,11 +191,45 @@ pub(super) fn a_coordinate_the_channel_cannot_hold_is_refused_before_anything_is
         refused_as_channel(p.yank(&grant, &k, "a reason"), "a yank");
         let read = rig.grant(&p, GrantPhase::Read, one);
         refused_as_channel(p.fetch(&read, &k), "a fetch");
+        a_set_with_such_a_coordinate_applies_none_of_it(rig, shape, &k);
     }
     // What was refused left the channel as it was: an ordinary coordinate publishes.
     let set = Set::of(rig, &["a"]);
     publish(rig, &mut p, &set);
     present_held(stranger(&mut p, &set.coords[0]));
+}
+
+/// A set that has a coordinate the channel cannot hold beside one it can is refused whole, at
+/// the stage and at the commit: the coordinate beside it is not staged by the stage and not
+/// readable after the commit.
+fn a_set_with_such_a_coordinate_applies_none_of_it<R: PublisherRig>(
+    rig: &R,
+    shape: &ChannelShape,
+    k: &Coordinate,
+) {
+    let mut channel = built(rig, shape);
+    let p = &mut channel;
+    let beside = Set::of(rig, &["b"]);
+    let both = Set::at(rig, vec![beside.coords[0].clone(), k.clone()]);
+    let blobs = both.blobs();
+    let items = both.items(&blobs);
+    if p.stages() {
+        let grant = rig.grant(p, GrantPhase::Stage, &both.coords);
+        refused_as_channel(p.stage(&grant, &items), "a stage of a set with it");
+        same(
+            observed(rig, p, GrantPhase::Stage, &beside, 0),
+            Presence::Absent,
+            "the coordinate beside it after a refused stage",
+        );
+        stage(rig, p, &beside);
+    }
+    let grant = rig.grant(p, GrantPhase::Commit, &both.coords);
+    refused_as_channel(p.commit(&grant, &items), "a commit of a set with it");
+    same(
+        fetched(rig, p, &beside.coords[0]),
+        None,
+        "the bytes of the coordinate beside it after a refused commit",
+    );
 }
 
 /// A registry that seals a version by the group that first wrote it refuses a later platform of
@@ -202,8 +238,9 @@ pub(super) fn a_coordinate_the_channel_cannot_hold_is_refused_before_anything_is
 /// would make the caller stage it again for ever.
 pub(super) fn a_sealed_version_refuses_a_later_platform_and_observes_it_absent<R: PublisherRig>(
     rig: &R,
+    shape: &ChannelShape,
 ) {
-    let mut p = fixture_publisher(rig);
+    let mut p = built(rig, shape);
     let base = rig.coordinate("a");
     let platform = must_some(
         rig.siblings(&base)
@@ -252,8 +289,9 @@ pub(super) fn a_sealed_version_refuses_a_later_platform_and_observes_it_absent<R
 /// and `newest` and `list` do not name it. Only a registry that can burn a number runs this.
 pub(super) fn a_burned_coordinate_is_neither_absent_nor_present_nor_committable<R: PublisherRig>(
     rig: &R,
+    shape: &ChannelShape,
 ) {
-    let mut p = fixture_publisher(rig);
+    let mut p = built(rig, shape);
     let set = Set::of(rig, &["a"]);
     let a = &set.coords[0];
     rig.arrange(
@@ -325,38 +363,54 @@ fn read_back_passes<R: PublisherRig>(
 /// requires that what `observe` reports is the hash of the bytes the kit sent. The read-back
 /// (`CHANNEL_READBACK` and a smoke action fetch the bytes and hash them themselves) passes the
 /// digest of the bytes and fails the one that was declared, whatever `observe` reported, so a
-/// registry that echoes the declared digest is caught here and could not pass a read-back.
-pub(super) fn a_registry_that_echoes_the_declared_digest_fails_readback<R: PublisherRig>(rig: &R) {
-    let mut p = fixture_publisher(rig);
-    let mut set = Set::of(rig, &["a"]);
+/// registry that echoes the declared digest is caught here and could not pass a read-back. It is
+/// held for every member of a set of several, on every declared channel, and for a coordinate
+/// that was yanked.
+pub(super) fn a_registry_that_echoes_the_declared_digest_fails_readback<R: PublisherRig>(
+    rig: &R,
+    shape: &ChannelShape,
+) {
+    let mut p = built(rig, shape);
+    let mut set = Set::of(rig, &["a", "b"]);
     let declared = sha(b"bytes that are not the member");
     set.held.digest.clone_from(&declared);
-    let a = &set.coords[0];
     if p.stages() {
         stage(rig, &mut p, &set);
-        let staged = staged_held(observed(rig, &mut p, GrantPhase::Stage, &set, 0));
-        same(
-            staged.digest,
-            set.digest(0),
-            "the digest a staged coordinate is observed with, from the bytes that were sent",
-        );
+        for at in 0..set.coords.len() {
+            let staged = staged_held(observed(rig, &mut p, GrantPhase::Stage, &set, at));
+            same(
+                staged.digest,
+                set.digest(at),
+                "the digest a staged coordinate is observed with, from the bytes that were sent",
+            );
+        }
     }
     super::publisher_rig::commit(rig, &mut p, &set);
-    let held = present_held(stranger(&mut p, a));
+    for (at, k) in set.coords.iter().enumerate() {
+        let held = present_held(stranger(&mut p, k));
+        same(
+            held.digest,
+            set.digest(at),
+            "the digest a committed coordinate is observed with, from the bytes that were sent",
+        );
+        same(
+            read_back_passes(rig, &mut p, k, &set.digest(at)),
+            true,
+            "the read-back against the digest of the bytes that were sent",
+        );
+        same(
+            read_back_passes(rig, &mut p, k, &declared),
+            false,
+            "the read-back against a digest that was only declared",
+        );
+    }
+    let a = &set.coords[0];
+    let grant = rig.grant(&p, GrantPhase::Commit, std::slice::from_ref(a));
+    must(p.yank(&grant, a, "a reason"), "yank");
     same(
-        held.digest,
+        yanked_held(stranger(&mut p, a)).digest,
         set.digest(0),
-        "the digest a committed coordinate is observed with, from the bytes that were sent",
-    );
-    same(
-        read_back_passes(rig, &mut p, a, &set.digest(0)),
-        true,
-        "the read-back against the digest of the bytes that were sent",
-    );
-    same(
-        read_back_passes(rig, &mut p, a, &declared),
-        false,
-        "the read-back against a digest that was only declared",
+        "the digest a yanked coordinate is observed with, from the bytes that were sent",
     );
 }
 

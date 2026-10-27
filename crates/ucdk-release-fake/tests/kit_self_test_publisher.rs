@@ -96,6 +96,17 @@ fn run(stub: Stub) -> Report {
     run_on(FakePublisherRig::conforming(), stub)
 }
 
+/// The stub behind the channels that do not stage only, on a rig that declares both shapes: the
+/// channel that stages is the conforming fake.
+fn run_behind_the_channel_that_does_not_stage(stub: Stub) -> Report {
+    let base = FakePublisherRig::conforming();
+    match stub {
+        Stub::Flaw(flaw) => run_publisher_kit(&base.with_flaw_only_unstaged(flaw)),
+        Stub::More(more) => run_publisher_kit(&MoreRig::flawed_only_unstaged(base, more)),
+        other => panic!("{other:?} is not a stub of one channel"),
+    }
+}
+
 fn own(scenario: &'static str, stub: Stub) -> (&'static str, Stub) {
     (scenario, stub)
 }
@@ -179,15 +190,27 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
         (
             Stub::Flaw(F::StagesLies),
             &[
+                OBSERVE_ABSENT,
+                COMMIT_READABLE,
                 COMMIT_OVER,
+                SET_COMMIT,
                 NOT_STAGE_BYTES,
+                NO_DIGEST,
+                YANK,
+                YANKED_COMMIT,
+                LOST,
+                LIST,
                 SECOND_COMMIT,
                 DUPLICATE_SET,
                 NOT_STAGING,
+                BECOMING,
+                UNREPRESENTABLE,
+                BURNED,
+                ECHO,
                 DECLARES,
             ],
         ),
-        (Stub::Flaw(F::OthersHaveNoDigest), &[NO_DIGEST]),
+        (Stub::Flaw(F::OthersHaveNoDigest), &[NO_DIGEST, LIST]),
         (Stub::Flaw(F::YankedIsNotFetchable), &[YANK]),
         (Stub::Flaw(F::CommitOverYankedCommits), &[YANKED_COMMIT]),
         (Stub::Flaw(F::ObserveAfterALostAnswerIsAbsent), &[LOST]),
@@ -235,12 +258,18 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
             &[WRITER_READS],
         ),
         (Stub::More(More::NonStagingRaceOverwrites), &[NOT_STAGING]),
-        (Stub::More(More::NonStagingCommitOverYanked), &[NOT_STAGING]),
+        (
+            Stub::More(More::NonStagingCommitOverYanked),
+            &[YANKED_COMMIT, NOT_STAGING],
+        ),
         (
             Stub::More(More::NonStagingTransientIsPermanent),
             &[NOT_STAGING],
         ),
-        (Stub::More(More::NonStagingSetCommitIsTorn), &[NOT_STAGING]),
+        (
+            Stub::More(More::NonStagingSetCommitIsTorn),
+            &[SET_COMMIT, NOT_STAGING],
+        ),
         (Stub::More(More::YankAbsentOk), &[YANK]),
         (Stub::More(More::StageAfterAbortIsDuplicate), &[ABORT]),
         (Stub::Flaw(F::VanishedStateIsCommitted), &[VANISHED]),
@@ -270,7 +299,15 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
         (Stub::Flaw(F::GrantLimitIsZero), &[DECLARES]),
         (
             Stub::Flaw(F::CommitUnitSaysSet),
-            &[COMMIT_READABLE, SET_COMMIT, LIST, DUPLICATE_SET, DECLARES],
+            &[
+                COMMIT_READABLE,
+                SET_COMMIT,
+                YANK,
+                LIST,
+                DUPLICATE_SET,
+                ECHO,
+                DECLARES,
+            ],
         ),
         (Stub::Flaw(F::CommitUnitSaysCoordinate), &[SET_COMMIT]),
         (Stub::Flaw(F::VersionYankIsPerCoordinate), &[YANK]),
@@ -290,6 +327,27 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
             &[OBSERVE_ABSENT, ABORT, YANK, LIST, DECLARES],
         ),
         (Stub::Odd(Odd::NoShapes), &[DECLARES]),
+        (
+            Stub::More(More::CommitPartialOnRefusal),
+            &[SET_COMMIT, UNREPRESENTABLE],
+        ),
+        (Stub::More(More::StagePartialOnRefusal), &[UNREPRESENTABLE]),
+        (Stub::More(More::YankWidensToTheCommitSet), &[YANK]),
+        (Stub::More(More::YankByNamePrefix), &[YANK]),
+        (Stub::More(More::ObserveByNamePrefix), &[OBSERVE_ABSENT]),
+        (Stub::More(More::FetchByNamePrefix), &[OBSERVE_ABSENT]),
+        (
+            Stub::More(More::CommitPublishesOtherStagedBytes),
+            &[COMMIT_CARRIES],
+        ),
+        (Stub::More(More::DuplicateRestamps), &[SECOND_COMMIT]),
+        (Stub::More(More::AbortDropsUnnamedCommitted), &[ABORT]),
+        (
+            Stub::More(More::ObserveOfOthersReadsTheLaggingList),
+            &[LIST],
+        ),
+        (Stub::More(More::EchoesOnAMultiMemberSet), &[ECHO]),
+        (Stub::More(More::EchoesOnAYankedCoordinate), &[ECHO]),
     ];
     for field in Field::ALL {
         table.extend([
@@ -385,12 +443,10 @@ fn a_rig_of_one_call_to_a_commit_skips_exactly_the_scenarios_it_cannot_run() {
     report.assert_conforms();
 }
 
-/// Each scenario the rig of one call still runs fails a stub of the promise it holds: a scenario
-/// that adapts to a channel that does not stage still checks something there.
-#[test]
-fn each_scenario_a_rig_of_one_call_still_runs_fails_its_nonconforming_stub() {
+/// The stub of each scenario a rig of one call still runs, in the kit's order.
+fn the_stub_of_each_scenario_a_rig_of_one_call_runs() -> Vec<(&'static str, Stub)> {
     use Flaw as F;
-    let rows: Vec<(&str, Stub)> = vec![
+    vec![
         (OBSERVE_ABSENT, Stub::Flaw(F::AbsentIsAnError)),
         (COMMIT_READABLE, Stub::Flaw(F::PresentDigestIsWrong)),
         (COMMIT_OVER, Stub::Flaw(F::CommitOverOtherBytesOverwrites)),
@@ -418,7 +474,29 @@ fn each_scenario_a_rig_of_one_call_still_runs_fails_its_nonconforming_stub() {
         (BURNED, Stub::Flaw(F::BurnedReadsAsAbsent)),
         (ECHO, Stub::Flaw(F::EchoesTheDeclaredDigest)),
         (DECLARES, Stub::Flaw(F::GrantLimitIsZero)),
-    ];
+    ]
+}
+
+/// A rig that declares both kinds of channel holds a registry to every promise on the channel
+/// that does not stage as well as on the one that stages: each stub of a scenario that a rig of
+/// one call still runs, put behind the channel that does not stage alone, is failed by that
+/// scenario, though the channel that stages is the conforming fake.
+#[test]
+fn a_stub_behind_the_channel_that_does_not_stage_alone_fails_its_scenario_on_a_rig_of_both() {
+    for (scenario, stub) in the_stub_of_each_scenario_a_rig_of_one_call_runs() {
+        let failed = run_behind_the_channel_that_does_not_stage(stub).failed();
+        assert!(
+            failed.contains(&scenario),
+            "the stub {stub:?} behind the channel that does not stage must fail {scenario}, and it failed {failed:?}"
+        );
+    }
+}
+
+/// Each scenario the rig of one call still runs fails a stub of the promise it holds: a scenario
+/// that adapts to a channel that does not stage still checks something there.
+#[test]
+fn each_scenario_a_rig_of_one_call_still_runs_fails_its_nonconforming_stub() {
+    let rows = the_stub_of_each_scenario_a_rig_of_one_call_runs();
     let ran: Vec<&str> = rows.iter().map(|(scenario, _)| *scenario).collect();
     let restricted = run_publisher_kit(&FakePublisherRig::restricted());
     assert_eq!(

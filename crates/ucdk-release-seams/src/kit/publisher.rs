@@ -10,12 +10,13 @@
 
 use ucdk_release::codec::GrantPhase;
 use ucdk_release::publish::{Held, Presence};
+use ucdk_release_proto::v1::Stamped;
 
 use super::publisher_more as more;
 use super::publisher_rig::{
-    Arrangement, PublisherRig, Set, built, commit, fetched, fixture, fixture_publisher,
-    held_by_another, is_yanked, needs_a_conditional_commit, needs_a_plain_channel,
-    needs_a_set_commit, needs_no_staging, needs_staging, observed, observed_alone, plain_shapes,
+    Arrangement, ChannelShape, PublisherRig, Set, built, commit, fetched, held_by_another,
+    is_yanked, needs_a_conditional_commit, needs_a_plain_channel, needs_a_set_commit,
+    needs_no_staging, needs_staging, observed, observed_alone, on_each_plain_shape, plain_shapes,
     present_held, publish, stage, staged_held, staging_publisher, stranger, unstaged_publisher,
 };
 use super::publisher_shapes as shapes;
@@ -28,8 +29,10 @@ pub fn run_publisher_kit<R: PublisherRig>(rig: &R) -> Report {
 
 pub fn publisher_scenarios<R: PublisherRig>() -> Vec<Scenario<R>> {
     vec![
-        Scenario::new("observe_absent_is_not_an_error", observe_absent_is_not_an_error::<R>)
-            .gated(needs_a_plain_channel::<R>),
+        Scenario::new("observe_absent_is_not_an_error", |rig| {
+            on_each_plain_shape(rig, observe_absent_is_not_an_error::<R>);
+        })
+        .gated(needs_a_plain_channel::<R>),
         Scenario::new(
             "stage_then_observe_returns_staged_with_the_same_digest",
             stage_then_observe_returns_staged_with_the_same_digest::<R>,
@@ -49,7 +52,12 @@ pub fn publisher_scenarios<R: PublisherRig>() -> Vec<Scenario<R>> {
             .gated(needs_staging::<R>),
         Scenario::new(
             "commit_makes_the_staged_coordinates_readable_with_the_same_digest",
-            commit_makes_the_staged_coordinates_readable_with_the_same_digest::<R>,
+            |rig| {
+                on_each_plain_shape(
+                    rig,
+                    commit_makes_the_staged_coordinates_readable_with_the_same_digest::<R>,
+                );
+            },
         )
         .gated(needs_a_plain_channel::<R>),
         Scenario::new(
@@ -67,34 +75,34 @@ pub fn publisher_scenarios<R: PublisherRig>() -> Vec<Scenario<R>> {
             abort_gives_staged_state_back_and_never_touches_a_committed_coordinate::<R>,
         )
         .gated(needs_staging::<R>),
-        Scenario::new(
-            "a_set_commit_makes_every_coordinate_readable_or_none",
-            a_set_commit_makes_every_coordinate_readable_or_none::<R>,
-        )
+        Scenario::new("a_set_commit_makes_every_coordinate_readable_or_none", |rig| {
+            on_each_plain_shape(rig, a_set_commit_makes_every_coordinate_readable_or_none::<R>);
+        })
         .gated(needs_a_plain_channel::<R>),
         Scenario::new(
             "a_channel_that_does_not_stage_commits_with_the_bytes",
             a_channel_that_does_not_stage_commits_with_the_bytes::<R>,
         )
         .gated(needs_no_staging::<R>),
-        Scenario::new("no_digest_exposed_is_refused", no_digest_exposed_is_refused::<R>)
-            .gated(needs_a_plain_channel::<R>),
-        Scenario::new("yank_keeps_bytes_fetchable", yank_keeps_bytes_fetchable::<R>)
-            .gated(needs_a_plain_channel::<R>),
-        Scenario::new(
-            "yanked_coordinate_cannot_be_committed_again",
-            yanked_coordinate_cannot_be_committed_again::<R>,
-        )
+        Scenario::new("no_digest_exposed_is_refused", |rig| {
+            on_each_plain_shape(rig, no_digest_exposed_is_refused::<R>);
+        })
         .gated(needs_a_plain_channel::<R>),
-        Scenario::new(
-            "lost_answer_is_resolvable_by_observe",
-            lost_answer_is_resolvable_by_observe::<R>,
-        )
+        Scenario::new("yank_keeps_bytes_fetchable", |rig| {
+            on_each_plain_shape(rig, yank_keeps_bytes_fetchable::<R>);
+        })
         .gated(needs_a_plain_channel::<R>),
-        Scenario::new(
-            "list_may_lag_but_observe_is_exact",
-            list_may_lag_but_observe_is_exact::<R>,
-        )
+        Scenario::new("yanked_coordinate_cannot_be_committed_again", |rig| {
+            on_each_plain_shape(rig, yanked_coordinate_cannot_be_committed_again::<R>);
+        })
+        .gated(needs_a_plain_channel::<R>),
+        Scenario::new("lost_answer_is_resolvable_by_observe", |rig| {
+            on_each_plain_shape(rig, lost_answer_is_resolvable_by_observe::<R>);
+        })
+        .gated(needs_a_plain_channel::<R>),
+        Scenario::new("list_may_lag_but_observe_is_exact", |rig| {
+            on_each_plain_shape(rig, list_may_lag_but_observe_is_exact::<R>);
+        })
         .gated(needs_a_plain_channel::<R>),
         Scenario::new(
             "a_second_commit_of_the_same_bytes_is_duplicate",
@@ -138,27 +146,52 @@ pub fn publisher_scenarios<R: PublisherRig>() -> Vec<Scenario<R>> {
         .gated(needs_staging::<R>),
         Scenario::new(
             "a_retry_of_a_commit_that_is_becoming_readable_is_committed_or_duplicate_and_never_a_second_write",
-            shapes::a_retry_of_a_commit_that_is_becoming_readable_is_committed_or_duplicate_and_never_a_second_write::<R>,
+            |rig| {
+                on_each_plain_shape(
+                    rig,
+                    shapes::a_retry_of_a_commit_that_is_becoming_readable_is_committed_or_duplicate_and_never_a_second_write::<R>,
+                );
+            },
         )
         .gated(needs_a_plain_channel::<R>),
         Scenario::new(
             "a_coordinate_the_channel_cannot_hold_is_refused_before_anything_is_sent",
-            shapes::a_coordinate_the_channel_cannot_hold_is_refused_before_anything_is_sent::<R>,
+            |rig| {
+                on_each_plain_shape(
+                    rig,
+                    shapes::a_coordinate_the_channel_cannot_hold_is_refused_before_anything_is_sent::<R>,
+                );
+            },
         )
         .gated(shapes::needs_an_unrepresentable_coordinate::<R>),
         Scenario::new(
             "a_sealed_version_refuses_a_later_platform_and_observes_it_absent",
-            shapes::a_sealed_version_refuses_a_later_platform_and_observes_it_absent::<R>,
+            |rig| {
+                on_each_plain_shape(
+                    rig,
+                    shapes::a_sealed_version_refuses_a_later_platform_and_observes_it_absent::<R>,
+                );
+            },
         )
         .gated(shapes::needs_a_sealing_registry::<R>),
         Scenario::new(
             "a_burned_coordinate_is_neither_absent_nor_present_nor_committable",
-            shapes::a_burned_coordinate_is_neither_absent_nor_present_nor_committable::<R>,
+            |rig| {
+                on_each_plain_shape(
+                    rig,
+                    shapes::a_burned_coordinate_is_neither_absent_nor_present_nor_committable::<R>,
+                );
+            },
         )
         .gated(shapes::needs_a_registry_that_can_burn::<R>),
         Scenario::new(
             "a_registry_that_echoes_the_declared_digest_fails_readback",
-            shapes::a_registry_that_echoes_the_declared_digest_fails_readback::<R>,
+            |rig| {
+                on_each_plain_shape(
+                    rig,
+                    shapes::a_registry_that_echoes_the_declared_digest_fails_readback::<R>,
+                );
+            },
         )
         .gated(needs_a_plain_channel::<R>),
         Scenario::new(
@@ -175,15 +208,33 @@ fn a_second_commit_of_the_same_bytes_is_duplicate<R: PublisherRig>(rig: &R) {
         let mut p = built(rig, &shape);
         let set = Set::of(rig, &["a"]);
         publish(rig, &mut p, &set);
-        let blobs = set.blobs();
-        let items = set.items(&blobs);
-        let grant = rig.grant(&p, GrantPhase::Commit, &set.coords);
-        same(
-            must(p.commit(&grant, &items), "a second commit"),
-            CommitAnswer::Duplicate,
-            &format!("a second commit of the same bytes ({shape:?})"),
-        );
-        present_held(stranger(&mut p, &set.coords[0]));
+        let before = present_held(stranger(&mut p, &set.coords[0]));
+        let mut restamped = set.clone();
+        restamped.held.stamp = Some(Stamped {
+            build_number: 42,
+            source_commit: "def456".to_owned(),
+        });
+        let mut marked = set.clone();
+        marked.held.exceptional = true;
+        for (what, again) in [
+            ("the same bytes", &set),
+            ("the same bytes and another stamp", &restamped),
+            ("the same bytes and another mark", &marked),
+        ] {
+            let blobs = again.blobs();
+            let items = again.items(&blobs);
+            let grant = rig.grant(&p, GrantPhase::Commit, &again.coords);
+            same(
+                must(p.commit(&grant, &items), "a second commit"),
+                CommitAnswer::Duplicate,
+                &format!("a second commit of {what} ({shape:?})"),
+            );
+            same(
+                present_held(stranger(&mut p, &set.coords[0])),
+                before.clone(),
+                &format!("what the coordinate holds after a second commit of {what}"),
+            );
+        }
         same(
             fetched(rig, &mut p, &set.coords[0]),
             Some(set.bytes(0).to_vec()),
@@ -217,22 +268,57 @@ fn a_stage_over_ones_own_staged_coordinate_is_duplicate<R: PublisherRig>(rig: &R
     );
 }
 
-fn observe_absent_is_not_an_error<R: PublisherRig>(rig: &R) {
-    let mut p = fixture_publisher(rig);
+fn observe_absent_is_not_an_error<R: PublisherRig>(rig: &R, shape: &ChannelShape) {
+    let mut p = built(rig, shape);
     let set = Set::of(rig, &["a"]);
     same(
         stranger(&mut p, &set.coords[0]),
         Presence::Absent,
         "a coordinate nobody wrote",
     );
-    a_held_coordinate_does_not_answer_for_one_that_differs_in_a_field(rig);
-    more::a_sibling_is_another_coordinate_to_stage_commit_and_observe(rig);
+    a_held_coordinate_does_not_answer_for_one_that_differs_in_a_field(rig, shape);
+    a_coordinate_whose_name_extends_the_one_asked_for_is_another_coordinate(rig, shape);
+    more::a_sibling_is_another_coordinate_to_stage_commit_and_observe(rig, shape);
+}
+
+/// A name is the whole of the name: a held coordinate whose name extends the name asked for is
+/// not the coordinate asked for, to `observe` or to `fetch`.
+fn a_coordinate_whose_name_extends_the_one_asked_for_is_another_coordinate<R: PublisherRig>(
+    rig: &R,
+    shape: &ChannelShape,
+) {
+    let mut p = built(rig, shape);
+    let longer = Set::of(rig, &["ab"]);
+    publish(rig, &mut p, &longer);
+    let shorter = rig.coordinate("a");
+    same(
+        stranger(&mut p, &shorter),
+        Presence::Absent,
+        "a coordinate whose name a held one extends",
+    );
+    let grant = rig.grant(&p, GrantPhase::Read, std::slice::from_ref(&shorter));
+    same(
+        must(
+            p.observe(&grant, &shorter, &[]),
+            "a granted observe of a coordinate whose name a held one extends",
+        ),
+        Presence::Absent,
+        "a granted observe of a coordinate whose name a held one extends",
+    );
+    same(
+        fetched(rig, &mut p, &shorter),
+        None,
+        "the bytes of a coordinate whose name a held one extends",
+    );
 }
 
 /// A coordinate is the whole of its five fields: the one held that differs from the one asked
 /// for in a field is not it, to `observe` or to `fetch`.
-fn a_held_coordinate_does_not_answer_for_one_that_differs_in_a_field<R: PublisherRig>(rig: &R) {
-    let mut p = fixture_publisher(rig);
+fn a_held_coordinate_does_not_answer_for_one_that_differs_in_a_field<R: PublisherRig>(
+    rig: &R,
+    shape: &ChannelShape,
+) {
+    let mut p = built(rig, shape);
     let held = rig.coordinate("a");
     publish(rig, &mut p, &Set::at(rig, vec![held.clone()]));
     present_held(stranger(&mut p, &held));
@@ -297,8 +383,11 @@ fn a_commit_grant_observes_it_too<R: PublisherRig>(rig: &R) {
     staged_held(observed_alone(rig, &mut p, GrantPhase::Commit, &set, 0));
 }
 
-fn commit_makes_the_staged_coordinates_readable_with_the_same_digest<R: PublisherRig>(rig: &R) {
-    let mut p = fixture_publisher(rig);
+fn commit_makes_the_staged_coordinates_readable_with_the_same_digest<R: PublisherRig>(
+    rig: &R,
+    shape: &ChannelShape,
+) {
+    let mut p = built(rig, shape);
     let set = Set::of(rig, &["a", "b"]);
     publish(rig, &mut p, &set);
     for (at, coord) in set.coords.iter().enumerate() {
@@ -395,9 +484,11 @@ fn abort_gives_staged_state_back_and_never_touches_a_committed_coordinate<R: Pub
 /// What one commit call makes readable is what `commit_unit()` says, held both ways: a channel
 /// that commits a set at once makes every coordinate readable or none, and one that commits each
 /// coordinate on its own refuses a call that names two and makes nothing of it readable.
-fn a_set_commit_makes_every_coordinate_readable_or_none<R: PublisherRig>(rig: &R) {
-    let shape = fixture(rig);
-    let mut p = built(rig, &shape);
+fn a_set_commit_makes_every_coordinate_readable_or_none<R: PublisherRig>(
+    rig: &R,
+    shape: &ChannelShape,
+) {
+    let mut p = built(rig, shape);
     let set = Set::of(rig, &["a", "b"]);
     match p.commit_unit() {
         CommitUnit::Set => {
@@ -405,7 +496,7 @@ fn a_set_commit_makes_every_coordinate_readable_or_none<R: PublisherRig>(rig: &R
             for coord in &set.coords {
                 present_held(stranger(&mut p, coord));
             }
-            let mut failing = built(rig, &shape);
+            let mut failing = built(rig, shape);
             rig.arrange(&mut failing, &Arrangement::CommitSetFailsWhole);
             stage(rig, &mut failing, &set);
             let blobs = set.blobs();
@@ -419,6 +510,7 @@ fn a_set_commit_makes_every_coordinate_readable_or_none<R: PublisherRig>(rig: &R
                     "the bytes of a coordinate of a set that failed",
                 );
             }
+            more::a_set_commit_that_is_refused_applies_none_of_it(rig, shape);
         }
         CommitUnit::Coordinate => {
             stage(rig, &mut p, &set);
@@ -461,8 +553,8 @@ fn a_channel_that_does_not_stage_commits_with_the_bytes<R: PublisherRig>(rig: &R
     );
 }
 
-fn no_digest_exposed_is_refused<R: PublisherRig>(rig: &R) {
-    let mut p = fixture_publisher(rig);
+fn no_digest_exposed_is_refused<R: PublisherRig>(rig: &R, shape: &ChannelShape) {
+    let mut p = built(rig, shape);
     let set = Set::of(rig, &["a"]);
     rig.arrange(&mut p, &held_by_another(rig, &set.coords[0]));
     let held = present_held(stranger(&mut p, &set.coords[0]));
@@ -473,8 +565,8 @@ fn no_digest_exposed_is_refused<R: PublisherRig>(rig: &R) {
     );
 }
 
-fn yank_keeps_bytes_fetchable<R: PublisherRig>(rig: &R) {
-    let mut p = fixture_publisher(rig);
+fn yank_keeps_bytes_fetchable<R: PublisherRig>(rig: &R, shape: &ChannelShape) {
+    let mut p = built(rig, shape);
     let set = Set::of(rig, &["a"]);
     publish(rig, &mut p, &set);
     let grant = rig.grant(&p, GrantPhase::Commit, &set.coords);
@@ -489,11 +581,11 @@ fn yank_keeps_bytes_fetchable<R: PublisherRig>(rig: &R) {
         true,
         "a yanked coordinate is observed as Yanked",
     );
-    more::a_yank_reaches_only_the_coordinate_it_names_and_needs_it_held(rig);
+    more::a_yank_reaches_only_the_coordinate_it_names_and_needs_it_held(rig, shape);
 }
 
-fn yanked_coordinate_cannot_be_committed_again<R: PublisherRig>(rig: &R) {
-    let mut p = fixture_publisher(rig);
+fn yanked_coordinate_cannot_be_committed_again<R: PublisherRig>(rig: &R, shape: &ChannelShape) {
+    let mut p = built(rig, shape);
     let set = Set::of(rig, &["a"]);
     publish(rig, &mut p, &set);
     let grant = rig.grant(&p, GrantPhase::Commit, &set.coords);
@@ -524,12 +616,11 @@ fn yanked_coordinate_cannot_be_committed_again<R: PublisherRig>(rig: &R) {
 /// A commit whose answer was lost is resolved by an observe. On a channel that stages, a commit
 /// that did not land leaves the coordinate `Staged`; on one that does not, it leaves it `Absent`,
 /// and the caller commits again. A commit that landed is `Present` on either.
-fn lost_answer_is_resolvable_by_observe<R: PublisherRig>(rig: &R) {
-    let shape = fixture(rig);
+fn lost_answer_is_resolvable_by_observe<R: PublisherRig>(rig: &R, shape: &ChannelShape) {
     let set = Set::of(rig, &["a"]);
     let blobs = set.blobs();
     let items = set.items(&blobs);
-    let mut landed = built(rig, &shape);
+    let mut landed = built(rig, shape);
     stage(rig, &mut landed, &set);
     rig.arrange(&mut landed, &Arrangement::LoseAnswerAfterCommit);
     let grant = rig.grant(&landed, GrantPhase::Commit, &set.coords);
@@ -543,7 +634,7 @@ fn lost_answer_is_resolvable_by_observe<R: PublisherRig>(rig: &R) {
         "a lost answer may have landed",
     );
     present_held(stranger(&mut landed, &set.coords[0]));
-    let mut not_landed = built(rig, &shape);
+    let mut not_landed = built(rig, shape);
     stage(rig, &mut not_landed, &set);
     rig.arrange(&mut not_landed, &Arrangement::LoseAnswerBeforeCommit);
     let grant = rig.grant(&not_landed, GrantPhase::Commit, &set.coords);
@@ -567,8 +658,8 @@ fn lost_answer_is_resolvable_by_observe<R: PublisherRig>(rig: &R) {
     }
 }
 
-fn list_may_lag_but_observe_is_exact<R: PublisherRig>(rig: &R) {
-    let mut p = fixture_publisher(rig);
+fn list_may_lag_but_observe_is_exact<R: PublisherRig>(rig: &R, shape: &ChannelShape) {
+    let mut p = built(rig, shape);
     rig.arrange(&mut p, &Arrangement::ListLags);
     let set = Set::of(rig, &["a"]);
     publish(rig, &mut p, &set);
@@ -589,14 +680,32 @@ fn list_may_lag_but_observe_is_exact<R: PublisherRig>(rig: &R) {
         true,
         "a listing names only what is held",
     );
-    a_listing_names_only_what_is_held_in_its_scope(rig);
+    a_listing_names_only_what_is_held_in_its_scope(rig, shape);
+    an_observe_of_a_coordinate_of_another_writer_is_exact_while_the_listing_lags(rig, shape);
+}
+
+/// What another writer committed is read by an observe as it is, however far behind the listing
+/// is: the coordinate is `Present` with the digest of the bytes the other writer sent.
+fn an_observe_of_a_coordinate_of_another_writer_is_exact_while_the_listing_lags<R: PublisherRig>(
+    rig: &R,
+    shape: &ChannelShape,
+) {
+    let mut p = built(rig, shape);
+    let set = Set::of(rig, &["a"]);
+    rig.arrange(&mut p, &Arrangement::ListLags);
+    rig.arrange(&mut p, &held_by_another(rig, &set.coords[0]));
+    same(
+        present_held(stranger(&mut p, &set.coords[0])).digest,
+        set.reseeded(rig, 1).digest(0),
+        "the digest of a coordinate another writer committed, while the listing lags",
+    );
 }
 
 /// A listing may leave coordinates out, but what it names is held, in the channel and under the
 /// prefix of its scope, and carries what the registry holds beside each. The prefix is a label
 /// the kit gave the rig, so the rig's names must keep it.
-fn a_listing_names_only_what_is_held_in_its_scope<R: PublisherRig>(rig: &R) {
-    let mut p = fixture_publisher(rig);
+fn a_listing_names_only_what_is_held_in_its_scope<R: PublisherRig>(rig: &R, shape: &ChannelShape) {
+    let mut p = built(rig, shape);
     let mut coords = vec![
         rig.coordinate("a"),
         rig.coordinate("ab"),

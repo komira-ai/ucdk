@@ -8,9 +8,9 @@ use ucdk_release::publish::Presence;
 use ucdk_release_proto::v1::{Coordinate, Stamped};
 
 use super::publisher_rig::{
-    Arrangement, ChannelShape, PublisherRig, Set, built, commit, fetched, fixture_publisher,
-    held_by_another, is_yanked, observed, plain_shapes, present_held, publish, sets_beside,
-    siblings_beside, stage, staged_held, staging_publisher, stranger, unstaged_publisher,
+    Arrangement, ChannelShape, PublisherRig, Set, built, commit, fetched, held_by_another,
+    is_yanked, observed, plain_shapes, present_held, publish, sets_beside, siblings_beside, stage,
+    staged_held, staging_publisher, stranger, unstaged_publisher,
 };
 use super::{must, must_err, same};
 use crate::{CommitAnswer, CommitUnit, ListScope, Publisher, SeamError, StageAnswer, YankUnit};
@@ -70,6 +70,66 @@ pub(super) fn a_commit_carries_exactly_what_was_staged<R: PublisherRig>(rig: &R)
         Some(set.bytes(0).to_vec()),
         "the bytes of what was staged, committed after the refusals",
     );
+    a_commit_publishes_the_coordinate_it_names_and_not_another_that_is_staged(rig);
+}
+
+/// With two coordinates staged, a commit that names one publishes the bytes that were staged at
+/// it and nothing of the other, which stays staged and is committed by its own commit.
+fn a_commit_publishes_the_coordinate_it_names_and_not_another_that_is_staged<R: PublisherRig>(
+    rig: &R,
+) {
+    let mut p = staging_publisher(rig);
+    let (a, b) = (Set::of(rig, &["a"]), Set::of(rig, &["b"]));
+    stage(rig, &mut p, &a);
+    stage(rig, &mut p, &b);
+    commit(rig, &mut p, &a);
+    same(
+        fetched(rig, &mut p, &a.coords[0]),
+        Some(a.bytes(0).to_vec()),
+        "the bytes of the coordinate a commit named, with another staged",
+    );
+    same(
+        fetched(rig, &mut p, &b.coords[0]),
+        None,
+        "the bytes of a staged coordinate a commit did not name",
+    );
+    staged_held(observed(rig, &mut p, GrantPhase::Stage, &b, 0));
+    commit(rig, &mut p, &b);
+    same(
+        fetched(rig, &mut p, &b.coords[0]),
+        Some(b.bytes(0).to_vec()),
+        "the bytes of the coordinate committed second",
+    );
+}
+
+/// A commit of a set that is refused for one coordinate applies none of the others: a
+/// coordinate nobody staged, on a channel that stages, is refused, and the coordinate beside it
+/// is no more readable than before and is still staged. A channel that commits each coordinate
+/// on its own refuses any call that names two, which the scenario of the set commit holds.
+pub(super) fn a_set_commit_that_is_refused_applies_none_of_it<R: PublisherRig>(
+    rig: &R,
+    shape: &ChannelShape,
+) {
+    if !shape.stages {
+        return;
+    }
+    let mut p = built(rig, shape);
+    let b = Set::of(rig, &["b"]);
+    stage(rig, &mut p, &b);
+    let both = Set::of(rig, &["b", "u"]);
+    let blobs = both.blobs();
+    let items = both.items(&blobs);
+    let grant = rig.grant(&p, GrantPhase::Commit, &both.coords);
+    must_err(
+        p.commit(&grant, &items),
+        "a commit of a set one coordinate of which nobody staged",
+    );
+    same(
+        fetched(rig, &mut p, &b.coords[0]),
+        None,
+        "the staged coordinate of a set whose commit was refused",
+    );
+    staged_held(observed(rig, &mut p, GrantPhase::Stage, &b, 0));
 }
 
 /// A stage or a commit of a set one coordinate of which is held by another writer answers
@@ -304,11 +364,12 @@ pub(super) fn a_channel_that_does_not_stage_creates_a_coordinate_once<R: Publish
 /// with it.
 pub(super) fn a_sibling_is_another_coordinate_to_stage_commit_and_observe<R: PublisherRig>(
     rig: &R,
+    shape: &ChannelShape,
 ) {
     let base = rig.coordinate("a");
     for sibling in siblings_beside(rig, &base) {
         let field = sibling.field;
-        let mut p = fixture_publisher(rig);
+        let mut p = built(rig, shape);
         for set in sets_beside(rig, &base, &sibling) {
             publish(rig, &mut p, &set);
         }
@@ -320,7 +381,7 @@ pub(super) fn a_sibling_is_another_coordinate_to_stage_commit_and_observe<R: Pub
             &format!("the bytes of a coordinate beside one that differs in its {field}"),
         );
 
-        let mut p = fixture_publisher(rig);
+        let mut p = built(rig, shape);
         if p.stages() {
             stage(rig, &mut p, &Set::at(rig, vec![base.clone()]));
             let grant = rig.grant(
@@ -361,6 +422,23 @@ pub(super) fn an_abort_reaches_only_the_coordinates_it_names<R: PublisherRig>(ri
         staged_held(observed(rig, &mut p, GrantPhase::Stage, &other, 0));
         stage(rig, &mut p, &named);
     }
+    an_abort_leaves_a_committed_coordinate_it_does_not_name_alone(rig);
+}
+
+/// An abort of a staged coordinate does not drop a committed one it does not name.
+fn an_abort_leaves_a_committed_coordinate_it_does_not_name_alone<R: PublisherRig>(rig: &R) {
+    let mut p = staging_publisher(rig);
+    let (committed, staged) = (Set::of(rig, &["a"]), Set::of(rig, &["b"]));
+    publish(rig, &mut p, &committed);
+    stage(rig, &mut p, &staged);
+    let grant = rig.grant(&p, GrantPhase::Stage, &staged.coords);
+    must(p.abort(&grant, &staged.coords), "abort");
+    present_held(stranger(&mut p, &committed.coords[0]));
+    same(
+        fetched(rig, &mut p, &committed.coords[0]),
+        Some(committed.bytes(0).to_vec()),
+        "the bytes of a committed coordinate an abort did not name",
+    );
 }
 
 /// A yank yanks the coordinate it names and no sibling of it, unless the channel's `yank_unit()`
@@ -370,10 +448,11 @@ pub(super) fn an_abort_reaches_only_the_coordinates_it_names<R: PublisherRig>(ri
 /// nobody holds is no coordinate to yank.
 pub(super) fn a_yank_reaches_only_the_coordinate_it_names_and_needs_it_held<R: PublisherRig>(
     rig: &R,
+    shape: &ChannelShape,
 ) {
     let a = rig.coordinate("a");
     for sibling in siblings_beside(rig, &a) {
-        let mut p = fixture_publisher(rig);
+        let mut p = built(rig, shape);
         for set in sets_beside(rig, &a, &sibling) {
             publish(rig, &mut p, &set);
         }
@@ -391,7 +470,10 @@ pub(super) fn a_yank_reaches_only_the_coordinate_it_names_and_needs_it_held<R: P
             present_held(stranger(&mut p, &sibling.coordinate));
         }
     }
-    let mut p = fixture_publisher(rig);
+    a_yank_names_a_coordinate_and_not_what_was_committed_with_it_or_what_extends_its_name(
+        rig, shape,
+    );
+    let mut p = built(rig, shape);
     let nothing = rig.coordinate("x");
     let grant = rig.grant(&p, GrantPhase::Commit, std::slice::from_ref(&nothing));
     must_err(
@@ -403,6 +485,39 @@ pub(super) fn a_yank_reaches_only_the_coordinate_it_names_and_needs_it_held<R: P
         Presence::Absent,
         "a coordinate nobody holds after a yank of it",
     );
+}
+
+/// A yank names one coordinate: the others that were committed in the same call stay as they
+/// were, and so does a coordinate whose name extends the name it names.
+fn a_yank_names_a_coordinate_and_not_what_was_committed_with_it_or_what_extends_its_name<
+    R: PublisherRig,
+>(
+    rig: &R,
+    shape: &ChannelShape,
+) {
+    let mut p = built(rig, shape);
+    let together = Set::of(rig, &["a", "b"]);
+    let longer = Set::of(rig, &["ab"]);
+    publish(rig, &mut p, &together);
+    publish(rig, &mut p, &longer);
+    let grant = rig.grant(&p, GrantPhase::Commit, &together.coords[..1]);
+    must(p.yank(&grant, &together.coords[0], "a reason"), "yank");
+    same(
+        is_yanked(&stranger(&mut p, &together.coords[0])),
+        true,
+        "the coordinate a yank named",
+    );
+    for (what, kept) in [
+        ("committed in the same call", &together.coords[1]),
+        ("whose name extends the name", &longer.coords[0]),
+    ] {
+        present_held(stranger(&mut p, kept));
+        same(
+            fetched(rig, &mut p, kept).is_some(),
+            true,
+            &format!("the bytes of a coordinate {what} as the one a yank named"),
+        );
+    }
 }
 
 /// A yank by version: a grant that names the coordinate and not the platform of it that is held
