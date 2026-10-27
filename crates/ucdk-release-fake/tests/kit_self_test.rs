@@ -9,7 +9,7 @@ use rigs::build_system::{FakeBuildRig, Flaw as Build};
 use rigs::grant_source::{FakeGrantRig, Flaw as Grants};
 use rigs::output_files::{FakeFilesRig, Flaw as Files};
 use rigs::process_runner::{FakeProcessRig, Flaw as Process};
-use rigs::publisher::{FakePublisherRig, Flaw as Registry};
+use rigs::publisher::{Bad, Call, FakePublisherRig, Flaw as Registry};
 use rigs::store::{FakeStoreRig, Flaw as Store};
 use ucdk_release_proto::v1::BuildSystemKind;
 use ucdk_release_seams::kit::{
@@ -120,6 +120,12 @@ fn further_store() {
             (Store::WriterAcceptsADotPart, &[ESCAPES]),
             (Store::WriterAcceptsControlCharacters, &[ESCAPES]),
             (Store::GetResolvesClimbs, &[ESCAPES]),
+            (Store::DiscardWipesEveryEntry, &[]),
+            (Store::DiscardOfAMissingEntryIsAnError, &[]),
+            (Store::FilesMatchedByKeyPrefix, &[]),
+            (Store::PathsAreCaseFolded, &[]),
+            (Store::GetTakesATrailingSlash, &[]),
+            (Store::EmptyEntryIsNoEntry, &[]),
         ],
         |flaw| run_store_kit(&FakeStoreRig::flawed(flaw)),
     );
@@ -142,6 +148,8 @@ fn further_grant_source() {
             (Grants::ExceptionalIgnoresEnvironment, &[DIFFERING]),
             (Grants::ExceptionalIgnoresAudienceAndPinned, &[DIFFERING]),
             (Grants::LimitIsCheckedForStageOnly, &[LIMIT]),
+            (Grants::IgnoresTheDeclaredScopesAndLocation, &[]),
+            (Grants::ClaimsMatchedIgnoringCase, &[]),
         ],
         |flaw| run_grant_source_kit(&FakeGrantRig::flawed(flaw)),
     );
@@ -169,6 +177,9 @@ fn further_output_files() {
             (Files::TrailingSlashFollowsStat, &[STAT]),
             (Files::ReadRefusesDotDotNames, &[READ_THROUGH]),
             (Files::FollowsNestedLinks, &[DESCENDED]),
+            (Files::StatBelowAFileIsAnError, &[]),
+            (Files::ListOfAnEmptyDirectoryIsPermanent, &[]),
+            (Files::ReadTruncatesAt64k, &[]),
         ],
         |flaw| run_output_files_kit(&FakeFilesRig::flawed(flaw)),
     );
@@ -187,6 +198,9 @@ fn further_process_runner() {
                 Process::NoPathFallsBackToOwn,
                 &["a_name_found_nowhere_on_the_childs_path_is_unstartable"],
             ),
+            (Process::AStopPoisonsTheRunner, &[]),
+            (Process::EnvironmentLeaksIntoTheNextRun, &[]),
+            (Process::LastPathEntryWins, &[]),
         ],
         |flaw| run_process_runner_kit(&FakeProcessRig::flawed(flaw)),
     );
@@ -226,6 +240,8 @@ fn further_build_system() {
                 (Build::DirectoryOutputIsRefused, &[ONE_OUTPUT, COPY_OUT]),
                 (Build::NestedSymlinkIsAccepted, &[SYMLINK]),
                 (Build::CopyOutOfADirectoryEscapes, &[COPY_OUT]),
+                (Build::CopyOutOfADirectoryWritesGarbage, &[]),
+                (Build::CopyOutOfADirectoryCarriesTheClock, &[]),
             ],
             |flaw| run_build_system_kit(&FakeBuildRig::flawed(kind, flaw)),
         );
@@ -291,6 +307,19 @@ fn further_publisher() {
             (Registry::ListIgnoresTheChannel, &[LIST]),
             (Registry::ListIgnoresThePrefix, &[LIST]),
             (Registry::ObserveDropsAForeignSet, &[DECLARED]),
+            (Registry::StrangerObservesPrivateWithASet, &[]),
+            (Registry::BadGrantTakenBy(Bad::Foreign, Call::Commit), &[]),
+            (Registry::BadGrantTakenBy(Bad::Foreign, Call::Abort), &[]),
+            (Registry::BadGrantTakenBy(Bad::Foreign, Call::Yank), &[]),
+            (Registry::BadGrantTakenBy(Bad::Expired, Call::Commit), &[]),
+            (Registry::BadGrantTakenBy(Bad::Expired, Call::Abort), &[]),
+            (Registry::BadGrantTakenBy(Bad::Expired, Call::Yank), &[]),
+            (Registry::BadGrantTakenBy(Bad::Uncovered, Call::Abort), &[]),
+            (Registry::BadGrantTakenBy(Bad::Uncovered, Call::Yank), &[]),
+            (Registry::OnlyTheLastCoordinateIsCovered, &[]),
+            (Registry::SecondCommitOfTheSameBytesIsCommitted, &[]),
+            (Registry::StageOverOwnStagedSameBytesIsStaged, &[]),
+            (Registry::StageOverOwnStagedOverwrites, &[]),
         ],
         |flaw| run_publisher_kit(&FakePublisherRig::flawed(flaw)),
     );

@@ -65,6 +65,13 @@ pub enum Flaw {
     /// A listing that follows a symlink to a directory that is not directly below the listed
     /// directory.
     FollowsNestedLinks,
+    /// A `stat` of a path below a regular file that fails with `Unknown`, as the operating
+    /// system's "not a directory" is taken for a failure.
+    StatBelowAFileIsAnError,
+    /// A `list` of a directory with nothing in it that answers `Permanent`.
+    ListOfAnEmptyDirectoryIsPermanent,
+    /// A `read` that answers no more than the first 65,536 bytes.
+    ReadTruncatesAt64k,
 }
 
 pub struct FakeFilesRig {
@@ -185,6 +192,13 @@ impl OutputFiles for Flawed {
             return self.inner.stat(&target);
         }
         let kind = self.inner.stat(path)?;
+        if self.is(Flaw::StatBelowAFileIsAnError)
+            && kind.is_none()
+            && let Some((parent, _)) = path.rsplit_once('/')
+            && self.inner.stat(parent)? == Some(FileKind::File)
+        {
+            return Err(SeamError::Unknown(format!("{parent} is not a directory")));
+        }
         if self.is(Flaw::StatFollows) && kind == Some(FileKind::Symlink) {
             return Ok(Some(FileKind::File));
         }
@@ -201,6 +215,9 @@ impl OutputFiles for Flawed {
             return self.inner.list(&target);
         }
         let mut entries = self.inner.list(path)?;
+        if self.is(Flaw::ListOfAnEmptyDirectoryIsPermanent) && entries.is_empty() {
+            return Err(SeamError::Permanent(format!("{path} is empty")));
+        }
         let base = path.trim_end_matches('/').to_owned();
         self.listed.push(base.clone());
         if self.is(Flaw::DotfilesHidden) {
@@ -336,6 +353,7 @@ impl OutputFiles for Flawed {
                     *bytes = String::from_utf8_lossy(bytes).into_owned().into_bytes();
                 }
                 Some(Flaw::ReadTruncatesAt4k) => bytes.truncate(4096),
+                Some(Flaw::ReadTruncatesAt64k) => bytes.truncate(65_536),
                 _ => {}
             }
         }

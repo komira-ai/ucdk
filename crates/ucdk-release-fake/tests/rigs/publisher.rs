@@ -17,145 +17,7 @@ use ucdk_release_seams::{
     SeamError, StageAnswer, StageItem,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Flaw {
-    /// A coordinate nobody wrote is an error to observe.
-    AbsentIsAnError,
-    /// A staged coordinate is observed with a wrong digest.
-    StagedDigestIsWrong,
-    /// A stranger sees a staged coordinate.
-    StrangerSeesStaged,
-    /// A stage grant cannot see what it staged.
-    StageGrantIsBlindToStaged,
-    /// A commit grant cannot see staged state.
-    CommitGrantIsBlindToStaged,
-    /// A committed coordinate is observed with a wrong digest.
-    PresentDigestIsWrong,
-    /// A stage over the same bytes is answered `Staged`.
-    StageOverTheSameBytesIsStaged,
-    /// A commit over a coordinate that was not staged and holds other bytes replaces them.
-    CommitOverOtherBytesOverwrites,
-    /// An abort does nothing.
-    AbortDoesNothing,
-    /// A commit of a set that fails leaves the first coordinate readable.
-    SetCommitIsTorn,
-    /// A channel that does not stage says it does.
-    StagesLies,
-    /// A coordinate of another writer is observed without its digest.
-    OthersHaveNoDigest,
-    /// A yanked coordinate cannot be fetched.
-    YankedIsNotFetchable,
-    /// A commit over a yanked coordinate answers `Committed`.
-    CommitOverYankedCommits,
-    /// After an answer was lost, an observe answers `Absent`.
-    ObserveAfterALostAnswerIsAbsent,
-    /// While the listing lags, an observe reads the listing.
-    ObserveReadsTheLaggingList,
-    /// A read without a grant of a public channel is denied, whatever it reads but an observe.
-    AnonymousFetchIsDenied,
-    /// A grant for another repository is taken for this one.
-    AForeignGrantIsAccepted,
-    /// A grant of the other write phase is taken for the phase of the call.
-    TheWrongPhaseIsAccepted,
-    /// An expired grant is taken for a good one.
-    AnExpiredGrantIsAccepted,
-    /// `newest` leaves out a yanked coordinate.
-    NewestDropsYanked,
-    /// A committed coordinate is observed without its stamp.
-    TheStampIsDropped,
-    /// A grant on a plain channel does not see what another writer committed.
-    GrantedObserveIsBlindToOthers,
-    /// The group and the index are read in the other order.
-    IndexIsReadBeforeTheGroup,
-    /// A grant on a grouped channel does not see what another writer committed.
-    GroupedObserveIsBlindToOthers,
-    /// A failed group read is taken for no group.
-    FailedGroupReadIsAbsent,
-    /// The declared set is dropped from an observe of staged state.
-    TheDeclaredSetIsDropped,
-    /// An observe with no set sees staged state on a grouped channel.
-    AnEmptySetSeesStagedState,
-    /// A read grant may stage, commit, abort and yank.
-    AReadGrantMayWrite,
-    /// A commit that lost a race replaces the bytes that won it.
-    ARacedCommitOverwrites,
-    /// A failure after a commit that landed is `Permanent`.
-    TransientAfterCommitIsPermanent,
-    /// A stage over the bytes of another writer is answered `Staged`.
-    StageOverOtherBytesIsStaged,
-    /// A stranger's `observe` of a private channel is answered as a read grant's would be.
-    StrangerObservesPrivate,
-    /// A stranger's `fetch` of a private channel is answered as a read grant's would be.
-    StrangerFetchesPrivate,
-    /// A stranger's `newest` of a private channel is answered as a read grant's would be.
-    StrangerNewestPrivate,
-    /// A stranger's `list` of a private channel is answered as a read grant's would be.
-    StrangerListsPrivate,
-    /// A stranger fetches the bytes of a staged coordinate.
-    StrangerFetchesStaged,
-    /// `list` names staged coordinates.
-    ListIncludesStaged,
-    /// `newest` names staged coordinates.
-    NewestIncludesStaged,
-    /// `newest` answers every coordinate whose name starts with the name asked for.
-    NewestMatchesByPrefix,
-    /// `newest` answers the coordinates of the name in every channel.
-    NewestIgnoresTheChannel,
-    /// An abort by a stage grant gives back every staged coordinate, not only those it names.
-    AbortGivesBackAllStaged,
-    /// A yank is taken from a stage grant.
-    YankIgnoresThePhase,
-    /// A stage grant that does not cover every coordinate of the call is taken for one that does.
-    StageIgnoresCoverage,
-    /// A commit grant that does not cover every coordinate of the call is taken for one that
-    /// does.
-    CommitIgnoresCoverage,
-    /// A stage with no grant is taken for a stage with a stage grant.
-    StrangerMayStage,
-    /// A commit with no grant is taken for a commit with a commit grant.
-    StrangerMayCommit,
-    /// An abort with no grant is taken for an abort with a stage grant.
-    StrangerMayAbort,
-    /// A yank with no grant is taken for a yank with a commit grant.
-    StrangerMayYank,
-    /// A private channel takes a read grant for another repository for its own, on every read.
-    PrivateTakesAForeignReadGrant,
-    /// A private channel takes an expired read grant for a good one, on every read.
-    PrivateTakesAnExpiredReadGrant,
-    /// A private channel takes a read grant that does not name the coordinate asked for as one
-    /// that does, on `observe` and `fetch`.
-    PrivateTakesAnUncoveredReadGrant,
-    /// An `observe` of a coordinate nobody holds answers what a held coordinate of the same name
-    /// and another version has.
-    ObserveIgnoresVersion,
-    /// The same, for a coordinate of another platform.
-    ObserveIgnoresPlatform,
-    /// The same, for a coordinate of another channel.
-    ObserveIgnoresChannel,
-    /// A `fetch` of a coordinate nobody holds answers the bytes of a held coordinate of the same
-    /// name and another version.
-    FetchIgnoresVersion,
-    /// The same, for a coordinate of another platform.
-    FetchIgnoresPlatform,
-    /// The same, for a coordinate of another channel.
-    FetchIgnoresChannel,
-    /// `newest` answers each coordinate without its stamp.
-    NewestDropsTheStamp,
-    /// `newest` answers each coordinate with a wrong digest.
-    NewestWrongDigest,
-    /// `newest` answers each coordinate as not exceptional.
-    NewestDropsTheExceptionalMark,
-    /// `list` answers each coordinate without its stamp.
-    ListDropsTheStamp,
-    /// `list` answers each coordinate with a wrong digest.
-    ListWrongDigest,
-    /// `list` answers the coordinates of the prefix in every channel.
-    ListIgnoresTheChannel,
-    /// `list` answers every coordinate of the channel, whatever the prefix.
-    ListIgnoresThePrefix,
-    /// An `observe` told a set that does not hold the coordinate observes it as if told nothing.
-    ObserveDropsAForeignSet,
-}
+pub use super::publisher_flaw::{Bad, Call, Flaw};
 
 pub struct FakePublisherRig {
     clock: ManualClock,
@@ -495,6 +357,36 @@ impl Flawed {
             .collect()
     }
 
+    /// The bytes the caller staged at `k` that are still staged, as the stub saw them.
+    fn staged_bytes(&self, k: &Coordinate) -> Option<Vec<u8>> {
+        if !self.inner.is_staged(k) {
+            return None;
+        }
+        let latest = self.known.iter().rev().find(|(c, _)| c == k);
+        latest.map(|(_, bytes)| bytes.clone())
+    }
+
+    /// The grant the stub takes `g` for in a call of the kind `call` when `g` is bad in the way
+    /// the stub is lax about and the stub is lax about that call.
+    fn lax_write(&self, g: &Grant, call: Call, coordinates: &[Coordinate]) -> Option<Grant> {
+        let Some(Flaw::BadGrantTakenBy(bad, lax_call)) = self.flaw else {
+            return None;
+        };
+        if lax_call != call || g.is_none() {
+            return None;
+        }
+        Some(match bad {
+            Bad::Foreign => rewritten(g, |lines, _| {
+                LOCATION.clone_into(&mut lines[1]);
+            }),
+            Bad::Expired => rewritten(g, |_, expires| *expires = u64::MAX),
+            Bad::Uncovered => rewritten(g, |lines, _| {
+                lines.truncate(2);
+                lines.extend(coordinates.iter().map(coordinate_key));
+            }),
+        })
+    }
+
     /// The grant a flawed registry would take `g` for, when it takes it for another.
     fn regrant(&self, g: &Grant, needs: Needs) -> Option<Grant> {
         if g.is_none() {
@@ -564,6 +456,17 @@ impl Publisher for Flawed {
         let g = if self.lets_a_stranger_in(Flaw::StrangerObservesPrivate, g) {
             stranger_in = self.internal(GrantPhase::Read, std::slice::from_ref(k));
             &stranger_in
+        } else {
+            g
+        };
+        let with_set;
+        let g = if self.is(Flaw::StrangerObservesPrivateWithASet)
+            && self.shape.private
+            && g.is_none()
+            && !set.is_empty()
+        {
+            with_set = self.internal(GrantPhase::Stage, std::slice::from_ref(k));
+            &with_set
         } else {
             g
         };
@@ -666,6 +569,9 @@ impl Publisher for Flawed {
 
     fn stage(&mut self, g: &Grant, items: &[StageItem<'_>]) -> Result<StageAnswer, SeamError> {
         self.calls += 1;
+        let staged_before = items
+            .first()
+            .and_then(|item| self.staged_bytes(item.coordinate));
         self.remember(items);
         let coordinates: Vec<Coordinate> = items.iter().map(|i| i.coordinate.clone()).collect();
         let stranger_in =
@@ -673,8 +579,12 @@ impl Publisher for Flawed {
         let g = stranger_in.as_ref().unwrap_or(g);
         let regranted = self.regrant(g, Needs::Stage);
         let g = regranted.as_ref().unwrap_or(g);
+        let lax = self.lax_write(g, Call::Stage, &coordinates);
+        let g = lax.as_ref().unwrap_or(g);
         let covering;
-        let g = if self.is(Flaw::StageIgnoresCoverage) && scope_of(g) == "stage" {
+        let g = if (self.is(Flaw::StageIgnoresCoverage) && scope_of(g) == "stage")
+            || (self.is(Flaw::OnlyTheLastCoordinateIsCovered) && covers_last(g, items))
+        {
             covering = covering_every(g, items);
             &covering
         } else {
@@ -684,6 +594,18 @@ impl Publisher for Flawed {
             let held = self.inner.bytes(first.coordinate).map(<[u8]>::to_vec);
             let ours = first.file.bytes.to_vec();
             let yanked = self.inner.is_yanked(first.coordinate);
+            if self.is(Flaw::StageOverOwnStagedSameBytesIsStaged)
+                && staged_before.as_ref() == Some(&ours)
+            {
+                return Ok(StageAnswer::Staged);
+            }
+            if self.is(Flaw::StageOverOwnStagedOverwrites)
+                && staged_before.as_ref().is_some_and(|theirs| *theirs != ours)
+            {
+                let grant = self.internal(GrantPhase::Stage, &coordinates);
+                self.inner.abort(&grant, &coordinates)?;
+                return self.inner.stage(g, items);
+            }
             if self.is(Flaw::StageOverTheSameBytesIsStaged)
                 && held.as_ref() == Some(&ours)
                 && !yanked
@@ -718,7 +640,9 @@ impl Publisher for Flawed {
             self.writer_for_a_stranger(Flaw::StrangerMayAbort, g, GrantPhase::Stage, ks);
         let g = stranger_in.as_ref().unwrap_or(g);
         let regranted = self.regrant(g, Needs::Stage);
-        self.inner.abort(regranted.as_ref().unwrap_or(g), ks)
+        let g = regranted.as_ref().unwrap_or(g);
+        let lax = self.lax_write(g, Call::Abort, ks);
+        self.inner.abort(lax.as_ref().unwrap_or(g), ks)
     }
 
     fn commit(&mut self, g: &Grant, items: &[StageItem<'_>]) -> Result<CommitAnswer, SeamError> {
@@ -734,8 +658,12 @@ impl Publisher for Flawed {
         let g = stranger_in.as_ref().unwrap_or(g);
         let regranted = self.regrant(g, Needs::Commit);
         let g = regranted.as_ref().unwrap_or(g);
+        let lax = self.lax_write(g, Call::Commit, &coordinates);
+        let g = lax.as_ref().unwrap_or(g);
         let covering;
-        let g = if self.is(Flaw::CommitIgnoresCoverage) && scope_of(g) == "commit" {
+        let g = if (self.is(Flaw::CommitIgnoresCoverage) && scope_of(g) == "commit")
+            || (self.is(Flaw::OnlyTheLastCoordinateIsCovered) && covers_last(g, items))
+        {
             covering = covering_every(g, items);
             &covering
         } else {
@@ -748,6 +676,12 @@ impl Publisher for Flawed {
             let held = self.inner.bytes(item.coordinate).map(<[u8]>::to_vec);
             let ours = item.file.bytes.to_vec();
             if self.is(Flaw::CommitOverYankedCommits) && self.inner.is_yanked(item.coordinate) {
+                return Ok(CommitAnswer::Committed);
+            }
+            if self.is(Flaw::SecondCommitOfTheSameBytesIsCommitted)
+                && held.as_ref() == Some(&ours)
+                && !self.inner.is_yanked(item.coordinate)
+            {
                 return Ok(CommitAnswer::Committed);
             }
             if self.is(Flaw::CommitOverOtherBytesOverwrites)
@@ -792,7 +726,9 @@ impl Publisher for Flawed {
         );
         let g = stranger_in.as_ref().unwrap_or(g);
         let regranted = self.regrant(g, Needs::Commit);
-        self.inner.yank(regranted.as_ref().unwrap_or(g), k, reason)
+        let g = regranted.as_ref().unwrap_or(g);
+        let lax = self.lax_write(g, Call::Yank, std::slice::from_ref(k));
+        self.inner.yank(lax.as_ref().unwrap_or(g), k, reason)
     }
 
     fn fetch(&mut self, g: &Grant, k: &Coordinate) -> Result<Option<Vec<u8>>, SeamError> {
@@ -953,6 +889,18 @@ impl Publisher for Flawed {
         }
         Ok(listed)
     }
+}
+
+/// Whether `g` names the last coordinate of `items`.
+fn covers_last(g: &Grant, items: &[StageItem<'_>]) -> bool {
+    let Some(last) = items.last() else {
+        return false;
+    };
+    let key = coordinate_key(last.coordinate);
+    String::from_utf8_lossy(g.secret())
+        .lines()
+        .skip(2)
+        .any(|line| line == key)
 }
 
 /// The grant `g` as if it had been issued for every coordinate of `items`: the same scope,

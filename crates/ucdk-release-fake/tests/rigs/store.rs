@@ -40,6 +40,18 @@ pub enum Flaw {
     GetOfADirectoryIsEmpty,
     /// `get` resolves a path with `..` parts in it and answers the file it comes to.
     GetResolvesClimbs,
+    /// `discard` of one entry discards every entry.
+    DiscardWipesEveryEntry,
+    /// `discard` of an entry that is not there is an error.
+    DiscardOfAMissingEntryIsAnError,
+    /// `files` of a key lists the files of every key that starts with it.
+    FilesMatchedByKeyPrefix,
+    /// Paths are folded to lower case, so `X` and `x` are one file.
+    PathsAreCaseFolded,
+    /// `get` of a path with a trailing slash reads the file the path names without it.
+    GetTakesATrailingSlash,
+    /// An entry that was begun and holds no file is no entry: a second `begin` succeeds.
+    EmptyEntryIsNoEntry,
 }
 
 pub struct FakeStoreRig {
@@ -84,6 +96,15 @@ impl EntryWriter for Climbing<'_> {
     }
 }
 
+/// A writer that writes every path in lower case.
+struct Folding<'a>(Box<dyn EntryWriter + 'a>);
+
+impl EntryWriter for Folding<'_> {
+    fn put_file(&mut self, rel: &str, bytes: &[u8]) -> Result<(), SeamError> {
+        self.0.put_file(&rel.to_lowercase(), bytes)
+    }
+}
+
 /// A writer that takes, and drops, what `drops` says it takes, and passes on the rest.
 struct Dropping<'a> {
     inner: Box<dyn EntryWriter + 'a>,
@@ -105,7 +126,13 @@ impl ArtifactStore for Flawed {
         if self.flaw == Some(Flaw::SecondBeginResets) {
             self.inner.discard(key)?;
         }
+        if self.flaw == Some(Flaw::EmptyEntryIsNoEntry) && self.inner.files(key)?.is_empty() {
+            self.inner.discard(key)?;
+        }
         let writer = self.inner.begin(key)?;
+        if self.flaw == Some(Flaw::PathsAreCaseFolded) {
+            return Ok(Box::new(Folding(writer)));
+        }
         let drops: Option<fn(&str, &[u8]) -> bool> = match self.flaw {
             Some(Flaw::WriterAcceptsATrailingSlash) => Some(|rel, _| rel.ends_with('/')),
             Some(Flaw::WriterAcceptsADotPart) => {
@@ -133,6 +160,17 @@ impl ArtifactStore for Flawed {
         if self.flaw == Some(Flaw::MissingEntryIsAnError) && !self.inner.keys()?.contains(key) {
             return Err(SeamError::Permanent(format!("{key} does not exist")));
         }
+        if self.flaw == Some(Flaw::FilesMatchedByKeyPrefix) {
+            let mut all = Vec::new();
+            for other in self.inner.keys()? {
+                if other.as_str().starts_with(key.as_str()) {
+                    all.extend(self.inner.files(&other)?);
+                }
+            }
+            all.sort();
+            all.dedup();
+            return Ok(all);
+        }
         let mut files = self.inner.files(key)?;
         if self.flaw == Some(Flaw::FilesAreNotSorted) {
             files.reverse();
@@ -141,6 +179,15 @@ impl ArtifactStore for Flawed {
     }
 
     fn get(&mut self, key: &StoreKey, rel: &str) -> Result<Option<Vec<u8>>, SeamError> {
+        let folded;
+        let rel = match self.flaw {
+            Some(Flaw::PathsAreCaseFolded) => {
+                folded = rel.to_lowercase();
+                folded.as_str()
+            }
+            Some(Flaw::GetTakesATrailingSlash) => rel.trim_end_matches('/'),
+            _ => rel,
+        };
         if self.flaw == Some(Flaw::GetIgnoresTheKey) {
             for other in self.inner.keys()? {
                 if let Some(bytes) = self.inner.get(&other, rel)? {
@@ -187,6 +234,17 @@ impl ArtifactStore for Flawed {
     }
 
     fn discard(&mut self, key: &StoreKey) -> Result<(), SeamError> {
+        if self.flaw == Some(Flaw::DiscardWipesEveryEntry) {
+            for each in self.inner.keys()? {
+                self.inner.discard(&each)?;
+            }
+            return Ok(());
+        }
+        if self.flaw == Some(Flaw::DiscardOfAMissingEntryIsAnError)
+            && !self.inner.keys()?.contains(key)
+        {
+            return Err(SeamError::Permanent(format!("{key} does not exist")));
+        }
         if self.flaw == Some(Flaw::DiscardLeavesTheFirstPath) {
             let first = self.inner.files(key)?.into_iter().next();
             let bytes = match &first {

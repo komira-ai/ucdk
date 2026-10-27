@@ -10,7 +10,8 @@ use ucdk_release_proto::v1::Coordinate;
 use ucdk_release_proto::v1::push_identity::Kind;
 use ucdk_release_proto::v1::{Reason, Repository};
 use ucdk_release_seams::kit::{
-    GrantContent, GrantSetup, GrantSourceRig, JobClaims, STAGE_SCOPE, matching_job,
+    COMMIT_SCOPE, GrantContent, GrantSetup, GrantSourceRig, JobClaims, LOCATION, READ_SCOPE,
+    STAGE_SCOPE, matching_job,
 };
 use ucdk_release_seams::{Grant, GrantRequest, GrantSource, SeamError};
 
@@ -56,6 +57,11 @@ pub enum Flaw {
     CommitGrantHasTheStageScope,
     /// A commit grant for two coordinates covers the first.
     CommitGrantDropsACoordinate,
+    /// The scope and the location of a grant are those of the repository the kit builds, whatever
+    /// the declaration of the request names.
+    IgnoresTheDeclaredScopesAndLocation,
+    /// The claims of the job are compared without regard to case.
+    ClaimsMatchedIgnoringCase,
 }
 
 pub struct FakeGrantRig {
@@ -210,6 +216,34 @@ impl Flawed {
         if self.is(Flaw::NoPinnedClaimIsIssued) && job.pinned.is_empty() {
             declared.pinned_claims.clear();
         }
+        if self.is(Flaw::ClaimsMatchedIgnoringCase) {
+            let (subject, environment) = if req.exceptional {
+                (
+                    &mut declared.exceptional_subject,
+                    &mut declared.exceptional_environment,
+                )
+            } else {
+                (&mut declared.subject, &mut declared.environment)
+            };
+            if subject.eq_ignore_ascii_case(&job.subject) {
+                subject.clone_from(&job.subject);
+            }
+            if environment.eq_ignore_ascii_case(&job.environment) {
+                environment.clone_from(&job.environment);
+            }
+            if declared.audience.eq_ignore_ascii_case(&job.audience) {
+                declared.audience.clone_from(&job.audience);
+            }
+            let alike = declared.pinned_claims.len() == job.pinned.len()
+                && declared.pinned_claims.iter().all(|(key, value)| {
+                    job.pinned.iter().any(|(job_key, job_value)| {
+                        job_key.eq_ignore_ascii_case(key) && job_value.eq_ignore_ascii_case(value)
+                    })
+                });
+            if alike {
+                declared.pinned_claims.clone_from(&job.pinned);
+            }
+        }
         repository
     }
 }
@@ -273,6 +307,20 @@ impl GrantSource for Flawed {
                 let rest = text.split_once('\n').map_or("", |(_, rest)| rest);
                 Ok(Grant::issued(
                     format!("{STAGE_SCOPE}\n{rest}").into_bytes(),
+                    grant.expires_ms().unwrap_or_default(),
+                ))
+            }
+            (Some(Flaw::IgnoresTheDeclaredScopesAndLocation), Ok(grant)) if !grant.is_none() => {
+                let text = String::from_utf8_lossy(grant.secret()).into_owned();
+                let mut lines: Vec<&str> = text.split('\n').collect();
+                lines[0] = match phase {
+                    GrantPhase::Stage => STAGE_SCOPE,
+                    GrantPhase::Commit => COMMIT_SCOPE,
+                    GrantPhase::Read => READ_SCOPE,
+                };
+                lines[1] = LOCATION;
+                Ok(Grant::issued(
+                    lines.join("\n").into_bytes(),
                     grant.expires_ms().unwrap_or_default(),
                 ))
             }

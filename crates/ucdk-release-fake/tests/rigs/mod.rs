@@ -12,6 +12,7 @@ pub mod grant_source;
 pub mod output_files;
 pub mod process_runner;
 pub mod publisher;
+pub mod publisher_flaw;
 pub mod store;
 
 /// Runs the scenario called `name` against `rig`, and fails the test with its reason if it

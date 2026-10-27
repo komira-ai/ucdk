@@ -42,6 +42,12 @@ pub enum Flaw {
     /// A bare name is looked for on the runner's own `PATH` when the child's environment names
     /// no `PATH`.
     NoPathFallsBackToOwn,
+    /// After a run was stopped, every later run of the runner is refused as stopped.
+    AStopPoisonsTheRunner,
+    /// The child sees the variables the previous run of the runner was given.
+    EnvironmentLeaksIntoTheNextRun,
+    /// When a bare name is on several directories of the child's `PATH`, the last one wins.
+    LastPathEntryWins,
 }
 
 pub struct FakeProcessRig {
@@ -72,6 +78,10 @@ pub struct Scripted {
     flaw: Option<Flaw>,
     programs: BTreeMap<String, Behavior>,
     alive: Arc<Mutex<BTreeSet<String>>>,
+    /// Whether a run of this runner was stopped.
+    stopped: bool,
+    /// The environment of the previous run.
+    previous_env: Vec<(String, String)>,
 }
 
 impl ProcessRig for FakeProcessRig {
@@ -83,6 +93,8 @@ impl ProcessRig for FakeProcessRig {
             flaw: self.flaw,
             programs: BTreeMap::new(),
             alive: Arc::clone(&self.alive),
+            stopped: false,
+            previous_env: Vec::new(),
         }
     }
 
@@ -118,12 +130,18 @@ impl Scripted {
         if name.starts_with('/') {
             return self.programs.get(name);
         }
-        command
+        let dirs: Vec<&str> = command
             .env
             .iter()
             .filter(|(key, _)| key == "PATH")
             .flat_map(|(_, path)| path.split(':'))
-            .find_map(|dir| self.programs.get(&format!("{dir}/{name}")))
+            .collect();
+        let found = |dir: &&str| self.programs.get(&format!("{dir}/{name}"));
+        if self.is(Flaw::LastPathEntryWins) {
+            dirs.iter().rev().find_map(found)
+        } else {
+            dirs.iter().find_map(found)
+        }
     }
 
     fn set_alive(&self, names: &[String], alive: bool) {
@@ -167,7 +185,20 @@ fn report(command: &Command, cwd: &str, flaw: Option<Flaw>) -> Vec<u8> {
 
 impl ProcessRunner for Scripted {
     fn run(&mut self, spec: &ProcessSpec<'_>) -> Result<ProcessResult, SeamError> {
+        if self.is(Flaw::AStopPoisonsTheRunner) && self.stopped {
+            return Err(SeamError::Refused(Reason::LeaseLost));
+        }
         let mut command = spec.command.clone();
+        if self.is(Flaw::EnvironmentLeaksIntoTheNextRun) {
+            let given = command.env.clone();
+            for (key, value) in &self.previous_env {
+                if !command.env.iter().any(|(k, _)| k == key) {
+                    command.env.push((key.clone(), value.clone()));
+                }
+            }
+            command.env.sort();
+            self.previous_env = given;
+        }
         let bare = !command
             .argv
             .first()
@@ -216,6 +247,7 @@ impl ProcessRunner for Scripted {
             ..*spec
         });
         let stopped = result == Err(SeamError::Refused(Reason::LeaseLost));
+        self.stopped |= stopped;
         // A child ends when the run does: it was killed on a Stop, or it came to its end. The
         // stub that leaves the group running forgets the grandchild of a stopped child.
         let survivors: Vec<String> = if self.is(Flaw::LeavesTheGroupRunning) && stopped {

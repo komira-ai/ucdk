@@ -82,6 +82,10 @@ pub enum Flaw {
     CopyOutOfADirectoryEscapes,
     /// A `Test` command repeats the base flags after the flag ucdk owns.
     BaseFlagsRepeatedAfterTheOwnedFlag,
+    /// `copy_out` of a directory writes `garbage` in place of the bytes of its files.
+    CopyOutOfADirectoryWritesGarbage,
+    /// The bytes `copy_out` writes for a directory carry the time of the run.
+    CopyOutOfADirectoryCarriesTheClock,
 }
 
 /// The time on the clock of a rig before anything moves it.
@@ -400,8 +404,13 @@ impl BuildSystem for Flawed {
         if self.is(Flaw::ClockInTheBytes) && elapsed > 0 {
             suffix = format!("@{elapsed}").into_bytes();
         }
+        let directory = out.shape == Shape::Directory;
+        if self.is(Flaw::CopyOutOfADirectoryCarriesTheClock) && directory && elapsed > 0 {
+            suffix = format!("@{elapsed}").into_bytes();
+        }
         let replace = match self.flaw {
             Some(Flaw::CopyOutWritesGarbage) => Some(b"garbage".to_vec()),
+            Some(Flaw::CopyOutOfADirectoryWritesGarbage) if directory => Some(b"garbage".to_vec()),
             Some(Flaw::CopyOutWritesAnEmptyFile) => Some(Vec::new()),
             _ => None,
         };
