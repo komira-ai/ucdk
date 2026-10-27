@@ -16,6 +16,8 @@ use ucdk_release_seams::{Exit, ProcessResult, ProcessRunner, ProcessSpec, SeamEr
 
 pub const SCRATCH: &str = "/scratch";
 pub const OWN_PATH: &str = "/runner/bin";
+/// The working directory of the runner itself, which is not the one a run is given.
+pub const RUNNER_CWD: &str = "/runner";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Flaw {
@@ -70,6 +72,46 @@ pub enum Flaw {
     EnvValueWithEqualsTruncated,
     /// A bare name is unstartable when a directory of the `PATH` does not exist.
     NonexistentPathEntryIsFatal,
+    /// A child given no environment at all sees a variable of the runner's.
+    EmptyEnvInherits,
+    /// A child whose environment names no `PATH` is given a default one.
+    DefaultPathInEnv,
+    /// A bare name that is on no directory of the `PATH` is also looked for in the working
+    /// directory.
+    CwdSearchedForBareNames,
+    /// A name with a `/` in it, and not absolute, is looked for on the `PATH`.
+    SlashNameSearchedOnPath,
+    /// A name with a `/` in it, and not absolute, is relative to the runner's own working
+    /// directory and not the one the run was given.
+    SlashNameRelativeToRunnersCwd,
+    /// Spaces at the ends of an argument are cut.
+    ArgsTrimmed,
+    /// A backslash in an argument is dropped.
+    ArgBackslashEaten,
+    /// An argument is cut at its first newline.
+    ArgCutAtNewline,
+    /// The name of an environment variable is put in upper case.
+    EnvKeyUppercased,
+    /// The value of an environment variable is put in lower case.
+    EnvValueLowercased,
+    /// An exit code of 127 is reported as a program that could not be started.
+    ExitCode127IsUnstartable,
+    /// A run that ends with a nonzero code loses its error output.
+    NonzeroExitLosesStderr,
+    /// A run that ends with a nonzero code loses its standard output.
+    NonzeroExitLosesStdout,
+    /// The error output of a run that ends with a nonzero code is the tail of the next run that
+    /// wrote none.
+    StderrOfFailedRunLeaks,
+    /// Only the first two directories of the `PATH` are searched.
+    PathLimitedToTwo,
+    /// The `PATH` is cut at a space as well as at a `:`.
+    PathSplitsOnSpace,
+    /// A child ended by a signal other than 1, 9 or 15 is reported as the exit code 128 plus the
+    /// signal.
+    UnknownSignalsAreCodes,
+    /// The runner beats at most twice for a run, however much the child writes.
+    BeatsCappedAtTwo,
 }
 
 pub struct FakeProcessRig {
@@ -112,6 +154,8 @@ pub struct Scripted {
     stderr_seen: Vec<u8>,
     /// The environment of the last run that failed in the way the stub leaks after.
     leftover_env: Vec<(String, String)>,
+    /// The error output of the last run that ended with a nonzero code.
+    leaked_stderr: Vec<u8>,
 }
 
 impl ProcessRig for FakeProcessRig {
@@ -129,6 +173,7 @@ impl ProcessRig for FakeProcessRig {
             missed: Vec::new(),
             stderr_seen: Vec::new(),
             leftover_env: Vec::new(),
+            leaked_stderr: Vec::new(),
         }
     }
 
@@ -158,18 +203,64 @@ impl Scripted {
         self.flaw == Some(flaw)
     }
 
-    /// The installed program the command's first element names, on its own `PATH` when bare.
-    fn program_of(&self, command: &Command) -> Option<&Behavior> {
+    /// The directories of the command's own `PATH`, in order.
+    fn path_dirs<'c>(&self, command: &'c Command) -> Vec<&'c str> {
+        let mut dirs: Vec<&str> = command
+            .env
+            .iter()
+            .filter(|(key, _)| key == "PATH")
+            .flat_map(|(_, path)| {
+                if self.is(Flaw::PathSplitsOnSpace) {
+                    path.split([':', ' ']).collect::<Vec<_>>()
+                } else {
+                    path.split(':').collect()
+                }
+            })
+            .collect();
+        if self.is(Flaw::PathLimitedToTwo) {
+            dirs.truncate(2);
+        }
+        dirs
+    }
+
+    /// Where a stub that looks for the program in the wrong place finds it, as an absolute path
+    /// the runner underneath can start, or one where nothing is installed.
+    fn misplaced(&self, command: &Command, cwd: &str) -> Option<String> {
+        let name = command.argv.first()?;
+        if name.starts_with('/') {
+            return None;
+        }
+        let on_path = || {
+            self.path_dirs(command)
+                .into_iter()
+                .map(|dir| format!("{dir}/{name}"))
+                .find(|path| self.programs.contains_key(path))
+        };
+        let slash = name.contains('/');
+        if slash && self.is(Flaw::SlashNameSearchedOnPath) {
+            return Some(on_path().unwrap_or_else(|| format!("/unfound/{name}")));
+        }
+        if slash && self.is(Flaw::SlashNameRelativeToRunnersCwd) {
+            return Some(format!("{RUNNER_CWD}/{name}"));
+        }
+        if !slash && self.is(Flaw::CwdSearchedForBareNames) {
+            return on_path().or_else(|| Some(format!("{cwd}/{name}")));
+        }
+        None
+    }
+
+    /// The installed program the command's first element names: an absolute name where it is,
+    /// a name with a `/` relative to the working directory `cwd`, and a bare name on its own
+    /// `PATH`.
+    fn program_of(&self, command: &Command, cwd: &str) -> Option<&Behavior> {
         let name = command.argv.first()?;
         if name.starts_with('/') {
             return self.programs.get(name);
         }
-        let dirs: Vec<&str> = command
-            .env
-            .iter()
-            .filter(|(key, _)| key == "PATH")
-            .flat_map(|(_, path)| path.split(':'))
-            .collect();
+        if name.contains('/') {
+            return self.programs.get(&format!("{cwd}/{name}"));
+        }
+        let dirs = self.path_dirs(command);
         let found = |dir: &&str| self.programs.get(&format!("{dir}/{name}"));
         if self.is(Flaw::LastPathEntryWins) {
             dirs.iter().rev().find_map(found)
@@ -188,6 +279,41 @@ impl Scripted {
                 .any(|program| program.starts_with(&format!("{dir}/")))
     }
 
+    /// What the stubs that do not keep the bytes of the argument vector or the environment, or
+    /// that add to the environment, make of the command before the child sees it.
+    fn garble(&self, command: &mut Command) {
+        if self.is(Flaw::EmptyEnvInherits) && command.env.is_empty() {
+            command.env.push(("HOME".to_owned(), "/root".to_owned()));
+        }
+        if self.is(Flaw::DefaultPathInEnv) && !command.env.iter().any(|(key, _)| key == "PATH") {
+            command
+                .env
+                .push(("PATH".to_owned(), "/usr/bin:/bin".to_owned()));
+            command.env.sort();
+        }
+        for arg in command.argv.iter_mut().skip(1) {
+            if self.is(Flaw::ArgsTrimmed) {
+                *arg = arg.trim().to_owned();
+            }
+            if self.is(Flaw::ArgBackslashEaten) {
+                *arg = arg.replace('\\', "");
+            }
+            if self.is(Flaw::ArgCutAtNewline)
+                && let Some((head, _)) = arg.split_once('\n')
+            {
+                *arg = head.to_owned();
+            }
+        }
+        for (key, value) in &mut command.env {
+            if self.is(Flaw::EnvKeyUppercased) {
+                *key = key.to_uppercase();
+            }
+            if self.is(Flaw::EnvValueLowercased) {
+                *value = value.to_lowercase();
+            }
+        }
+    }
+
     fn set_alive(&self, names: &[String], alive: bool) {
         let mut set = self.alive.lock().unwrap_or_else(PoisonError::into_inner);
         for name in names {
@@ -203,7 +329,7 @@ impl Scripted {
 /// What a program that reports writes: its arguments, then its environment.
 fn report(command: &Command, cwd: &str, flaw: Option<Flaw>) -> Vec<u8> {
     let cwd = if flaw == Some(Flaw::CwdIgnored) {
-        "/runner"
+        RUNNER_CWD
     } else {
         cwd
     };
@@ -233,6 +359,7 @@ impl ProcessRunner for Scripted {
             return Err(SeamError::Refused(Reason::LeaseLost));
         }
         let mut command = spec.command.clone();
+        self.garble(&mut command);
         let first = self
             .first
             .get_or_insert_with(|| (spec.cwd.to_owned(), spec.stdout_limit))
@@ -310,7 +437,19 @@ impl ProcessRunner for Scripted {
             command.env.retain(|(key, _)| key != "PATH");
             command.env.push(("PATH".to_owned(), OWN_PATH.to_owned()));
         }
-        let behavior = self.program_of(&command).cloned();
+        if let Some(path) = self.misplaced(&command, cwd) {
+            command.argv[0] = path;
+        }
+        if matches!(
+            self.flaw,
+            Some(Flaw::PathLimitedToTwo | Flaw::PathSplitsOnSpace)
+        ) && self.program_of(&command, cwd).is_none()
+        {
+            return Err(SeamError::Unknown(
+                "the program cannot be started".to_owned(),
+            ));
+        }
+        let behavior = self.program_of(&command, cwd).cloned();
         let (exit, stdout, stderr) = match &behavior {
             Some(Behavior::Prints {
                 stdout,
@@ -329,6 +468,9 @@ impl ProcessRunner for Scripted {
             Some(Behavior::Holds { .. }) | None => (Exit::Code(0), Vec::new(), Vec::new()),
         };
         let beats = match &behavior {
+            Some(Behavior::Chatters { chunks }) if self.is(Flaw::BeatsCappedAtTwo) => {
+                (*chunks).min(2)
+            }
             Some(Behavior::Chatters { chunks }) => *chunks,
             Some(Behavior::Holds { .. }) => 3,
             _ => 0,
@@ -389,6 +531,33 @@ impl ProcessRunner for Scripted {
                     && n != 9
                 {
                     done.exit = Exit::Code(128 + n);
+                }
+            }
+            (Some(Flaw::UnknownSignalsAreCodes), Ok(done)) => {
+                if let Exit::Signal(n) = done.exit
+                    && ![1, 9, 15].contains(&n)
+                {
+                    done.exit = Exit::Code(128 + n);
+                }
+            }
+            (Some(Flaw::ExitCode127IsUnstartable), Ok(done)) if done.exit == Exit::Code(127) => {
+                result = Err(SeamError::Unknown(
+                    "the program cannot be started".to_owned(),
+                ));
+            }
+            (Some(Flaw::NonzeroExitLosesStderr), Ok(done)) if matches!(done.exit, Exit::Code(c) if c != 0) =>
+            {
+                done.stderr_tail.clear();
+            }
+            (Some(Flaw::NonzeroExitLosesStdout), Ok(done)) if matches!(done.exit, Exit::Code(c) if c != 0) =>
+            {
+                done.stdout.clear();
+            }
+            (Some(Flaw::StderrOfFailedRunLeaks), Ok(done)) => {
+                if matches!(done.exit, Exit::Code(c) if c != 0) {
+                    self.leaked_stderr.clone_from(&done.stderr_tail);
+                } else if done.stderr_tail.is_empty() {
+                    done.stderr_tail = std::mem::take(&mut self.leaked_stderr);
                 }
             }
             (Some(Flaw::HighCodeIsASignal), Ok(done)) => {

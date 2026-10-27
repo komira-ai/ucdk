@@ -36,6 +36,8 @@ fn further_process_runner() {
     const ARGV: &str = "argv_and_environment_are_exactly_what_was_given";
     const EXIT: &str = "exit_code_and_signal_are_distinguished";
     const OUTPUT: &str = "output_is_bounded_and_its_tail_is_kept";
+    const NOWHERE: &str = "a_name_found_nowhere_on_the_childs_path_is_unstartable";
+    const BEATS: &str = "the_runner_beats_on_progress_and_stops_the_child_when_told";
     further_stubs_fail_exactly(
         "process runner",
         &names(&process_runner_scenarios::<FakeProcessRig>()),
@@ -63,7 +65,7 @@ fn further_process_runner() {
                 Process::LastPathEntryWins,
                 &["a_bare_name_is_resolved_on_the_childs_path_and_never_the_runners"],
             ),
-            (Process::CwdIsFirstRuns, &[ARGV]),
+            (Process::CwdIsFirstRuns, &[NOWHERE, ARGV]),
             (Process::LimitIsFirstRuns, &[OUTPUT]),
             (Process::PathMissCached, &[BARE]),
             (Process::StderrTailAccumulates, &[OUTPUT]),
@@ -74,6 +76,24 @@ fn further_process_runner() {
             (Process::ZeroLimitMeansUnlimited, &[OUTPUT]),
             (Process::EnvValueWithEqualsTruncated, &[ARGV]),
             (Process::NonexistentPathEntryIsFatal, &[BARE]),
+            (Process::EmptyEnvInherits, &[ARGV]),
+            (Process::DefaultPathInEnv, &[ARGV]),
+            (Process::CwdSearchedForBareNames, &[NOWHERE]),
+            (Process::SlashNameSearchedOnPath, &[NOWHERE]),
+            (Process::SlashNameRelativeToRunnersCwd, &[NOWHERE]),
+            (Process::ArgsTrimmed, &[ARGV]),
+            (Process::ArgBackslashEaten, &[ARGV]),
+            (Process::ArgCutAtNewline, &[ARGV]),
+            (Process::EnvKeyUppercased, &[ARGV]),
+            (Process::EnvValueLowercased, &[ARGV]),
+            (Process::ExitCode127IsUnstartable, &[EXIT]),
+            (Process::NonzeroExitLosesStderr, &[EXIT]),
+            (Process::NonzeroExitLosesStdout, &[EXIT]),
+            (Process::StderrOfFailedRunLeaks, &[OUTPUT]),
+            (Process::PathLimitedToTwo, &[BARE]),
+            (Process::PathSplitsOnSpace, &[BARE]),
+            (Process::UnknownSignalsAreCodes, &[EXIT]),
+            (Process::BeatsCappedAtTwo, &[BEATS]),
         ],
         |flaw| run_process_runner_kit(&FakeProcessRig::flawed(flaw)),
     );
