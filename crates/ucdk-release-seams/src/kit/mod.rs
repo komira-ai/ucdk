@@ -1,0 +1,195 @@
+// SPDX-License-Identifier: Apache-2.0
+//! The kits: one list of named scenarios per seam, written against the trait only, that every
+//! implementation of the seam must pass unmodified.
+//!
+//! A kit cannot make an implementation fail by itself, so each takes a rig: the small trait the
+//! implementation's author writes to put the implementation into the situation a scenario
+//! needs (a tree with a symlink in it, a build that lists two outputs, a registry whose answer
+//! was lost). A rig only builds worlds; every assertion is the kit's.
+//!
+//! A scenario that fails ends with a [`Failure`]; the runner catches it and names the scenario,
+//! so a kit reports every scenario that failed, not only the first. The kits read no clock and
+//! wait for nothing: time moves only when a scenario asks its rig to move it.
+//!
+//! - [`run_store_kit`] runs a whole kit and returns its [`Report`]; the kits of the other
+//!   seams join it in the parts that follow.
+//! - [`store_scenarios`] gives the scenarios one by one, for a test per scenario.
+
+use std::any::Any;
+use std::fmt::Debug;
+use std::panic::{self, AssertUnwindSafe};
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use crate::{Heartbeat, SeamError, Stop};
+
+mod store;
+
+pub use store::{StoreRig, run_store_kit, store_scenarios};
+
+/// How a scenario ends when it fails: the text says what was expected and what was seen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failure(pub String);
+
+/// Ends the scenario that is running.
+fn fail(why: String) -> ! {
+    panic::resume_unwind(Box::new(Failure(why)))
+}
+
+// Both sides are taken by value so that a call reads `same(got, want, ..)` over temporaries.
+#[allow(clippy::needless_pass_by_value)]
+fn same<T: PartialEq + Debug>(got: T, want: T, what: &str) {
+    if got != want {
+        fail(format!("{what}: got {got:?}, want {want:?}"));
+    }
+}
+
+/// The value of a call the scenario needs to have succeeded.
+fn must<T, E: Debug>(result: Result<T, E>, what: &str) -> T {
+    match result {
+        Ok(value) => value,
+        Err(error) => fail(format!("{what} failed: {error:?}")),
+    }
+}
+
+/// The error of a call the scenario needs to have failed.
+fn must_err<T>(result: Result<T, SeamError>, what: &str) -> SeamError {
+    match result {
+        Ok(_) => fail(format!("{what} succeeded")),
+        Err(error) => error,
+    }
+}
+
+/// One named scenario of a kit over the rig type `R`.
+pub struct Scenario<R> {
+    pub name: &'static str,
+    run: fn(&R),
+}
+
+impl<R> Scenario<R> {
+    pub fn new(name: &'static str, run: fn(&R)) -> Self {
+        Self { name, run }
+    }
+
+    /// Runs the scenario once; `Err` says what failed.
+    pub fn run_on(&self, rig: &R) -> Result<(), String> {
+        panic::catch_unwind(AssertUnwindSafe(|| (self.run)(rig)))
+            .map_err(|payload| describe(&*payload))
+    }
+}
+
+fn describe(payload: &(dyn Any + Send)) -> String {
+    payload.downcast_ref::<Failure>().map_or_else(
+        || "the scenario panicked".to_owned(),
+        |failure| failure.0.clone(),
+    )
+}
+
+/// What one scenario came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outcome {
+    pub name: &'static str,
+    pub result: Result<(), String>,
+}
+
+/// What a kit found: one outcome per scenario, in the kit's order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Report {
+    pub outcomes: Vec<Outcome>,
+}
+
+impl Report {
+    /// The names of the scenarios that failed.
+    pub fn failed(&self) -> Vec<&'static str> {
+        self.outcomes
+            .iter()
+            .filter(|o| o.result.is_err())
+            .map(|o| o.name)
+            .collect()
+    }
+
+    /// The names of every scenario, in order.
+    pub fn names(&self) -> Vec<&'static str> {
+        self.outcomes.iter().map(|o| o.name).collect()
+    }
+
+    /// Panics, listing every failed scenario with its reason, unless all passed.
+    pub fn assert_conforms(&self) {
+        let lines: Vec<String> = self
+            .outcomes
+            .iter()
+            .filter_map(|o| {
+                o.result
+                    .as_ref()
+                    .err()
+                    .map(|why| format!("{}: {why}", o.name))
+            })
+            .collect();
+        assert!(lines.is_empty(), "the kit failed:\n{}", lines.join("\n"));
+    }
+}
+
+/// Runs every scenario against `rig`.
+pub fn run_scenarios<R>(rig: &R, scenarios: &[Scenario<R>]) -> Report {
+    Report {
+        outcomes: scenarios
+            .iter()
+            .map(|s| Outcome {
+                name: s.name,
+                result: s.run_on(rig),
+            })
+            .collect(),
+    }
+}
+
+/// A heartbeat that counts its beats, answers `Stop` from the `stop_at`th on (0: never), and
+/// tells a watcher about each beat.
+pub struct Beats<'a> {
+    count: AtomicU32,
+    stop_at: u32,
+    watcher: Option<&'a dyn Fn(u32)>,
+}
+
+impl<'a> Beats<'a> {
+    /// A heartbeat that never stops.
+    pub fn counting() -> Self {
+        Self {
+            count: AtomicU32::new(0),
+            stop_at: 0,
+            watcher: None,
+        }
+    }
+
+    /// A heartbeat that answers `Stop` from its `n`th beat on.
+    pub fn stopping_at(n: u32) -> Self {
+        Self {
+            stop_at: n,
+            ..Self::counting()
+        }
+    }
+
+    /// The same heartbeat, telling `watcher` the number of each beat as it comes.
+    #[must_use]
+    pub fn watched_by(mut self, watcher: &'a dyn Fn(u32)) -> Self {
+        self.watcher = Some(watcher);
+        self
+    }
+
+    /// The beats so far.
+    pub fn count(&self) -> u32 {
+        self.count.load(Ordering::SeqCst)
+    }
+}
+
+impl Heartbeat for Beats<'_> {
+    fn beat(&self) -> Result<(), Stop> {
+        let n = self.count.fetch_add(1, Ordering::SeqCst) + 1;
+        if let Some(watcher) = self.watcher {
+            watcher(n);
+        }
+        if self.stop_at != 0 && n >= self.stop_at {
+            Err(Stop)
+        } else {
+            Ok(())
+        }
+    }
+}

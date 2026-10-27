@@ -9,7 +9,9 @@ use crate::SeamError;
 /// Scoped to one key: a build system handed one can write nothing outside its own entry.
 pub trait EntryWriter {
     /// `rel` is relative with no `..`, no empty part and never absolute, or the call is
-    /// `Refused`.
+    /// `Refused`; a refused path changes nothing and does not spoil the writer. A path that
+    /// was written holds the bytes of its last write, and every path is its own bytes, so two
+    /// that differ in case, in a trailing space or in the composition of a character are two.
     fn put_file(&mut self, rel: &str, bytes: &[u8]) -> Result<(), SeamError>;
 }
 
