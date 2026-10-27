@@ -104,7 +104,8 @@ pub enum Arrangement {
     FailAfterCommit,
     /// A commit of a set fails whole: nothing becomes readable.
     CommitSetFailsWhole,
-    /// `list` lags behind what was committed.
+    /// `list` lags behind what was committed. A listing that was not arranged to lag names every
+    /// coordinate held in its scope.
     ListLags,
     /// The group read of an observe fails.
     FailGroupRead,

@@ -219,8 +219,11 @@ fn fetches() -> Vec<Row> {
 
 #[test]
 fn a_stub_that_is_wrong_behind_one_kind_of_channel_fails_the_scenarios_that_hold_it() {
+    let rows: Vec<Row> = table().into_iter().chain(fetches()).collect();
+    let runs: usize = rows.iter().map(|(_, kinds, _)| kinds.len()).sum();
+    assert_eq!(runs, 110, "the number of stubs behind one kind of channel");
     let mut wrong = Vec::new();
-    for (stub, kinds, named) in table().into_iter().chain(fetches()) {
+    for (stub, kinds, named) in rows {
         for behind in kinds {
             let failed = run_behind(stub, *behind).failed();
             if failed != *named {

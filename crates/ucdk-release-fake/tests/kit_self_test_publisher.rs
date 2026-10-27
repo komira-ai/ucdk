@@ -680,6 +680,7 @@ fn each_scenario_fails_on_its_nonconforming_stub() {
 #[test]
 fn each_further_publisher_stub_fails_the_scenarios_that_hold_it() {
     let table = every_stub();
+    assert_eq!(table.len(), 409, "the number of stubs of the table");
     further_stubs_fail_exactly(
         "publisher",
         &names(&publisher_scenarios::<FakePublisherRig>()),
