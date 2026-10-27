@@ -47,7 +47,19 @@ impl ChannelShape {
             ..Self::staging()
         }
     }
+
+    /// A private channel that stages and addresses staged state by the group of the declared set.
+    pub const fn private_grouped() -> Self {
+        Self {
+            stages: true,
+            private: true,
+            group_addressed: true,
+        }
+    }
 }
+
+/// A day, in milliseconds: how far a scenario moves the clock to expire the grants it made.
+pub(super) const A_DAY_MS: u64 = 86_400_000;
 
 /// A change to a world a scenario asks its rig to make.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -286,10 +298,53 @@ pub(super) fn unstaged_shape<R: PublisherRig>(rig: &R) -> Option<ChannelShape> {
 /// makes of every channel is held on each shape the rig declares, and not on the first alone. A
 /// rig with no plain shape fails the scenario, which the runner skips before it gets here.
 pub(super) fn on_each_plain_shape<R: PublisherRig>(rig: &R, scenario: fn(&R, &ChannelShape)) {
-    let shapes = plain_shapes(rig);
-    must_some(shapes.first(), "a public channel to run on");
-    for shape in &shapes {
+    on_each_of(
+        rig,
+        &plain_shapes(rig),
+        "a public channel to run on",
+        scenario,
+    );
+}
+
+/// Runs `scenario` once on each of `shapes`, a fresh channel each. A rig with none of them fails
+/// the scenario, which the runner skips before it gets here.
+pub(super) fn on_each_of<R: PublisherRig>(
+    rig: &R,
+    shapes: &[ChannelShape],
+    what: &str,
+    scenario: fn(&R, &ChannelShape),
+) {
+    must_some(shapes.first(), what);
+    for shape in shapes {
         scenario(rig, shape);
+    }
+}
+
+/// The declared shapes whose reads need no grant.
+pub(super) fn public_shapes<R: PublisherRig>(rig: &R) -> Vec<ChannelShape> {
+    rig.shapes().into_iter().filter(|s| !s.private).collect()
+}
+
+/// The declared shapes whose every read, a stranger's included, needs a grant.
+pub(super) fn private_shapes<R: PublisherRig>(rig: &R) -> Vec<ChannelShape> {
+    rig.shapes().into_iter().filter(|s| s.private).collect()
+}
+
+/// The declared shapes that stage and address the staged state by the group of the declared set.
+pub(super) fn grouped_shapes<R: PublisherRig>(rig: &R) -> Vec<ChannelShape> {
+    rig.shapes()
+        .into_iter()
+        .filter(|s| s.group_addressed && s.stages)
+        .collect()
+}
+
+/// The phase of the grant an action holds first: the stage grant when the channel stages, and
+/// the commit grant when it does not.
+pub(super) fn first_phase<P: Publisher>(p: &P) -> GrantPhase {
+    if p.stages() {
+        GrantPhase::Stage
+    } else {
+        GrantPhase::Commit
     }
 }
 
@@ -356,6 +411,34 @@ pub(super) fn needs_a_set_commit<R: PublisherRig>(rig: &R) -> Option<&'static st
         .iter()
         .any(|s| built(rig, s).commit_unit() == CommitUnit::Set))
     .then_some("the rig declares no public channel that commits a set at once")
+}
+
+/// The gate of a scenario about grants that holds on a channel of any shape.
+pub(super) fn needs_a_channel<R: PublisherRig>(rig: &R) -> Option<&'static str> {
+    rig.shapes()
+        .is_empty()
+        .then_some("the rig declares no channel")
+}
+
+/// The gate of a scenario about what a stranger reads of a public channel.
+pub(super) fn needs_a_public_channel<R: PublisherRig>(rig: &R) -> Option<&'static str> {
+    public_shapes(rig)
+        .is_empty()
+        .then_some("the rig declares no public channel")
+}
+
+/// The gate of a scenario about a channel whose every read needs a grant.
+pub(super) fn needs_a_private_channel<R: PublisherRig>(rig: &R) -> Option<&'static str> {
+    private_shapes(rig)
+        .is_empty()
+        .then_some("the rig declares no private channel")
+}
+
+/// The gate of a scenario about staged state addressed by group.
+pub(super) fn needs_a_grouped_channel<R: PublisherRig>(rig: &R) -> Option<&'static str> {
+    grouped_shapes(rig)
+        .is_empty()
+        .then_some("the rig declares no channel that stages and is addressed by group")
 }
 
 // ---- sets ----

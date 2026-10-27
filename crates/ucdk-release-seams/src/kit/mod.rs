@@ -18,8 +18,7 @@
 //!
 //! - [`run_build_system_kit`], [`run_grant_source_kit`], [`run_output_files_kit`],
 //!   [`run_process_runner_kit`], [`run_publisher_kit`] and [`run_store_kit`] run a whole kit and
-//!   return its [`Report`]; the second half of the publisher kit joins them in the part that
-//!   follows.
+//!   return its [`Report`].
 //! - [`build_system_scenarios`], [`grant_source_scenarios`], [`output_files_scenarios`],
 //!   [`process_runner_scenarios`], [`publisher_scenarios`] and [`store_scenarios`] give the
 //!   scenarios one by one, for a test per scenario.
@@ -42,7 +41,10 @@ mod grant_source;
 mod output_files;
 mod process_runner;
 mod publisher;
+mod publisher_access;
+mod publisher_grants;
 mod publisher_more;
+mod publisher_private;
 mod publisher_rig;
 mod publisher_shapes;
 mod store;

@@ -15,6 +15,7 @@ use ucdk_release_seams::{
 
 use super::publisher::{FakePublisherRig, Flawed};
 use super::publisher_grant::issue;
+use super::publisher_lax::{Defect, Kind, Verb};
 use super::secret::texts;
 
 /// One field of a coordinate.
@@ -32,6 +33,13 @@ impl Field {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum More {
+    /// A call whose grant names a coordinate that differs from the one asked in the field only
+    /// is taken for one that names it.
+    GrantBlindToField(Field, Verb),
+    /// On a channel of the kind, a bad grant of the defect is taken for a good one by the verb.
+    BadGrantTakenOnShape(Kind, Defect, Verb),
+    /// An abort is taken from a commit grant.
+    AbortTakesCommitGrant,
     /// A commit of other bytes or another `Held` than was staged replaces the staged state.
     CommitReplacesStaged,
     /// A commit of a coordinate nobody staged, on a channel that stages, stages it first.
@@ -151,11 +159,11 @@ impl MoreRig {
 }
 
 pub struct Wrapped {
-    base: Flawed,
-    flaw: More,
+    pub(super) base: Flawed,
+    pub(super) flaw: More,
     /// The stub is in force on this channel.
     active: bool,
-    shape: ChannelShape,
+    pub(super) shape: ChannelShape,
     /// The digest each coordinate was declared with, and how many coordinates the set had.
     declared: Vec<(Coordinate, String, usize)>,
     /// The coordinates of each commit that landed.
@@ -266,7 +274,7 @@ impl PublisherRig for MoreRig {
 }
 
 /// Whether `a` and `b` are two coordinates of one name that differ in `field` and in no other.
-fn differs_only_in(a: &Coordinate, b: &Coordinate, field: Field) -> bool {
+pub(super) fn differs_only_in(a: &Coordinate, b: &Coordinate, field: Field) -> bool {
     let agree = |same: bool, of: Field| if field == of { !same } else { same };
     a.name == b.name
         && agree(a.channel == b.channel, Field::Channel)
@@ -303,7 +311,7 @@ impl Wrapped {
     }
 
     /// The flaw of the stub, when it is in force on this channel.
-    fn flaw(&self) -> Option<More> {
+    pub(super) fn flaw(&self) -> Option<More> {
         self.active.then_some(self.flaw)
     }
 
@@ -350,7 +358,7 @@ impl Wrapped {
         }
     }
 
-    fn internal(&self, phase: GrantPhase, coordinates: &[Coordinate]) -> Grant {
+    pub(super) fn internal(&self, phase: GrantPhase, coordinates: &[Coordinate]) -> Grant {
         issue(
             &self.base.clock,
             &federated_repository(),
@@ -428,6 +436,10 @@ impl Publisher for Wrapped {
             return Ok(Presence::Absent);
         }
         let mut result = self.base.observe(g, k, set);
+        let retry = self.lenient(Verb::Observe, g, std::slice::from_ref(k), &result);
+        if let Some(grant) = retry {
+            result = self.base.observe(&grant, k, set);
+        }
         if self.is(More::DupObserveSetAccepted) && result.is_err() {
             let once = deduped(set);
             if once.len() != set.len() {
@@ -483,6 +495,10 @@ impl Publisher for Wrapped {
         };
         self.remember_declared(items);
         let mut result = self.base.stage(g, &used);
+        let retry = self.lenient(Verb::Stage, g, &coordinates, &result);
+        if let Some(grant) = retry {
+            result = self.base.stage(&grant, &used);
+        }
         if self.is(More::StagePartialOnRefusal)
             && items.len() > 1
             && Self::refused_for_a_member(&result)
@@ -535,7 +551,18 @@ impl Publisher for Wrapped {
     }
 
     fn abort(&mut self, g: &Grant, ks: &[Coordinate]) -> Result<(), SeamError> {
-        let result = self.base.abort(g, ks);
+        let mut result = self.base.abort(g, ks);
+        let mut retry = self.lenient(Verb::Abort, g, ks, &result);
+        if retry.is_none()
+            && self.is(More::AbortTakesCommitGrant)
+            && result.is_err()
+            && texts(g.secret()).first().map(String::as_str) == Some("commit")
+        {
+            retry = Some(self.internal(GrantPhase::Stage, ks));
+        }
+        if let Some(grant) = retry {
+            result = self.base.abort(&grant, ks);
+        }
         if result.is_ok() {
             self.aborted.extend(ks.iter().cloned());
             if self.is(More::AbortDropsUnnamedCommitted) {
@@ -587,6 +614,10 @@ impl Publisher for Wrapped {
             .is_some_and(|item| self.base.inner.is_yanked(item.coordinate));
         self.remember_declared(items);
         let mut result = self.base.commit(g, &used);
+        let retry = self.lenient(Verb::Commit, g, &coordinates, &result);
+        if let Some(grant) = retry {
+            result = self.base.commit(&grant, &used);
+        }
         if self.is(More::CommitPartialOnRefusal)
             && items.len() > 1
             && Self::refused_for_a_member(&result)
@@ -691,6 +722,10 @@ impl Publisher for Wrapped {
 
     fn yank(&mut self, g: &Grant, k: &Coordinate, reason: &str) -> Result<(), SeamError> {
         let mut result = self.base.yank(g, k, reason);
+        let retry = self.lenient(Verb::Yank, g, std::slice::from_ref(k), &result);
+        if let Some(grant) = retry {
+            result = self.base.yank(&grant, k, reason);
+        }
         if self.is(More::YankAbsentOk)
             && let Err(SeamError::Permanent(why)) = &result
             && why.contains("is not held")
@@ -740,6 +775,10 @@ impl Publisher for Wrapped {
             return Ok(None);
         }
         let mut result = self.base.fetch(g, k);
+        let retry = self.lenient(Verb::Fetch, g, std::slice::from_ref(k), &result);
+        if let Some(grant) = retry {
+            result = self.base.fetch(&grant, k);
+        }
         if self.is(More::FetchByNamePrefix)
             && matches!(result, Ok(None))
             && let Some(longer) = self.extending(k)
@@ -763,7 +802,12 @@ impl Publisher for Wrapped {
         ch: &str,
         name: &str,
     ) -> Result<Vec<(Coordinate, Held)>, SeamError> {
-        let mut found = self.base.newest(g, ch, name)?;
+        let mut result = self.base.newest(g, ch, name);
+        let retry = self.lenient(Verb::Newest, g, &[], &result);
+        if let Some(grant) = retry {
+            result = self.base.newest(&grant, ch, name);
+        }
+        let mut found = result?;
         if self.is(More::NewestWithWriterGrantIncludesStaged) && is_writer(g) {
             for (c, _) in self.staged.clone() {
                 if c.channel == ch
@@ -779,7 +823,12 @@ impl Publisher for Wrapped {
     }
 
     fn list(&mut self, g: &Grant, scope: &ListScope) -> Result<Vec<Listed>, SeamError> {
-        let mut listed = self.base.list(g, scope)?;
+        let mut result = self.base.list(g, scope);
+        let retry = self.lenient(Verb::List, g, &[], &result);
+        if let Some(grant) = retry {
+            result = self.base.list(&grant, scope);
+        }
+        let mut listed = result?;
         if self.is(More::ListWithWriterGrantIncludesStaged) && is_writer(g) {
             for (c, _) in self.staged.clone() {
                 if c.channel == scope.channel

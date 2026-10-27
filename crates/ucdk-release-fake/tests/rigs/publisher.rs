@@ -1,309 +1,75 @@
 // SPDX-License-Identifier: Apache-2.0
-//! The publisher rig: the fake registry in each shape, the grants its issuer gives, the
-//! declarations a rig makes about itself, and the stubs that break one promise of a registry.
-
-use std::time::Duration;
+//! The stubs of the publisher that break one promise of a registry: the conforming fake wrapped
+//! so that it answers one call wrongly. The rig that builds them is in `publisher_fake`.
 
 use ucdk_core::{Clock, ManualClock};
 use ucdk_release::codec::{GrantFault, GrantPhase};
 use ucdk_release::publish::{Held, Presence};
-use ucdk_release_fake::{FakeRegistry, Read, coordinate_key};
-use ucdk_release_proto::v1::{ArtifactType, Coordinate, Reason, Repository};
-use ucdk_release_seams::kit::{
-    Arrangement, ChannelShape, LOCATION, Payload, Placement, PublisherRig, ReadStep, Sibling,
-    coordinate, every_field_in_a_set_of_its_own, federated_repository,
-};
+use ucdk_release_fake::{FakeRegistry, coordinate_key};
+use ucdk_release_proto::v1::{ArtifactType, Coordinate, Reason};
+use ucdk_release_seams::kit::{ChannelShape, LOCATION, federated_repository};
 use ucdk_release_seams::{
     CommitAnswer, CommitUnit, Grant, ListScope, Listed, Publisher, SeamError, StageAnswer,
     StageItem, YankUnit,
 };
 
+use super::publisher_access::{Needs, covering_every, covers_last};
 use super::publisher_grant::{issue, scope_of};
 use super::secret::texts;
 
-pub use super::publisher_flaw::{Flaw, Hook};
+pub use super::publisher_fake::FakePublisherRig;
+pub use super::publisher_flaw::{Call, Flaw};
 
-/// The platform of the coordinate the conforming rig's channel cannot hold.
-const FOREIGN_PLATFORM: &str = "plan9-mips";
-
-/// A rig of the fake registry. It declares the shapes it builds and says of its grammar what is
-/// true of it; a builder changes a declaration, or the registry behind it, one way at a time.
-pub struct FakePublisherRig {
-    clock: ManualClock,
-    flaw: Option<Flaw>,
-    /// The stub is behind the channels that do not stage only.
-    flaw_only_unstaged: bool,
-    hook: Option<Hook>,
-    shapes: Vec<ChannelShape>,
-    /// The rig says a version is sealed by its first group.
-    declares_seals: bool,
-    /// The registry seals a version by its first group.
-    seals: bool,
-    per_coordinate: bool,
-    unconditional: bool,
-    version_yank: bool,
-    narrow: bool,
-    burns: bool,
-    /// The channel holds every coordinate: nothing is unrepresentable.
-    holds_all: bool,
-}
-
-impl FakePublisherRig {
-    /// The fake in every shape the kits use, with literal coordinates and bytes.
-    pub fn conforming() -> Self {
-        Self {
-            clock: ManualClock::at(1_000_000),
-            flaw: None,
-            flaw_only_unstaged: false,
-            hook: None,
-            shapes: vec![
-                ChannelShape::staging(),
-                ChannelShape::without_staging(),
-                ChannelShape {
-                    stages: true,
-                    private: true,
-                    group_addressed: true,
-                },
-                ChannelShape {
-                    stages: true,
-                    private: true,
-                    group_addressed: false,
-                },
-                ChannelShape {
-                    stages: false,
-                    private: true,
-                    group_addressed: false,
-                },
-            ],
-            declares_seals: false,
-            seals: false,
-            per_coordinate: false,
-            unconditional: false,
-            version_yank: false,
-            narrow: false,
-            burns: true,
-            holds_all: false,
-        }
-    }
-
-    /// A channel with no grammar to refuse by: it holds every coordinate.
-    pub fn holding_every_coordinate() -> Self {
-        Self {
-            holds_all: true,
-            ..Self::conforming()
-        }
-    }
-
-    pub fn flawed(flaw: Flaw) -> Self {
-        Self::conforming().with_flaw(flaw)
-    }
-
-    /// The same rig with the stub of `flaw` behind it.
-    #[must_use]
-    pub fn with_flaw(self, flaw: Flaw) -> Self {
-        let version_yank = self.version_yank
-            || matches!(
-                flaw,
-                Flaw::VersionYankIsPerCoordinate | Flaw::VersionYankIgnoresTheGrant
-            );
-        Self {
-            flaw: Some(flaw),
-            version_yank,
-            ..self
-        }
-    }
-
-    /// The same rig with the stub of `flaw` behind the channels that do not stage only: the
-    /// channels of the other shapes are the conforming fake.
-    #[must_use]
-    pub fn with_flaw_only_unstaged(self, flaw: Flaw) -> Self {
-        Self {
-            flaw_only_unstaged: true,
-            ..self.with_flaw(flaw)
-        }
-    }
-
-    /// The same rig making a wrong declaration of its coordinates, bytes or siblings.
-    #[must_use]
-    pub fn hooked(self, hook: Hook) -> Self {
-        Self {
-            hook: Some(hook),
-            ..self
-        }
-    }
-
-    /// The same rig declaring only `shapes`.
-    #[must_use]
-    pub fn with_shapes(self, shapes: Vec<ChannelShape>) -> Self {
-        Self { shapes, ..self }
-    }
-
-    /// A rig that builds one public channel that does not stage, one call to a commit.
-    pub fn restricted() -> Self {
-        Self::conforming().with_shapes(vec![ChannelShape::without_staging()])
-    }
-
-    /// A registry that seals a version by its first group, and a rig that says so.
-    pub fn sealing() -> Self {
-        Self {
-            declares_seals: true,
-            seals: true,
-            ..Self::conforming()
-        }
-    }
-
-    /// A rig that says the registry seals a version, which it does not.
-    pub fn declaring_seals_only() -> Self {
-        Self {
-            declares_seals: true,
-            ..Self::conforming()
-        }
-    }
-
-    /// A registry that seals a version, which the rig does not say.
-    pub fn sealing_undeclared() -> Self {
-        Self {
-            seals: true,
-            ..Self::conforming()
-        }
-    }
-
-    /// A registry whose commit may replace what is there, and a rig that says so.
-    pub fn unconditional() -> Self {
-        Self {
-            unconditional: true,
-            ..Self::conforming()
-        }
-    }
-
-    /// A registry that commits each coordinate on its own.
-    pub fn per_coordinate() -> Self {
-        Self {
-            per_coordinate: true,
-            ..Self::conforming()
-        }
-    }
-
-    /// A registry that yanks every platform of a version at one call.
-    pub fn yanking_a_version() -> Self {
-        Self {
-            version_yank: true,
-            ..Self::conforming()
-        }
-    }
-
-    /// A registry with no failed groups: it cannot burn a number.
-    pub fn unable_to_burn() -> Self {
-        Self {
-            burns: false,
-            ..Self::conforming()
-        }
-    }
-
-    /// A registry with a grammar of its own, as a real one has: names of two parts, one
-    /// platform spelling, a member name that is a file name, one platform that is published with
-    /// the base, and a version that is sealed by the group that first wrote it.
-    pub fn narrow() -> Self {
-        Self {
-            narrow: true,
-            declares_seals: true,
-            seals: true,
-            ..Self::conforming()
-        }
-    }
-
-    pub(super) fn issue(
-        &self,
-        repository: &Repository,
-        phase: GrantPhase,
-        coordinates: &[Coordinate],
-    ) -> Grant {
-        issue(&self.clock, repository, phase, coordinates)
-    }
-
-    /// The coordinate the registry cannot hold, as it is really.
-    fn banned(&self) -> Vec<Coordinate> {
-        if self.holds_all {
-            return Vec::new();
-        }
-        vec![Coordinate {
-            platform: if self.narrow {
-                "win-32".to_owned()
-            } else {
-                FOREIGN_PLATFORM.to_owned()
-            },
-            ..self.coordinate("a")
-        }]
-    }
-
-    fn is(&self, hook: Hook) -> bool {
-        self.hook == Some(hook)
-    }
-}
-
+/// A stub of the fake registry: the conforming fake with one promise broken, or with none.
 pub struct Flawed {
     pub(super) inner: FakeRegistry,
     pub(super) clock: ManualClock,
     /// Every coordinate that was in a `stage` or `commit` call, with its bytes.
-    known: Vec<(Coordinate, Vec<u8>)>,
+    pub(super) known: Vec<(Coordinate, Vec<u8>)>,
     /// The digest each coordinate was declared with, when it was declared one.
     declared: Vec<(Coordinate, String)>,
     banned: Vec<Coordinate>,
-    flaw: Option<Flaw>,
-    shape: ChannelShape,
+    pub(super) flaw: Option<Flaw>,
+    pub(super) shape: ChannelShape,
     seals: bool,
     version_yank: bool,
     calls: u32,
-    commit_calls: u32,
+    pub(super) commit_calls: u32,
     lost: bool,
     /// A commit was arranged to lose a race.
-    raced: bool,
+    pub(super) raced: bool,
     /// The staged state was arranged to vanish.
-    vanished: bool,
+    pub(super) vanished: bool,
     /// A commit was arranged to become readable late.
-    becoming: bool,
+    pub(super) becoming: bool,
     /// The coordinates that were arranged to be burned.
-    burned: Vec<Coordinate>,
-    list_lags: bool,
+    pub(super) burned: Vec<Coordinate>,
+    pub(super) list_lags: bool,
+    /// The group read of an observe was arranged to fail.
+    pub(super) group_fails: bool,
 }
 
-impl PublisherRig for FakePublisherRig {
-    type Publisher = Flawed;
-
-    fn shapes(&self) -> Vec<ChannelShape> {
-        self.shapes.clone()
-    }
-
-    fn publisher(&self, shape: &ChannelShape) -> Flawed {
-        let flaw = self
-            .flaw
-            .filter(|_| !(self.flaw_only_unstaged && shape.stages));
-        let mut registry = FakeRegistry::new(&self.clock, LOCATION);
-        if !shape.stages {
-            registry = registry.without_staging();
-        }
-        if shape.private {
-            registry = registry.private();
-        }
-        if shape.group_addressed {
-            registry = registry.group_addressed();
-        }
-        if self.per_coordinate || flaw == Some(Flaw::CommitUnitSaysSet) {
-            registry = registry.commit_per_coordinate();
-        }
-        if self.unconditional {
-            registry = registry.tag_replacing();
-        }
-        Flawed {
+impl Flawed {
+    /// A stub around `registry`: `banned` are the coordinates it cannot hold, `flaw` the promise
+    /// it breaks, and `(seals, version_yank)` what it says of a version.
+    pub(super) fn new(
+        registry: FakeRegistry,
+        clock: ManualClock,
+        banned: Vec<Coordinate>,
+        flaw: Option<Flaw>,
+        shape: ChannelShape,
+        (seals, version_yank): (bool, bool),
+    ) -> Self {
+        Self {
             inner: registry,
-            clock: self.clock.clone(),
+            clock,
             known: Vec::new(),
             declared: Vec::new(),
-            banned: self.banned(),
+            banned,
             flaw,
-            shape: *shape,
-            seals: self.seals,
-            version_yank: self.version_yank,
+            shape,
+            seals,
+            version_yank,
             calls: 0,
             commit_calls: 0,
             lost: false,
@@ -312,188 +78,21 @@ impl PublisherRig for FakePublisherRig {
             becoming: false,
             burned: Vec::new(),
             list_lags: false,
+            group_fails: false,
         }
     }
 
-    fn arrange(&self, p: &mut Flawed, what: &Arrangement) {
-        let next_commit = p.commit_calls + 1;
-        match what {
-            Arrangement::HeldByAnother { coordinate, bytes } => {
-                p.inner.present_different(coordinate, bytes);
-            }
-            Arrangement::StagedByAnother { coordinate, bytes } => {
-                p.inner.stage_other_bytes(coordinate, bytes);
-            }
-            Arrangement::RaceNextCommit(bytes) => {
-                p.raced = true;
-                p.inner.race_next_commit(bytes);
-            }
-            Arrangement::LoseAnswerAfterCommit => p.inner.lose_answer_after_commit(next_commit),
-            Arrangement::LoseAnswerBeforeCommit => p.inner.lose_answer_before_commit(next_commit),
-            Arrangement::FailAfterCommit => p.inner.fail_after_commit(next_commit),
-            Arrangement::CommitSetFailsWhole => {
-                if p.flaw == Some(Flaw::SetCommitIsTorn) && p.shape.stages {
-                    p.inner.torn_commit();
-                } else {
-                    p.inner.commit_set_fails_whole();
-                }
-            }
-            Arrangement::ListLags => {
-                p.list_lags = true;
-                p.inner.list_lag();
-            }
-            Arrangement::FailGroupRead => p.inner.fail_group_read(),
-            Arrangement::FailIndexRead => p.inner.fail_index_read(),
-            Arrangement::LoseStagedState => {
-                p.vanished = true;
-                let staged = p.known_where(|me, c| me.inner.is_staged(c));
-                let grant = issue(
-                    &p.clock,
-                    &federated_repository(),
-                    GrantPhase::Stage,
-                    &staged,
-                );
-                p.inner
-                    .abort(&grant, &staged)
-                    .expect("the registry gives back what it staged");
-            }
-            Arrangement::CommitVisibleAfter(n) => {
-                p.becoming = true;
-                p.inner.read_lag(*n);
-            }
-            Arrangement::BurnedByFailedGroup { coordinate } => {
-                p.burned.push(coordinate.clone());
-                p.inner.burn(coordinate);
-            }
-        }
-    }
-
-    fn grant(&self, _p: &Flawed, phase: GrantPhase, coordinates: &[Coordinate]) -> Grant {
-        self.issue(&federated_repository(), phase, coordinates)
-    }
-
-    fn foreign_grant(&self, _p: &Flawed, phase: GrantPhase, coordinates: &[Coordinate]) -> Grant {
-        let elsewhere = Repository {
-            location: "registry/other".to_owned(),
-            r#type: ArtifactType::File as i32,
-            ..federated_repository()
-        };
-        self.issue(&elsewhere, phase, coordinates)
-    }
-
-    fn advance(&self, ms: u64) {
-        self.clock.advance(Duration::from_millis(ms));
-    }
-
-    fn reads(&self, p: &Flawed) -> Vec<ReadStep> {
-        p.inner
-            .read_log()
-            .iter()
-            .map(|read| match read {
-                Read::Group => ReadStep::Group,
-                Read::Index => ReadStep::Index,
-            })
-            .collect()
-    }
-
-    fn coordinate(&self, label: &str) -> Coordinate {
-        if self.narrow {
-            Coordinate {
-                name: format!("{label}_pkg"),
-                platform: "linux-64".to_owned(),
-                ..coordinate(label)
-            }
-        } else if self.is(Hook::CoordinateDropsThePrefix) {
-            coordinate(&format!("x{label}"))
-        } else {
-            coordinate(label)
-        }
-    }
-
-    fn payload(&self, k: &Coordinate, seed: u8) -> Payload {
-        let seed = if self.is(Hook::PayloadIgnoresTheSeed) {
-            0
-        } else {
-            seed
-        };
-        let mut bytes = if self.is(Hook::PayloadIsEmpty) {
-            Vec::new()
-        } else {
-            format!("{}-{}-{}", k.name, k.version, k.platform).into_bytes()
-        };
-        if seed != 0 && !bytes.is_empty() {
-            bytes.push(seed);
-        }
-        let name = if self.narrow {
-            format!("mojo-{}-{}-0.conda", k.name, k.version)
-        } else {
-            k.name.clone()
-        };
-        Payload { name, bytes }
-    }
-
-    fn siblings(&self, base: &Coordinate) -> Vec<Sibling> {
-        let platform = Coordinate {
-            platform: "osx-arm64".to_owned(),
-            ..base.clone()
-        };
-        let version = Coordinate {
-            version: "1.2.4".to_owned(),
-            ..base.clone()
-        };
-        if self.narrow {
-            return vec![
-                Sibling {
-                    field: "platform",
-                    coordinate: platform,
-                    placement: Placement::SameSet,
-                },
-                Sibling {
-                    field: "version",
-                    coordinate: version,
-                    placement: Placement::OwnSet,
-                },
-            ];
-        }
-        let mut all = every_field_in_a_set_of_its_own(base);
-        match self.hook {
-            Some(Hook::SiblingDiffersInTwoFields) => {
-                all[0].coordinate = Coordinate {
-                    version: "1.2.4".to_owned(),
-                    ..all[0].coordinate.clone()
-                };
-            }
-            Some(Hook::SiblingIsTheBase) => all[0].coordinate = base.clone(),
-            _ => {}
-        }
-        all
-    }
-
-    fn unrepresentable(&self) -> Vec<Coordinate> {
-        if self.is(Hook::UnrepresentableIsTheBase) {
-            vec![self.coordinate("a")]
-        } else {
-            self.banned()
-        }
-    }
-
-    fn seals_versions(&self) -> bool {
-        self.declares_seals
-    }
-
-    fn can_burn(&self) -> bool {
-        self.burns
-    }
-}
-
-impl Flawed {
-    fn is(&self, flaw: Flaw) -> bool {
+    pub(super) fn is(&self, flaw: Flaw) -> bool {
         self.flaw == Some(flaw)
+    }
+
+    fn grouped(&self) -> bool {
+        self.shape.group_addressed
     }
 
     /// A grant the registry issues itself, for a stub that lets a caller in without the grant
     /// the call needs.
-    fn internal(&self, phase: GrantPhase, coordinates: &[Coordinate]) -> Grant {
+    pub(super) fn internal(&self, phase: GrantPhase, coordinates: &[Coordinate]) -> Grant {
         issue(&self.clock, &federated_repository(), phase, coordinates)
     }
 
@@ -579,7 +178,7 @@ impl Flawed {
     }
 
     /// The coordinates a call once named that satisfy `keep`, each once.
-    fn known_where(&self, keep: impl Fn(&Self, &Coordinate) -> bool) -> Vec<Coordinate> {
+    pub(super) fn known_where(&self, keep: impl Fn(&Self, &Coordinate) -> bool) -> Vec<Coordinate> {
         let mut found: Vec<Coordinate> = Vec::new();
         for (coordinate, _) in &self.known {
             if keep(self, coordinate) && !found.contains(coordinate) {
@@ -692,12 +291,45 @@ impl Publisher for Flawed {
                 Err(SeamError::Refused(Reason::Channel))
             };
         }
+        let stranger_in;
+        let g = if self.lets_a_stranger_in(Flaw::StrangerObservesPrivate, g) {
+            stranger_in = self.internal(GrantPhase::Read, std::slice::from_ref(k));
+            &stranger_in
+        } else {
+            g
+        };
+        let with_set;
+        let g = if self.is(Flaw::StrangerObservesPrivateWithASet)
+            && self.shape.private
+            && g.is_none()
+            && !set.is_empty()
+        {
+            with_set = self.internal(GrantPhase::Stage, std::slice::from_ref(k));
+            &with_set
+        } else {
+            g
+        };
+        let lax;
+        let g = if let Some(grant) = self.lax_read(g, Some(k)) {
+            lax = grant;
+            &lax
+        } else {
+            g
+        };
         let staged = self.inner.is_staged(k);
         let scope = scope_of(g);
+        let told: &[StageItem<'_>] = if (self.is(Flaw::TheDeclaredSetIsDropped) && staged)
+            || (self.is(Flaw::ObserveDropsAForeignSet)
+                && !set.iter().any(|item| item.coordinate == k))
+        {
+            &[]
+        } else {
+            set
+        };
         let result = if self.is(Flaw::ObserveReadsTheLaggingList) && self.list_lags {
             Ok(Presence::Absent)
         } else {
-            self.inner.observe(g, k, set)
+            self.inner.observe(g, k, told)
         };
         let granted = !g.is_none();
         match (self.flaw, result) {
@@ -744,6 +376,32 @@ impl Publisher for Flawed {
             (Some(Flaw::ObserveAfterALostAnswerIsAbsent), Ok(_)) if self.lost => {
                 Ok(Presence::Absent)
             }
+            (Some(Flaw::TheStampIsDropped), Ok(Presence::Present(held))) => {
+                Ok(Presence::Present(Held {
+                    stamp: None,
+                    ..held
+                }))
+            }
+            (Some(Flaw::GrantedObserveIsBlindToOthers), Ok(Presence::Present(held)))
+                if granted && !self.grouped() && held.stamp.is_none() =>
+            {
+                Ok(Presence::Absent)
+            }
+            (Some(Flaw::GroupedObserveIsBlindToOthers), Ok(Presence::Present(held)))
+                if granted && self.grouped() && !set.is_empty() && held.stamp.is_none() =>
+            {
+                Ok(Presence::Absent)
+            }
+            (Some(Flaw::FailedGroupReadIsAbsent), Err(SeamError::Unknown(_)))
+                if self.group_fails =>
+            {
+                Ok(Presence::Absent)
+            }
+            (Some(Flaw::AnEmptySetSeesStagedState), Ok(Presence::Absent))
+                if set.is_empty() && granted && staged && self.grouped() =>
+            {
+                Ok(Presence::Staged(Held::default()))
+            }
             (Some(Flaw::BurnedReadsAsAbsent), Ok(Presence::Burned)) => Ok(Presence::Absent),
             (
                 Some(Flaw::EchoesTheDeclaredDigest),
@@ -777,6 +435,22 @@ impl Publisher for Flawed {
             .first()
             .and_then(|item| self.staged_bytes(item.coordinate));
         self.remember(items);
+        let stranger_in =
+            self.writer_for_a_stranger(Flaw::StrangerMayStage, g, GrantPhase::Stage, &coordinates);
+        let g = stranger_in.as_ref().unwrap_or(g);
+        let regranted = self.regrant(g, Needs::Stage);
+        let g = regranted.as_ref().unwrap_or(g);
+        let lax = self.lax_write(g, Call::Stage, &coordinates);
+        let g = lax.as_ref().unwrap_or(g);
+        let covering;
+        let g = if (self.is(Flaw::StageIgnoresCoverage) && scope_of(g) == "stage")
+            || (self.is(Flaw::OnlyTheLastCoordinateIsCovered) && covers_last(g, items))
+        {
+            covering = covering_every(g, items);
+            &covering
+        } else {
+            g
+        };
         if let Some(first) = items.first() {
             let held = self.inner.bytes(first.coordinate).map(<[u8]>::to_vec);
             let ours = first.file.bytes.to_vec();
@@ -799,6 +473,11 @@ impl Publisher for Flawed {
             {
                 return Ok(StageAnswer::Staged);
             }
+            if self.is(Flaw::StageOverOtherBytesIsStaged)
+                && held.as_ref().is_some_and(|theirs| *theirs != ours)
+            {
+                return Ok(StageAnswer::Staged);
+            }
         }
         self.inner.stage(g, items)
     }
@@ -818,7 +497,13 @@ impl Publisher for Flawed {
             let grant = self.internal(GrantPhase::Stage, &all);
             return self.inner.abort(&grant, &all);
         }
-        self.inner.abort(g, ks)
+        let stranger_in =
+            self.writer_for_a_stranger(Flaw::StrangerMayAbort, g, GrantPhase::Stage, ks);
+        let g = stranger_in.as_ref().unwrap_or(g);
+        let regranted = self.regrant(g, Needs::Stage);
+        let g = regranted.as_ref().unwrap_or(g);
+        let lax = self.lax_write(g, Call::Abort, ks);
+        self.inner.abort(lax.as_ref().unwrap_or(g), ks)
     }
 
     fn commit(&mut self, g: &Grant, items: &[StageItem<'_>]) -> Result<CommitAnswer, SeamError> {
@@ -837,6 +522,26 @@ impl Publisher for Flawed {
             return self.answer_to_a_sealed_version(CommitAnswer::Duplicate);
         }
         self.remember(items);
+        let stranger_in = self.writer_for_a_stranger(
+            Flaw::StrangerMayCommit,
+            g,
+            GrantPhase::Commit,
+            &coordinates,
+        );
+        let g = stranger_in.as_ref().unwrap_or(g);
+        let regranted = self.regrant(g, Needs::Commit);
+        let g = regranted.as_ref().unwrap_or(g);
+        let lax = self.lax_write(g, Call::Commit, &coordinates);
+        let g = lax.as_ref().unwrap_or(g);
+        let covering;
+        let g = if (self.is(Flaw::CommitIgnoresCoverage) && scope_of(g) == "commit")
+            || (self.is(Flaw::OnlyTheLastCoordinateIsCovered) && covers_last(g, items))
+        {
+            covering = covering_every(g, items);
+            &covering
+        } else {
+            g
+        };
         self.commit_calls += 1;
         let first = items.first();
         let was_staged = first.is_some_and(|item| self.inner.is_staged(item.coordinate));
@@ -866,6 +571,20 @@ impl Publisher for Flawed {
         }
         let result = self.inner.commit(g, items);
         match (self.flaw, result) {
+            (Some(Flaw::ARacedCommitOverwrites), Ok(CommitAnswer::Duplicate))
+                if was_staged && self.raced =>
+            {
+                if let Some(item) = first {
+                    self.inner
+                        .present_different(item.coordinate, item.file.bytes);
+                }
+                Ok(CommitAnswer::Committed)
+            }
+            (Some(Flaw::TransientAfterCommitIsPermanent), Err(SeamError::Transient(_)))
+                if self.shape.stages =>
+            {
+                Err(SeamError::Permanent("the commit failed".to_owned()))
+            }
             (Some(Flaw::VanishedStateIsCommitted), Err(SeamError::Permanent(_)))
                 if self.vanished =>
             {
@@ -894,9 +613,30 @@ impl Publisher for Flawed {
         if self.holds_none_of(std::slice::from_ref(k)) {
             return Err(SeamError::Refused(Reason::Channel));
         }
+        if self.is(Flaw::YankIgnoresThePhase) && scope_of(g) == "stage" {
+            let grant = self.internal(GrantPhase::Commit, std::slice::from_ref(k));
+            return self.inner.yank(&grant, k, reason);
+        }
+        let stranger_in = self.writer_for_a_stranger(
+            Flaw::StrangerMayYank,
+            g,
+            GrantPhase::Commit,
+            std::slice::from_ref(k),
+        );
+        let g = stranger_in.as_ref().unwrap_or(g);
+        let regranted = self.regrant(g, Needs::Commit);
+        let g = regranted.as_ref().unwrap_or(g);
+        let lax = self.lax_write(g, Call::Yank, std::slice::from_ref(k));
+        let g = lax.as_ref().unwrap_or(g);
         if self.version_yank && self.inner.bytes(k).is_some() {
             let held = self.held_of_the_version(k);
             if self.is(Flaw::VersionYankIsPerCoordinate) {
+                return self.inner.yank(g, k, reason);
+            }
+            // A grant that is bad for the coordinate itself is refused as the registry refuses
+            // it, for the reason it gives; one that is good for it and leaves a sibling out is
+            // `Denied`.
+            if !self.is_good_for(g, "commit", std::slice::from_ref(k)) {
                 return self.inner.yank(g, k, reason);
             }
             if !self.is(Flaw::VersionYankIgnoresTheGrant) && !self.is_good_for(g, "commit", &held) {
@@ -916,9 +656,30 @@ impl Publisher for Flawed {
         if self.holds_none_of(std::slice::from_ref(k)) {
             return Err(SeamError::Refused(Reason::Channel));
         }
+        if self.is(Flaw::StrangerFetchesStaged) && g.is_none() && self.inner.is_staged(k) {
+            let bytes = self.known.iter().rev().find(|(c, _)| c == k);
+            return Ok(bytes.map(|(_, bytes)| bytes.clone()));
+        }
+        let stranger_in;
+        let g = if self.lets_a_stranger_in(Flaw::StrangerFetchesPrivate, g) {
+            stranger_in = self.internal(GrantPhase::Read, std::slice::from_ref(k));
+            &stranger_in
+        } else {
+            g
+        };
+        if self.is(Flaw::AnonymousFetchIsDenied) && g.is_none() {
+            return Err(SeamError::GrantRefused(GrantFault::Denied));
+        }
         if self.is(Flaw::YankedIsNotFetchable) && self.inner.is_yanked(k) {
             return Ok(None);
         }
+        let lax;
+        let g = if let Some(grant) = self.lax_read(g, Some(k)) {
+            lax = grant;
+            &lax
+        } else {
+            g
+        };
         let found = self.inner.fetch(g, k)?;
         if found.is_none()
             && matches!(
@@ -942,11 +703,83 @@ impl Publisher for Flawed {
         ch: &str,
         name: &str,
     ) -> Result<Vec<(Coordinate, Held)>, SeamError> {
-        self.inner.newest(g, ch, name)
+        if self.is(Flaw::AnonymousFetchIsDenied) && g.is_none() {
+            return Err(SeamError::GrantRefused(GrantFault::Denied));
+        }
+        let stranger_in;
+        let g = if self.lets_a_stranger_in(Flaw::StrangerNewestPrivate, g) {
+            stranger_in = self.internal(GrantPhase::Read, &[]);
+            &stranger_in
+        } else {
+            g
+        };
+        let lax;
+        let g = if let Some(grant) = self.lax_read(g, None) {
+            lax = grant;
+            &lax
+        } else {
+            g
+        };
+        let mut found = self.inner.newest(g, ch, name)?;
+        if self.is(Flaw::NewestDropsYanked) {
+            found.retain(|(coordinate, _)| !self.inner.is_yanked(coordinate));
+        }
+        if self.is(Flaw::NewestIncludesStaged) {
+            for listed in self.staged_listed(ch, name) {
+                if listed.coordinate.name == name {
+                    found.push((listed.coordinate, listed.held));
+                }
+            }
+        }
+        if self.is(Flaw::NewestMatchesByPrefix) || self.is(Flaw::NewestIgnoresTheChannel) {
+            let by_prefix = self.is(Flaw::NewestMatchesByPrefix);
+            let held = self.known_where(|me, c| {
+                me.inner.bytes(c).is_some()
+                    && if by_prefix {
+                        c.channel == ch && c.name.starts_with(name)
+                    } else {
+                        c.name == name
+                    }
+            });
+            found = held
+                .into_iter()
+                .filter_map(|c| self.held_now(&c).map(|held| (c, held)))
+                .collect();
+        }
+        for (_, held) in &mut found {
+            *held = self.misreported(held.clone(), Flaw::NewestWrongDigest);
+            if self.is(Flaw::NewestDropsTheStamp) {
+                held.stamp = None;
+            }
+            if self.is(Flaw::NewestDropsTheExceptionalMark) {
+                held.exceptional = false;
+            }
+        }
+        Ok(found)
     }
 
     fn list(&mut self, g: &Grant, scope: &ListScope) -> Result<Vec<Listed>, SeamError> {
+        if self.is(Flaw::AnonymousFetchIsDenied) && g.is_none() {
+            return Err(SeamError::GrantRefused(GrantFault::Denied));
+        }
+        let stranger_in;
+        let g = if self.lets_a_stranger_in(Flaw::StrangerListsPrivate, g) {
+            stranger_in = self.internal(GrantPhase::Read, &[]);
+            &stranger_in
+        } else {
+            g
+        };
+        let lax;
+        let g = if let Some(grant) = self.lax_read(g, None) {
+            lax = grant;
+            &lax
+        } else {
+            g
+        };
         let mut listed = self.inner.list(g, scope)?;
+        if self.is(Flaw::ListIncludesStaged) {
+            listed.extend(self.staged_listed(&scope.channel, &scope.prefix));
+        }
         if self.is(Flaw::ListIgnoresTheChannel) || self.is(Flaw::ListIgnoresThePrefix) {
             let by_channel = self.is(Flaw::ListIgnoresThePrefix);
             let held = self.known_where(|me, c| {

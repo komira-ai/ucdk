@@ -1,23 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
-//! The publisher kit, first part: the scenarios about what a registry holds and answers, about
-//! commits and sets, and about the coordinates and channels a rig declares.
+//! The publisher kit: the scenarios about what a registry holds and answers, about commits and
+//! sets, about who may read and write a channel, grants and private or grouped channels, and
+//! about the coordinates and channels a rig declares.
 //!
 //! A rig declares the shapes of channel it builds and the hooks that say what its grammar takes
 //! (`PublisherRig`). A scenario that needs a shape the rig lacks, or a thing it cannot do, is
 //! gated: the runner records it as skipped with the reason, and a skip is never a pass. The
-//! scenarios about who may read and write a channel, grants and private or grouped channels,
-//! follow in the second part.
+//! scenarios are in the order of the design: the first sixteen about what a registry holds, the
+//! sixteen about grants and access that follow them (`publisher_access`, `publisher_grants` and
+//! `publisher_private`), and then those about commits, sets and the declarations of a rig.
 
 use ucdk_release::codec::GrantPhase;
 use ucdk_release::publish::{Held, Presence};
 use ucdk_release_proto::v1::Stamped;
 
+use super::publisher_access as access;
 use super::publisher_more as more;
+use super::publisher_private as private;
 use super::publisher_rig::{
-    Arrangement, ChannelShape, PublisherRig, Set, built, commit, fetched, held_by_another,
-    is_yanked, needs_a_conditional_commit, needs_a_plain_channel, needs_a_set_commit,
-    needs_no_staging, needs_staging, observed, observed_alone, on_each_plain_shape, plain_shapes,
-    present_held, publish, stage, staged_held, staging_publisher, stranger, unstaged_publisher,
+    Arrangement, ChannelShape, PublisherRig, Set, built, commit, fetched, grouped_shapes,
+    held_by_another, is_yanked, needs_a_channel, needs_a_conditional_commit,
+    needs_a_grouped_channel, needs_a_plain_channel, needs_a_private_channel,
+    needs_a_public_channel, needs_a_set_commit, needs_no_staging, needs_staging, observed,
+    observed_alone, on_each_of, on_each_plain_shape, plain_shapes, present_held, private_shapes,
+    public_shapes, publish, stage, staged_held, staging_publisher, stranger, unstaged_publisher,
 };
 use super::publisher_shapes as shapes;
 use super::{Report, Scenario, must, must_err, must_some, run_scenarios, same};
@@ -104,6 +110,132 @@ pub fn publisher_scenarios<R: PublisherRig>() -> Vec<Scenario<R>> {
             on_each_plain_shape(rig, list_may_lag_but_observe_is_exact::<R>);
         })
         .gated(needs_a_plain_channel::<R>),
+        Scenario::new("public_read_needs_no_grant", |rig| {
+            on_each_of(
+                rig,
+                &public_shapes(rig),
+                "a public channel to run on",
+                access::public_read_needs_no_grant::<R>,
+            );
+        })
+        .gated(needs_a_public_channel::<R>),
+        Scenario::new(
+            "a_grant_for_another_repository_sends_nothing",
+            access::a_grant_for_another_repository_sends_nothing::<R>,
+        )
+        .gated(needs_a_channel::<R>),
+        Scenario::new(
+            "a_grant_of_the_wrong_phase_is_denied_and_nothing_happens",
+            access::a_grant_of_the_wrong_phase_is_denied_and_nothing_happens::<R>,
+        )
+        .gated(needs_a_channel::<R>),
+        Scenario::new(
+            "an_expired_grant_is_refused_and_nothing_happens",
+            access::an_expired_grant_is_refused_and_nothing_happens::<R>,
+        )
+        .gated(needs_a_channel::<R>),
+        Scenario::new("newest_lists_every_held_coordinate_of_the_name", |rig| {
+            on_each_plain_shape(rig, access::newest_lists_every_held_coordinate_of_the_name::<R>);
+        })
+        .gated(needs_a_plain_channel::<R>),
+        Scenario::new("observe_returns_the_stamp_it_was_given", |rig| {
+            on_each_plain_shape(rig, access::observe_returns_the_stamp_it_was_given::<R>);
+        })
+        .gated(needs_a_plain_channel::<R>),
+        Scenario::new(
+            "a_granted_observe_sees_a_coordinate_committed_by_another_writer",
+            |rig| {
+                on_each_plain_shape(
+                    rig,
+                    access::a_granted_observe_sees_a_coordinate_committed_by_another_writer::<R>,
+                );
+            },
+        )
+        .gated(needs_a_plain_channel::<R>),
+        Scenario::new("a_private_observe_reads_the_group_then_the_index", |rig| {
+            on_each_of(
+                rig,
+                &grouped_shapes(rig),
+                "a channel addressed by group to run on",
+                private::a_private_observe_reads_the_group_then_the_index::<R>,
+            );
+        })
+        .gated(needs_a_grouped_channel::<R>),
+        Scenario::new(
+            "a_coordinate_committed_in_another_group_reads_as_present_never_absent",
+            |rig| {
+                on_each_of(
+                    rig,
+                    &grouped_shapes(rig),
+                    "a channel addressed by group to run on",
+                    private::a_coordinate_committed_in_another_group_reads_as_present_never_absent::<R>,
+                );
+            },
+        )
+        .gated(needs_a_grouped_channel::<R>),
+        Scenario::new(
+            "a_failed_group_read_or_index_read_fails_the_observe_and_is_not_absent",
+            |rig| {
+                on_each_of(
+                    rig,
+                    &grouped_shapes(rig),
+                    "a channel addressed by group to run on",
+                    private::a_failed_group_read_or_index_read_fails_the_observe_and_is_not_absent::<R>,
+                );
+            },
+        )
+        .gated(needs_a_grouped_channel::<R>),
+        Scenario::new(
+            "observe_with_the_declared_set_finds_staged_state_addressed_by_the_group_of_that_set",
+            |rig| {
+                on_each_of(
+                    rig,
+                    &grouped_shapes(rig),
+                    "a channel addressed by group to run on",
+                    private::observe_with_the_declared_set_finds_staged_state_addressed_by_the_group_of_that_set::<R>,
+                );
+            },
+        )
+        .gated(needs_a_grouped_channel::<R>),
+        Scenario::new(
+            "observe_with_an_empty_set_cannot_see_staged_state_and_still_sees_committed_coordinates",
+            |rig| {
+                on_each_of(
+                    rig,
+                    &grouped_shapes(rig),
+                    "a channel addressed by group to run on",
+                    private::observe_with_an_empty_set_cannot_see_staged_state_and_still_sees_committed_coordinates::<R>,
+                );
+            },
+        )
+        .gated(needs_a_grouped_channel::<R>),
+        Scenario::new(
+            "a_read_grant_observes_committed_coordinates_and_can_neither_stage_nor_commit",
+            |rig| {
+                on_each_of(
+                    rig,
+                    &private_shapes(rig),
+                    "a private channel to run on",
+                    private::a_read_grant_observes_committed_coordinates_and_can_neither_stage_nor_commit::<R>,
+                );
+            },
+        )
+        .gated(needs_a_private_channel::<R>),
+        Scenario::new(
+            "commit_is_atomic_when_the_coordinate_appears_between_observe_and_commit",
+            access::commit_is_atomic_when_the_coordinate_appears_between_observe_and_commit::<R>,
+        )
+        .gated(needs_staging::<R>),
+        Scenario::new(
+            "transient_after_commit_is_observed_before_retry",
+            access::transient_after_commit_is_observed_before_retry::<R>,
+        )
+        .gated(needs_staging::<R>),
+        Scenario::new(
+            "duplicate_over_other_bytes_leaves_the_old_bytes",
+            access::duplicate_over_other_bytes_leaves_the_old_bytes::<R>,
+        )
+        .gated(needs_staging::<R>),
         Scenario::new(
             "a_second_commit_of_the_same_bytes_is_duplicate",
             a_second_commit_of_the_same_bytes_is_duplicate::<R>,
