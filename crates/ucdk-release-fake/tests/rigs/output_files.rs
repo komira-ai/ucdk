@@ -59,6 +59,12 @@ pub enum Flaw {
     TrailingSlashFollowsStat,
     /// A `read` of a symlink named with a trailing slash that answers the bytes it points at.
     TrailingSlashFollowsRead,
+    /// A `read` that refuses a path with `..` anywhere in it, a file name such as `a..b`
+    /// included.
+    ReadRefusesDotDotNames,
+    /// A listing that follows a symlink to a directory that is not directly below the listed
+    /// directory.
+    FollowsNestedLinks,
 }
 
 pub struct FakeFilesRig {
@@ -245,10 +251,33 @@ impl OutputFiles for Flawed {
             entries.extend(below);
             entries.sort_by(|a, b| a.rel.cmp(&b.rel));
         }
+        if self.is(Flaw::FollowsNestedLinks) {
+            let mut below = Vec::new();
+            for entry in &entries {
+                if entry.kind == FileKind::Symlink
+                    && entry.rel.contains('/')
+                    && let Some(target) = self.target_of(&format!("{base}/{}", entry.rel))
+                {
+                    for inside in self.inner.list(&target)? {
+                        below.push(DirEntry {
+                            rel: format!("{}/{}", entry.rel, inside.rel),
+                            kind: inside.kind,
+                        });
+                    }
+                }
+            }
+            entries.extend(below);
+            entries.sort_by(|a, b| a.rel.cmp(&b.rel));
+        }
         Ok(entries)
     }
 
     fn read(&mut self, path: &str) -> Result<Vec<u8>, SeamError> {
+        if self.is(Flaw::ReadRefusesDotDotNames) && path.contains("..") {
+            return Err(SeamError::Refused(
+                ucdk_release_proto::v1::Reason::BuildOutput,
+            ));
+        }
         if self.is(Flaw::TrailingSlashFollowsRead)
             && let Some(target) = self.slashed_target(path)
         {

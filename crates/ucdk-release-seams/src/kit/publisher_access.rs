@@ -3,12 +3,12 @@
 //! channel is read, and what a call that went wrong left behind.
 
 use ucdk_release::codec::{GrantFault, GrantPhase};
-use ucdk_release::publish::Presence;
+use ucdk_release::publish::{Held, Presence};
 use ucdk_release_proto::v1::{Coordinate, Stamped};
 
 use super::publisher::{
     A_DAY_MS, Arrangement, ChannelShape, PublisherRig, ReadStep, Set, fetched, observed,
-    present_held, publish, stage, staged_held, stranger,
+    present_held, publish, sha, stage, staged_held, stranger,
 };
 use super::{coordinate, must, must_err, same};
 use crate::{CommitAnswer, Grant, ListScope, Publisher, SeamError, StageAnswer};
@@ -138,6 +138,58 @@ pub(super) fn a_grant_of_the_wrong_phase_is_denied_and_nothing_happens<R: Publis
     staged_held(observed(rig, &mut p, GrantPhase::Stage, &set, 0));
     a_grant_covers_the_coordinates_it_names_and_no_others(rig);
     a_yank_needs_the_commit_grant(rig);
+    for shape in [ChannelShape::staging(), ChannelShape::private_grouped()] {
+        a_stranger_writes_nothing(rig, &shape);
+    }
+}
+
+/// A call with no grant is of no phase: it neither stages, commits, aborts nor yanks, and what
+/// it tried to change stays as it was.
+fn a_stranger_writes_nothing<R: PublisherRig>(rig: &R, shape: &ChannelShape) {
+    let mut p = rig.publisher(shape);
+    let (held, staged, new) = (Set::of(&["h"]), Set::of(&["s"]), Set::of(&["n"]));
+    publish(rig, &mut p, &held);
+    stage(rig, &mut p, &staged);
+    let none = Grant::none();
+    let blobs = new.blobs();
+    let items = new.items(&blobs);
+    let refusals = [
+        ("stage", must_err(p.stage(&none, &items), "stage")),
+        ("commit", must_err(p.commit(&none, &items), "commit")),
+        (
+            "abort",
+            must_err(p.abort(&none, &staged.coords), "abort of staged state"),
+        ),
+        (
+            "yank",
+            must_err(p.yank(&none, &held.coords[0], "a reason"), "yank"),
+        ),
+    ];
+    for (call, refusal) in &refusals {
+        same(
+            denied(refusal),
+            true,
+            &format!("a {call} with no grant is Denied ({shape:?})"),
+        );
+    }
+    same(
+        observed(rig, &mut p, GrantPhase::Stage, &new, 0),
+        Presence::Absent,
+        "the coordinate a stranger tried to stage or commit",
+    );
+    same(fetched(rig, &mut p, &new.coords[0]), None, "its bytes");
+    if !shape.group_addressed {
+        // Staged state addressed by group is found only by an observe told the set: the
+        // scenarios of that rule hold it, and this one does not depend on them.
+        staged_held(observed(rig, &mut p, GrantPhase::Stage, &staged, 0));
+    }
+    present_held(stranger_or_read(rig, &mut p, &held.coords[0]));
+}
+
+/// What a read grant sees of `k`: on a private channel a stranger sees nothing.
+fn stranger_or_read<R: PublisherRig>(rig: &R, p: &mut R::Publisher, k: &Coordinate) -> Presence {
+    let grant = rig.grant(p, GrantPhase::Read, std::slice::from_ref(k));
+    must(p.observe(&grant, k, &[]), "an observe with a read grant")
 }
 
 /// A grant of the right phase that names one coordinate does not stage or commit two.
@@ -237,7 +289,7 @@ pub(super) fn newest_lists_every_held_coordinate_of_the_name<R: PublisherRig>(ri
         channel: "beta".to_owned(),
         ..a1.clone()
     };
-    let set = Set::at(vec![
+    let mut set = Set::at(vec![
         a1.clone(),
         a2.clone(),
         a3.clone(),
@@ -245,11 +297,22 @@ pub(super) fn newest_lists_every_held_coordinate_of_the_name<R: PublisherRig>(ri
         coordinate("ab"),
         elsewhere,
     ]);
+    set.held.exceptional = true;
     publish(rig, &mut p, &set);
     let grant = rig.grant(&p, GrantPhase::Commit, std::slice::from_ref(&a2));
     must(p.yank(&grant, &a2, "a reason"), "yank");
     let read = rig.grant(&p, GrantPhase::Read, std::slice::from_ref(&a1));
     let found = must(p.newest(&read, &a1.channel, &a1.name), "newest");
+    for (c, held) in &found {
+        same(
+            held.clone(),
+            Held {
+                digest: sha(c.name.as_bytes()),
+                ..set.held.clone()
+            },
+            &format!("what newest holds beside {c:?}: its digest, stamp and exceptional mark"),
+        );
+    }
     let key = |c: &Coordinate| (c.version.clone(), c.platform.clone());
     let mut got: Vec<Coordinate> = found.into_iter().map(|(c, _)| c).collect();
     got.sort_by_key(key);
@@ -358,6 +421,20 @@ pub(super) fn observe_with_the_declared_set_finds_staged_state_addressed_by_the_
     let set = Set::of(&["a", "b"]);
     stage(rig, &mut p, &set);
     staged_held(observed(rig, &mut p, GrantPhase::Stage, &set, 0));
+    // A set that does not hold the coordinate observed says nothing about it: Refused.
+    let outside = Set::of(&["a", "b", "c"]);
+    let blobs = set.blobs();
+    let items = set.items(&blobs);
+    let grant = rig.grant(&p, GrantPhase::Stage, &outside.coords);
+    let refusal = must_err(
+        p.observe(&grant, &outside.coords[2], &items),
+        "an observe of a coordinate the declared set does not hold",
+    );
+    same(
+        matches!(refusal, SeamError::Refused(_)),
+        true,
+        "an observe told a set that does not hold the coordinate is Refused",
+    );
 }
 
 pub(super) fn observe_with_an_empty_set_cannot_see_staged_state_and_still_sees_committed_coordinates<
@@ -432,6 +509,69 @@ pub(super) fn a_read_grant_observes_committed_coordinates_and_can_neither_stage_
         p.observe(&read_a, &a.coords[0], &[]),
         "an observe after the refusals",
     ));
+    a_private_channel_reads_only_for_a_good_read_grant(rig);
+}
+
+/// A read of a private channel needs a read grant that is for this repository, covers what is
+/// read and has not expired; a stranger's is refused in the scenario above.
+fn a_private_channel_reads_only_for_a_good_read_grant<R: PublisherRig>(rig: &R) {
+    let mut p = rig.publisher(&ChannelShape {
+        private: true,
+        ..ChannelShape::staging()
+    });
+    let (a, b) = (Set::of(&["a"]), Set::of(&["b"]));
+    publish(rig, &mut p, &a);
+    let k = &a.coords[0];
+    let scope = ListScope {
+        channel: k.channel.clone(),
+        prefix: String::new(),
+    };
+    let foreign = rig.foreign_grant(&p, GrantPhase::Read, &a.coords);
+    let uncovered = rig.grant(&p, GrantPhase::Read, &b.coords);
+    for (what, grant) in [
+        ("for another repository", &foreign),
+        ("that does not name the coordinate", &uncovered),
+    ] {
+        let refusals = [
+            ("observe", p.observe(grant, k, &[]).map(|_| ())),
+            ("fetch", p.fetch(grant, k).map(|_| ())),
+        ];
+        for (call, answer) in refusals {
+            same(
+                answer,
+                Err(SeamError::GrantRefused(GrantFault::Denied)),
+                &format!("a {call} with a read grant {what}"),
+            );
+        }
+    }
+    for (call, answer) in [
+        (
+            "newest",
+            p.newest(&foreign, &k.channel, &k.name).map(|_| ()),
+        ),
+        ("list", p.list(&foreign, &scope).map(|_| ())),
+    ] {
+        same(
+            answer,
+            Err(SeamError::GrantRefused(GrantFault::Denied)),
+            &format!("a {call} with a read grant for another repository"),
+        );
+    }
+    let old = rig.grant(&p, GrantPhase::Read, &a.coords);
+    rig.advance(A_DAY_MS);
+    let refusals = [
+        ("observe", p.observe(&old, k, &[]).map(|_| ())),
+        ("fetch", p.fetch(&old, k).map(|_| ())),
+        ("newest", p.newest(&old, &k.channel, &k.name).map(|_| ())),
+        ("list", p.list(&old, &scope).map(|_| ())),
+    ];
+    for (call, answer) in refusals {
+        same(
+            answer,
+            Err(SeamError::GrantRefused(GrantFault::Expired)),
+            &format!("a {call} with an expired read grant"),
+        );
+    }
 }
 
 /// Every read of a private channel needs a grant, a stranger's included, and a stranger is

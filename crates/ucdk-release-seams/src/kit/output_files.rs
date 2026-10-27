@@ -145,21 +145,18 @@ fn a_listing_names_the_kind_of_every_entry<R: OutputFilesRig>(rig: &R) {
 }
 
 fn a_listed_symlink_is_never_descended<R: OutputFilesRig>(rig: &R) {
+    // One link at the top of the listed directory and one below it.
     let mut files = rig.reader(&[
         ("d/real/inner", Node::File(b"x")),
         ("d/link", Node::Link("d/real")),
+        ("d/a/link", Node::Link("d/real")),
     ]);
     let listing = must(files.list(&at(rig, "d")), "list");
     let rels: Vec<&str> = listing.iter().map(|e| e.rel.as_str()).collect();
     same(
-        rels.contains(&"real/inner"),
-        true,
-        "the real directory is listed through its own name",
-    );
-    same(
-        rels.iter().any(|rel| rel.starts_with("link/")),
-        false,
-        "an entry below the symlink",
+        rels,
+        vec!["a", "a/link", "link", "real", "real/inner"],
+        "the listing: the real directory through its own name, and nothing below a symlink",
     );
 }
 
@@ -325,7 +322,8 @@ fn a_path_that_is_relative_or_climbs_is_refused<R: OutputFilesRig>(rig: &R) {
 
 fn an_entry_of_a_listed_directory_is_read_through_its_joined_path<R: OutputFilesRig>(rig: &R) {
     // Bytes that are not text, a file past any buffer a reader might size at a few kilobytes,
-    // an empty file, a hidden one and one three directories down.
+    // an empty file, a hidden one, one three directories down and names that hold two dots
+    // without being a `..` part.
     let binary: &[u8] = &[0xff, 0xfe, 0x00, 0x80, 0xc3, 0x28];
     let big: Vec<u8> = (0..=255u8).cycle().take(10_000).collect();
     let mut files = rig.reader(&[
@@ -338,12 +336,18 @@ fn an_entry_of_a_listed_directory_is_read_through_its_joined_path<R: OutputFiles
         ("e/.hidden", Node::File(b"H")),
         ("e/n/.hidden", Node::File(b"I")),
         ("e/p/q/r/deep", Node::File(b"D")),
+        ("e/a..b", Node::File(b"J")),
+        ("e/..dots", Node::File(b"K")),
+        ("e/n/dots..", Node::File(b"L")),
     ]);
     let dir = at(rig, "e");
     let listing = must(files.list(&dir), "list");
-    let wanted: [(&str, &[u8]); 9] = [
+    let wanted: [(&str, &[u8]); 12] = [
         (".hidden", b"H"),
+        ("..dots", b"K"),
         ("a", b"A"),
+        ("a..b", b"J"),
+        ("n/dots..", b"L"),
         ("big", &big),
         ("binary", binary),
         ("empty", b""),

@@ -228,23 +228,28 @@ fn an_anonymous_identity_needs_no_exchange<R: GrantSourceRig>(rig: &R) {
     );
 }
 
+/// Every phase a grant is asked for.
+const PHASES: [GrantPhase; 3] = [GrantPhase::Stage, GrantPhase::Commit, GrantPhase::Read];
+
 fn a_grant_covers_exactly_the_coordinates_asked<R: GrantSourceRig>(rig: &R) {
     let repository = federated_repository();
-    let mut source = rig.source(&setup(matching_job()));
     let coords = [coordinate("a"), coordinate("b")];
-    let grant = must(
-        source.grant(&request(&repository, GrantPhase::Stage, &coords)),
-        "grant",
-    );
-    same(
-        rig.content(&source, &grant),
-        GrantContent {
-            scope: STAGE_SCOPE.to_owned(),
-            repository: LOCATION.to_owned(),
-            coordinates: coords.to_vec(),
-        },
-        "what a stage grant covers",
-    );
+    for (phase, scope) in [
+        (GrantPhase::Stage, STAGE_SCOPE),
+        (GrantPhase::Commit, COMMIT_SCOPE),
+    ] {
+        let mut source = rig.source(&setup(matching_job()));
+        let grant = must(source.grant(&request(&repository, phase, &coords)), "grant");
+        same(
+            rig.content(&source, &grant),
+            GrantContent {
+                scope: scope.to_owned(),
+                repository: LOCATION.to_owned(),
+                coordinates: coords.to_vec(),
+            },
+            &format!("what a {phase:?} grant covers"),
+        );
+    }
 }
 
 fn a_differing_claim_is_refused_before_any_exchange<R: GrantSourceRig>(rig: &R) {
@@ -252,6 +257,20 @@ fn a_differing_claim_is_refused_before_any_exchange<R: GrantSourceRig>(rig: &R) 
     let coords = [coordinate("a")];
     let job = matching_job();
     let differing = [
+        (
+            "subject that holds the declared one",
+            JobClaims {
+                subject: format!("{}-evil", job.subject),
+                ..job.clone()
+            },
+        ),
+        (
+            "pinned claims, none presented",
+            JobClaims {
+                pinned: BTreeMap::new(),
+                ..job.clone()
+            },
+        ),
         (
             "subject",
             JobClaims {
@@ -281,52 +300,109 @@ fn a_differing_claim_is_refused_before_any_exchange<R: GrantSourceRig>(rig: &R) 
             },
         ),
     ];
-    for (which, claims) in differing {
-        let mut source = rig.source(&setup(claims));
-        let refusal = must_err(
-            source.grant(&request(&repository, GrantPhase::Stage, &coords)),
-            &format!("a grant for a job whose {which} differs"),
-        );
-        same(
-            denied(&refusal),
-            true,
-            &format!("a differing {which} is Denied"),
-        );
-        same(
-            rig.exchanges(&source),
-            0,
-            &format!("the exchanges a differing {which} spent"),
-        );
+    for phase in PHASES {
+        for (which, claims) in &differing {
+            let mut source = rig.source(&setup(claims.clone()));
+            let refusal = must_err(
+                source.grant(&request(&repository, phase, &coords)),
+                &format!("a {phase:?} grant for a job whose {which} differs"),
+            );
+            same(
+                denied(&refusal),
+                true,
+                &format!("a differing {which} is Denied for a {phase:?} grant"),
+            );
+            same(
+                rig.exchanges(&source),
+                0,
+                &format!("the exchanges a differing {which} spent on a {phase:?} grant"),
+            );
+        }
+    }
+    // An exceptional run presents its own subject and environment and every other claim the
+    // same as an ordinary one, and each of them is compared.
+    let exceptional = exceptional_job();
+    let differing_exceptional = [
+        (
+            "environment (the ordinary one)",
+            JobClaims {
+                environment: matching_job().environment,
+                ..exceptional.clone()
+            },
+        ),
+        (
+            "audience",
+            JobClaims {
+                audience: "elsewhere".to_owned(),
+                ..exceptional.clone()
+            },
+        ),
+        (
+            "pinned claim",
+            JobClaims {
+                pinned: BTreeMap::from([("ref".to_owned(), "topic".to_owned())]),
+                ..exceptional
+            },
+        ),
+    ];
+    for phase in PHASES {
+        for (which, claims) in &differing_exceptional {
+            let mut source = rig.source(&setup(claims.clone()));
+            let req = GrantRequest {
+                exceptional: true,
+                ..request(&repository, phase, &coords)
+            };
+            let refusal = must_err(
+                source.grant(&req),
+                &format!("a {phase:?} grant for an exceptional run whose {which} differs"),
+            );
+            same(
+                denied(&refusal),
+                true,
+                &format!(
+                    "a differing {which} of an exceptional run is Denied for a {phase:?} grant"
+                ),
+            );
+            same(
+                rig.exchanges(&source),
+                0,
+                &format!("the exchanges a differing {which} of an exceptional run spent"),
+            );
+        }
     }
 }
 
 fn an_exceptional_run_presents_the_exceptional_subject<R: GrantSourceRig>(rig: &R) {
     let repository = federated_repository();
     let coords = [coordinate("a")];
-    let ask = |job: JobClaims, as_exceptional: bool| {
+    let ask = |job: JobClaims, as_exceptional: bool, phase: GrantPhase| {
         let mut source = rig.source(&setup(job));
         let req = GrantRequest {
             exceptional: as_exceptional,
-            ..request(&repository, GrantPhase::Stage, &coords)
+            ..request(&repository, phase, &coords)
         };
         let answer = source.grant(&req);
         (answer.map(|g| g.is_none()), rig.exchanges(&source))
     };
-    same(
-        ask(exceptional_job(), true),
-        (Ok(false), 1),
-        "an exceptional job asking as exceptional",
-    );
-    same(
-        ask(matching_job(), true),
-        (Err(SeamError::GrantRefused(GrantFault::Denied)), 0),
-        "an ordinary job asking as exceptional",
-    );
-    same(
-        ask(exceptional_job(), false),
-        (Err(SeamError::GrantRefused(GrantFault::Denied)), 0),
-        "an exceptional job asking as ordinary",
-    );
+    let refused = (Err(SeamError::GrantRefused(GrantFault::Denied)), 0);
+    let exceptional = exceptional_job();
+    for phase in PHASES {
+        same(
+            ask(exceptional.clone(), true, phase),
+            (Ok(false), 1),
+            &format!("an exceptional job asking as exceptional for a {phase:?} grant"),
+        );
+        same(
+            ask(matching_job(), true, phase),
+            refused.clone(),
+            &format!("an ordinary job asking as exceptional for a {phase:?} grant"),
+        );
+        same(
+            ask(exceptional.clone(), false, phase),
+            refused.clone(),
+            &format!("an exceptional job asking as ordinary for a {phase:?} grant"),
+        );
+    }
 }
 
 fn a_used_identity_token_is_refused_the_second_time<R: GrantSourceRig>(rig: &R) {
@@ -460,30 +536,32 @@ fn an_expiry_is_reported_as_the_issuer_stated_it<R: GrantSourceRig>(rig: &R) {
 
 fn more_coordinates_than_the_limit_are_refused_before_the_exchange<R: GrantSourceRig>(rig: &R) {
     let repository = federated_repository();
-    let mut source = rig.source(&GrantSetup {
-        limit: 2,
-        ..setup(matching_job())
-    });
-    let two = [coordinate("a"), coordinate("b")];
-    must(
-        source.grant(&request(&repository, GrantPhase::Stage, &two)),
-        "a grant at the limit",
-    );
-    let three = [coordinate("a"), coordinate("b"), coordinate("c")];
-    let refusal = must_err(
-        source.grant(&request(&repository, GrantPhase::Stage, &three)),
-        "a grant over the limit",
-    );
-    same(
-        refusal,
-        SeamError::Refused(Reason::Credential),
-        "the refusal over the limit",
-    );
-    same(
-        rig.exchanges(&source),
-        1,
-        "the exchanges: only the one at the limit",
-    );
+    for phase in PHASES {
+        let mut source = rig.source(&GrantSetup {
+            limit: 2,
+            ..setup(matching_job())
+        });
+        let two = [coordinate("a"), coordinate("b")];
+        must(
+            source.grant(&request(&repository, phase, &two)),
+            &format!("a {phase:?} grant at the limit"),
+        );
+        let three = [coordinate("a"), coordinate("b"), coordinate("c")];
+        let refusal = must_err(
+            source.grant(&request(&repository, phase, &three)),
+            &format!("a {phase:?} grant over the limit"),
+        );
+        same(
+            refusal,
+            SeamError::Refused(Reason::Credential),
+            &format!("the refusal of a {phase:?} grant over the limit"),
+        );
+        same(
+            rig.exchanges(&source),
+            1,
+            &format!("the exchanges of {phase:?} grants: only the one at the limit"),
+        );
+    }
 }
 
 /// Whether a type has a trait, found without naming it as a bound: the inherent constant is

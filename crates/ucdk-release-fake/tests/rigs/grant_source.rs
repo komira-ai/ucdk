@@ -7,7 +7,11 @@ use ucdk_core::{Clock, ManualClock};
 use ucdk_release::codec::{GrantFault, GrantPhase};
 use ucdk_release_fake::{FakeGrantSource, JobClaims as FakeClaims};
 use ucdk_release_proto::v1::Coordinate;
-use ucdk_release_seams::kit::{GrantContent, GrantSetup, GrantSourceRig, matching_job};
+use ucdk_release_proto::v1::push_identity::Kind;
+use ucdk_release_proto::v1::{Reason, Repository};
+use ucdk_release_seams::kit::{
+    GrantContent, GrantSetup, GrantSourceRig, JobClaims, STAGE_SCOPE, matching_job,
+};
 use ucdk_release_seams::{Grant, GrantRequest, GrantSource, SeamError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +40,22 @@ pub enum Flaw {
     AllowsOneOverTheLimit,
     /// The secret of a grant is written into the log.
     LogsTheSecret,
+    /// The claims of the job are compared for a stage grant only.
+    SkipsClaimsOutsideStage,
+    /// The subject of the job need only contain the declared subject.
+    ClaimsMatchedBySubstring,
+    /// A job with no pinned claim is admitted where claims are pinned.
+    NoPinnedClaimIsIssued,
+    /// The environment of an exceptional run is not compared.
+    ExceptionalIgnoresEnvironment,
+    /// The audience and the pinned claims of an exceptional run are not compared.
+    ExceptionalIgnoresAudienceAndPinned,
+    /// The limit is enforced for a stage grant only.
+    LimitIsCheckedForStageOnly,
+    /// A commit grant is issued with the stage scope.
+    CommitGrantHasTheStageScope,
+    /// A commit grant for two coordinates covers the first.
+    CommitGrantDropsACoordinate,
 }
 
 pub struct FakeGrantRig {
@@ -61,6 +81,7 @@ impl FakeGrantRig {
 
 pub struct Flawed {
     inner: FakeGrantSource,
+    job: JobClaims,
     flaw: Option<Flaw>,
     clock: ManualClock,
     limit: usize,
@@ -84,11 +105,17 @@ impl GrantSourceRig for FakeGrantRig {
             environment: setup.job.environment.clone(),
             pinned,
         };
-        let mut inner = FakeGrantSource::new(&self.clock, claims).with_limit(setup.limit);
+        let inner_limit = if self.flaw == Some(Flaw::LimitIsCheckedForStageOnly) {
+            usize::MAX
+        } else {
+            setup.limit
+        };
+        let mut inner = FakeGrantSource::new(&self.clock, claims).with_limit(inner_limit);
         inner.lifetime(setup.lifetime_ms);
         inner.issuer_clock_offset(setup.issuer_offset_ms);
         Flawed {
             inner,
+            job: setup.job.clone(),
             flaw: self.flaw,
             clock: self.clock.clone(),
             limit: setup.limit,
@@ -150,6 +177,41 @@ impl Flawed {
     fn is(&self, flaw: Flaw) -> bool {
         self.flaw == Some(flaw)
     }
+
+    /// The repository as a lax issuer reads it: the declaration with each claim the stub does
+    /// not compare made equal to the job's.
+    fn as_a_lax_issuer_reads(&self, req: &GrantRequest<'_>) -> Repository {
+        let mut repository = req.repository.clone();
+        let Some(Kind::Federated(declared)) =
+            repository.push.as_mut().and_then(|p| p.kind.as_mut())
+        else {
+            return repository;
+        };
+        let job = &self.job;
+        let skipped = self.is(Flaw::SkipsClaimsOutsideStage) && req.phase != GrantPhase::Stage;
+        if skipped
+            || (self.is(Flaw::ClaimsMatchedBySubstring) && job.subject.contains(&declared.subject))
+        {
+            declared.subject.clone_from(&job.subject);
+        }
+        if skipped || (self.is(Flaw::ExceptionalIgnoresEnvironment) && req.exceptional) {
+            declared
+                .exceptional_environment
+                .clone_from(&job.environment);
+            declared.environment.clone_from(&job.environment);
+        }
+        if skipped {
+            declared.exceptional_subject.clone_from(&job.subject);
+        }
+        if skipped || (self.is(Flaw::ExceptionalIgnoresAudienceAndPinned) && req.exceptional) {
+            declared.audience.clone_from(&job.audience);
+            declared.pinned_claims.clone_from(&job.pinned);
+        }
+        if self.is(Flaw::NoPinnedClaimIsIssued) && job.pinned.is_empty() {
+            declared.pinned_claims.clear();
+        }
+        repository
+    }
 }
 
 impl GrantSource for Flawed {
@@ -164,11 +226,23 @@ impl GrantSource for Flawed {
             self.unreachable_seen = false;
             return Err(SeamError::GrantRefused(GrantFault::Used));
         }
+        if self.is(Flaw::LimitIsCheckedForStageOnly)
+            && req.phase == GrantPhase::Stage
+            && req.coordinates.len() > self.limit
+        {
+            return Err(SeamError::Refused(Reason::Credential));
+        }
         let mut phase = req.phase;
         if self.is(Flaw::ReadIsIssuedAsStage) && phase == GrantPhase::Read {
             phase = GrantPhase::Stage;
         }
         let mut coordinates = req.coordinates;
+        if self.is(Flaw::CommitGrantDropsACoordinate)
+            && phase == GrantPhase::Commit
+            && coordinates.len() == 2
+        {
+            coordinates = &coordinates[..1];
+        }
         if self.is(Flaw::DropsTheLastCoordinate)
             && phase == GrantPhase::Stage
             && coordinates.len() == 2
@@ -180,8 +254,10 @@ impl GrantSource for Flawed {
         {
             coordinates = &coordinates[..self.limit];
         }
+        let repository = self.as_a_lax_issuer_reads(req);
+        let exchanged = self.inner.exchanges().len();
         let result = self.inner.grant(&GrantRequest {
-            repository: req.repository,
+            repository: &repository,
             phase,
             coordinates,
             exceptional: req.exceptional && !self.is(Flaw::IgnoresExceptional),
@@ -190,13 +266,27 @@ impl GrantSource for Flawed {
             (Some(Flaw::AnonymousGetsAGrant), Ok(grant)) if grant.is_none() => {
                 Ok(Grant::issued(b"x".to_vec(), 1))
             }
+            (Some(Flaw::CommitGrantHasTheStageScope), Ok(grant))
+                if phase == GrantPhase::Commit && !grant.is_none() =>
+            {
+                let text = String::from_utf8_lossy(grant.secret()).into_owned();
+                let rest = text.split_once('\n').map_or("", |(_, rest)| rest);
+                Ok(Grant::issued(
+                    format!("{STAGE_SCOPE}\n{rest}").into_bytes(),
+                    grant.expires_ms().unwrap_or_default(),
+                ))
+            }
             (Some(Flaw::UsedIsDenied), Err(SeamError::GrantRefused(GrantFault::Used))) => {
                 Err(SeamError::GrantRefused(GrantFault::Denied))
             }
             (
                 Some(Flaw::CommitWithoutScopeIsIssued),
                 Err(SeamError::GrantRefused(GrantFault::Denied)),
-            ) if req.phase == GrantPhase::Commit => Ok(Grant::issued(b"commit".to_vec(), 1)),
+            ) if req.phase == GrantPhase::Commit && self.inner.exchanges().len() > exchanged => {
+                // The exchange happened and the issuer refused it for the scope; a refusal
+                // before any exchange is one of the claims.
+                Ok(Grant::issued(b"commit".to_vec(), 1))
+            }
             (
                 Some(Flaw::UnreachableSpendsTheToken),
                 Err(SeamError::GrantRefused(GrantFault::Unreachable)),

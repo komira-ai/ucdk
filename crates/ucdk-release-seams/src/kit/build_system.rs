@@ -26,6 +26,11 @@ pub enum BuildWorld {
     TwoOutputs,
     /// The build succeeds and its output holds a symlink.
     SymlinkInOutput,
+    /// The build succeeds and lists one output, a directory that holds a file.
+    DirectoryOutput,
+    /// The build succeeds and lists one directory output with a symlink in it, below its top
+    /// level.
+    SymlinkInDirectory,
     /// The build exits nonzero after printing `tail` last.
     BuildFails { tail: String },
     /// The build system's binary cannot be started.
@@ -147,6 +152,14 @@ fn index_holding(argv: &[String], part: &str) -> usize {
 fn index_of(argv: &[String], arg: &str) -> usize {
     must_some(
         argv.iter().position(|a| a == arg),
+        &format!("{arg} is not in the argument vector {argv:?}"),
+    )
+}
+
+/// The place of the last argument that is `arg`.
+fn last_index_of(argv: &[String], arg: &str) -> usize {
+    must_some(
+        argv.iter().rposition(|a| a == arg),
         &format!("{arg} is not in the argument vector {argv:?}"),
     )
 }
@@ -292,6 +305,14 @@ fn base_flags_come_before_target_flags_in_order<R: BuildSystemRig>(rig: &R) {
             true,
             &format!("the flags of the {verb} verb in the order base then target"),
         );
+        // Each flag an author wrote is passed once, not again further on.
+        for flag in ["--base-one", "--base-two", "--target-one", "--target-two"] {
+            same(
+                command.argv.iter().filter(|a| *a == flag).count(),
+                1,
+                &format!("the times {flag} is in the argument vector of the {verb} verb"),
+            );
+        }
     }
 }
 
@@ -388,7 +409,7 @@ fn ucdk_owned_flags_come_after_the_authors<R: BuildSystemRig>(rig: &R) {
     let owned = index_holding(&command.argv, &report);
     let last_author = ["--base-one", "--base-two", "--target-one", "--target-two"]
         .iter()
-        .map(|flag| index_of(&command.argv, flag))
+        .map(|flag| last_index_of(&command.argv, flag))
         .max()
         .unwrap_or_default();
     same(
@@ -399,18 +420,34 @@ fn ucdk_owned_flags_come_after_the_authors<R: BuildSystemRig>(rig: &R) {
 }
 
 fn a_build_lists_exactly_one_output<R: BuildSystemRig>(rig: &R) {
-    let mut bs = rig.system(&BuildWorld::Normal);
-    let case = Case::new(bs.kind());
-    let beats = Beats::counting();
-    let located = must(bs.build(&case.inv(Verb::Build, None), &beats), "build");
-    same(located.len(), 1, "the outputs of a build");
-    same(
-        located[0].label.as_str(),
-        BUILD_LABEL,
-        "the label of the output",
-    );
-    same(located[0].path.starts_with('/'), true, "an absolute path");
-    same(located[0].shape, Shape::File, "the shape of a file output");
+    for (world, shape) in [
+        (BuildWorld::Normal, Shape::File),
+        (BuildWorld::DirectoryOutput, Shape::Directory),
+    ] {
+        let mut bs = rig.system(&world);
+        let case = Case::new(bs.kind());
+        let beats = Beats::counting();
+        let located = must(
+            bs.build(&case.inv(Verb::Build, None), &beats),
+            &format!("build in {world:?}"),
+        );
+        same(
+            located.len(),
+            1,
+            &format!("the outputs of a build in {world:?}"),
+        );
+        same(
+            located[0].label.as_str(),
+            BUILD_LABEL,
+            "the label of the output",
+        );
+        same(located[0].path.starts_with('/'), true, "an absolute path");
+        same(
+            located[0].shape,
+            shape,
+            &format!("the shape of the output in {world:?}"),
+        );
+    }
 }
 
 /// A build in `world` that must be refused as `BUILD_OUTPUT`.
@@ -435,7 +472,9 @@ fn two_outputs_are_build_output<R: BuildSystemRig>(rig: &R) {
 }
 
 fn a_symlink_in_an_output_is_refused<R: BuildSystemRig>(rig: &R) {
+    // The output is a symlink itself, or a directory with one below its top level.
     refused_as_build_output(rig, &BuildWorld::SymlinkInOutput);
+    refused_as_build_output(rig, &BuildWorld::SymlinkInDirectory);
 }
 
 fn a_failed_build_is_permanent_with_the_tail_of_its_output<R: BuildSystemRig>(rig: &R) {
@@ -498,6 +537,22 @@ fn copy_out_writes_only_into_the_entry_it_is_given<R: BuildSystemRig>(rig: &R) {
         written.into_iter().map(|(rel, _)| rel).collect::<Vec<_>>(),
         wanted,
         "the paths copy_out wrote, which are those of the output and no other",
+    );
+    // A directory output is copied into the entry as well, and as carefully.
+    let mut bs = rig.system(&BuildWorld::DirectoryOutput);
+    let case = Case::new(bs.kind());
+    let written = built_bytes(&mut bs, &case);
+    same(
+        written.is_empty(),
+        false,
+        "copy_out of a directory wrote nothing",
+    );
+    same(
+        written
+            .iter()
+            .all(|(rel, _)| valid_rel(rel) && !rel.contains('\\')),
+        true,
+        &format!("every path copy_out wrote of a directory is a relative path: {written:?}"),
     );
 }
 

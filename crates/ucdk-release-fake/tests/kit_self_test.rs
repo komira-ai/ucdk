@@ -51,6 +51,7 @@ fn further_stubs_fail_exactly<F: Copy + std::fmt::Debug>(
     table: &[(F, &[&'static str])],
     run: impl Fn(F) -> Report,
 ) {
+    let mut wrong = Vec::new();
     for (flaw, named) in table {
         let in_order: Vec<&str> = scenarios
             .iter()
@@ -62,22 +63,88 @@ fn further_stubs_fail_exactly<F: Copy + std::fmt::Debug>(
             *named,
             "{kit}: {flaw:?} names scenarios the kit has, in the kit's order"
         );
-        let report = run(*flaw);
-        assert_eq!(
-            report.failed(),
-            *named,
-            "{kit}: the stub {flaw:?} must fail exactly the scenarios it names: {:?}",
-            report.outcomes
-        );
+        let failed = run(*flaw).failed();
+        if failed != *named {
+            wrong.push(format!("{flaw:?}: failed {failed:?}, named {named:?}"));
+        }
     }
+    assert!(
+        wrong.is_empty(),
+        "{kit}: each stub must fail exactly the scenarios it names:\n{}",
+        wrong.join("\n")
+    );
 }
 
 #[test]
-fn each_further_nonconforming_stub_fails_the_scenarios_that_hold_it() {
+fn each_further_output_files_stub_fails_the_scenarios_that_hold_it() {
     further_output_files();
+}
+
+#[test]
+fn each_further_store_stub_fails_the_scenarios_that_hold_it() {
+    further_store();
+}
+
+#[test]
+fn each_further_grant_source_stub_fails_the_scenarios_that_hold_it() {
+    further_grant_source();
+}
+
+#[test]
+fn each_further_process_runner_stub_fails_the_scenarios_that_hold_it() {
     further_process_runner();
+}
+
+#[test]
+fn each_further_build_system_stub_fails_the_scenarios_that_hold_it() {
     further_build_system();
+}
+
+#[test]
+fn each_further_publisher_stub_fails_the_scenarios_that_hold_it() {
     further_publisher();
+}
+
+fn further_store() {
+    const READ_BACK: &str = "an_entry_reads_back_what_was_written";
+    const ESCAPES: &str = "paths_that_escape_an_entry_are_refused";
+    further_stubs_fail_exactly(
+        "store",
+        &names(&store_scenarios::<FakeStoreRig>()),
+        &[
+            (Store::EmptyFileIsDropped, &[READ_BACK]),
+            (Store::GetIsLossy, &[READ_BACK]),
+            (Store::GetTruncatesAt4k, &[READ_BACK]),
+            (Store::GetOfADirectoryIsEmpty, &[READ_BACK]),
+            (Store::WriterAcceptsATrailingSlash, &[ESCAPES]),
+            (Store::WriterAcceptsADotPart, &[ESCAPES]),
+            (Store::WriterAcceptsControlCharacters, &[ESCAPES]),
+            (Store::GetResolvesClimbs, &[ESCAPES]),
+        ],
+        |flaw| run_store_kit(&FakeStoreRig::flawed(flaw)),
+    );
+}
+
+fn further_grant_source() {
+    const COVERS: &str = "a_grant_covers_exactly_the_coordinates_asked";
+    const DIFFERING: &str = "a_differing_claim_is_refused_before_any_exchange";
+    const EXCEPTIONAL: &str = "an_exceptional_run_presents_the_exceptional_subject";
+    const LIMIT: &str = "more_coordinates_than_the_limit_are_refused_before_the_exchange";
+    further_stubs_fail_exactly(
+        "grant source",
+        &names(&grant_source_scenarios::<FakeGrantRig>()),
+        &[
+            (Grants::CommitGrantHasTheStageScope, &[COVERS]),
+            (Grants::CommitGrantDropsACoordinate, &[COVERS]),
+            (Grants::SkipsClaimsOutsideStage, &[DIFFERING, EXCEPTIONAL]),
+            (Grants::ClaimsMatchedBySubstring, &[DIFFERING]),
+            (Grants::NoPinnedClaimIsIssued, &[DIFFERING]),
+            (Grants::ExceptionalIgnoresEnvironment, &[DIFFERING]),
+            (Grants::ExceptionalIgnoresAudienceAndPinned, &[DIFFERING]),
+            (Grants::LimitIsCheckedForStageOnly, &[LIMIT]),
+        ],
+        |flaw| run_grant_source_kit(&FakeGrantRig::flawed(flaw)),
+    );
 }
 
 fn further_output_files() {
@@ -85,6 +152,7 @@ fn further_output_files() {
     const KINDS: &str = "a_listing_names_the_kind_of_every_entry";
     const REFUSED: &str = "listing_a_file_and_reading_a_directory_or_a_symlink_are_refused";
     const STAT: &str = "stat_tells_a_file_a_directory_a_symlink_and_nothing_apart";
+    const DESCENDED: &str = "a_listed_symlink_is_never_descended";
     further_stubs_fail_exactly(
         "output files",
         &names(&output_files_scenarios::<FakeFilesRig>()),
@@ -99,6 +167,8 @@ fn further_output_files() {
             (Files::ListOfSymlinkToDirFollows, &[REFUSED]),
             (Files::TrailingSlashFollowsRead, &[REFUSED]),
             (Files::TrailingSlashFollowsStat, &[STAT]),
+            (Files::ReadRefusesDotDotNames, &[READ_THROUGH]),
+            (Files::FollowsNestedLinks, &[DESCENDED]),
         ],
         |flaw| run_output_files_kit(&FakeFilesRig::flawed(flaw)),
     );
@@ -130,6 +200,8 @@ fn further_build_system() {
     const INHERITS: &str = "nothing_is_inherited_from_the_process_environment";
     const PLACEHOLDERS: &str = "placeholders_are_substituted_in_flag_and_environment_values";
     const STAMP: &str = "the_stamp_reaches_a_build_only_through_placeholders";
+    const ONE_OUTPUT: &str = "a_build_lists_exactly_one_output";
+    const SYMLINK: &str = "a_symlink_in_an_output_is_refused";
     let scenarios = names(&build_system_scenarios::<FakeBuildRig>());
     for kind in [BuildSystemKind::Buck2, BuildSystemKind::Bazel] {
         further_stubs_fail_exactly(
@@ -146,6 +218,14 @@ fn further_build_system() {
                     Build::TestVerbDropsTheEnvironment,
                     &[REPLACES, INHERITS, PLACEHOLDERS],
                 ),
+                (
+                    Build::BaseFlagsRepeatedAfterTheOwnedFlag,
+                    &[FLAGS, "ucdk_owned_flags_come_after_the_authors"],
+                ),
+                (Build::DirectoryIsListedAsAFile, &[ONE_OUTPUT]),
+                (Build::DirectoryOutputIsRefused, &[ONE_OUTPUT, COPY_OUT]),
+                (Build::NestedSymlinkIsAccepted, &[SYMLINK]),
+                (Build::CopyOutOfADirectoryEscapes, &[COPY_OUT]),
             ],
             |flaw| run_build_system_kit(&FakeBuildRig::flawed(kind, flaw)),
         );
@@ -169,6 +249,10 @@ fn further_publisher() {
     const NEWEST: &str = "newest_lists_every_held_coordinate_of_the_name";
     const ABORT: &str = "abort_gives_staged_state_back_and_never_touches_a_committed_coordinate";
     const PHASE: &str = "a_grant_of_the_wrong_phase_is_denied_and_nothing_happens";
+    const ABSENT: &str = "observe_absent_is_not_an_error";
+    const LIST: &str = "list_may_lag_but_observe_is_exact";
+    const DECLARED: &str =
+        "observe_with_the_declared_set_finds_staged_state_addressed_by_the_group_of_that_set";
     further_stubs_fail_exactly(
         "publisher",
         &names(&publisher_scenarios::<FakePublisherRig>()),
@@ -186,6 +270,27 @@ fn further_publisher() {
             (Registry::YankIgnoresThePhase, &[PHASE]),
             (Registry::StageIgnoresCoverage, &[PHASE]),
             (Registry::CommitIgnoresCoverage, &[PHASE]),
+            (Registry::StrangerMayStage, &[PHASE]),
+            (Registry::StrangerMayCommit, &[PHASE]),
+            (Registry::StrangerMayAbort, &[PHASE]),
+            (Registry::StrangerMayYank, &[PHASE]),
+            (Registry::PrivateTakesAForeignReadGrant, &[PRIVATE]),
+            (Registry::PrivateTakesAnExpiredReadGrant, &[PRIVATE]),
+            (Registry::PrivateTakesAnUncoveredReadGrant, &[PRIVATE]),
+            (Registry::ObserveIgnoresVersion, &[ABSENT]),
+            (Registry::ObserveIgnoresPlatform, &[ABSENT]),
+            (Registry::ObserveIgnoresChannel, &[ABSENT]),
+            (Registry::FetchIgnoresVersion, &[ABSENT]),
+            (Registry::FetchIgnoresPlatform, &[ABSENT]),
+            (Registry::FetchIgnoresChannel, &[ABSENT]),
+            (Registry::NewestDropsTheStamp, &[NEWEST]),
+            (Registry::NewestWrongDigest, &[NEWEST]),
+            (Registry::NewestDropsTheExceptionalMark, &[NEWEST]),
+            (Registry::ListDropsTheStamp, &[LIST]),
+            (Registry::ListWrongDigest, &[LIST]),
+            (Registry::ListIgnoresTheChannel, &[LIST]),
+            (Registry::ListIgnoresThePrefix, &[LIST]),
+            (Registry::ObserveDropsAForeignSet, &[DECLARED]),
         ],
         |flaw| run_publisher_kit(&FakePublisherRig::flawed(flaw)),
     );

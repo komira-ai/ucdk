@@ -71,6 +71,17 @@ pub enum Flaw {
     QueryVerbInheritsTheEnvironment,
     /// A Bazel `Info` command carries the build number of the stamp as a flag nobody wrote.
     InfoVerbLeaksTheStamp,
+    /// A directory output is listed as a file.
+    DirectoryIsListedAsAFile,
+    /// A build whose output is a directory is refused.
+    DirectoryOutputIsRefused,
+    /// A build whose output is a directory with a symlink below its top level answers the
+    /// directory.
+    NestedSymlinkIsAccepted,
+    /// `copy_out` of a directory also writes a path that climbs out of the entry.
+    CopyOutOfADirectoryEscapes,
+    /// A `Test` command repeats the base flags after the flag ucdk owns.
+    BaseFlagsRepeatedAfterTheOwnedFlag,
 }
 
 /// The time on the clock of a rig before anything moves it.
@@ -117,6 +128,11 @@ impl BuildSystemRig for FakeBuildRig {
             BuildWorld::NoOutput => fake.no_output(BUILD_LABEL),
             BuildWorld::TwoOutputs => fake.two_outputs(BUILD_LABEL),
             BuildWorld::SymlinkInOutput => fake.symlink_in_output(BUILD_LABEL),
+            BuildWorld::DirectoryOutput => fake.directory_output(BUILD_LABEL),
+            BuildWorld::SymlinkInDirectory => {
+                fake.directory_output(BUILD_LABEL);
+                fake.symlink_in_output(BUILD_LABEL);
+            }
             BuildWorld::BuildFails { tail } => {
                 fake.fail_at_call(1);
                 fake.failure_tail(tail);
@@ -223,6 +239,10 @@ impl BuildSystem for Flawed {
                 Some(Flaw::BaseEnvironmentWins)
             }
             (Some(Flaw::TestVerbTargetFlagsFirst), Verb::Test) => Some(Flaw::TargetFlagsFirst),
+            (Some(Flaw::BaseFlagsRepeatedAfterTheOwnedFlag), Verb::Test) => {
+                command.argv.push("--base-one".to_owned());
+                None
+            }
             (Some(Flaw::InfoVerbLeaksTheStamp), Verb::Info) => Some(Flaw::StampLeaksIntoTheCommand),
             (Some(Flaw::TestVerbDropsTheEnvironment), Verb::Test) => {
                 command.env.clear();
@@ -296,6 +316,25 @@ impl BuildSystem for Flawed {
             shape: Shape::File,
         };
         match (self.flaw, result) {
+            (Some(Flaw::DirectoryIsListedAsAFile), Ok(mut located))
+                if self.world == BuildWorld::DirectoryOutput =>
+            {
+                located[0].shape = Shape::File;
+                Ok(located)
+            }
+            (Some(Flaw::DirectoryOutputIsRefused), Ok(_))
+                if self.world == BuildWorld::DirectoryOutput =>
+            {
+                Err(SeamError::Refused(Reason::BuildOutput))
+            }
+            (Some(Flaw::NestedSymlinkIsAccepted), Err(SeamError::Refused(Reason::BuildOutput)))
+                if self.world == BuildWorld::SymlinkInDirectory =>
+            {
+                Ok(vec![Located {
+                    shape: Shape::Directory,
+                    ..made
+                }])
+            }
             (Some(Flaw::ListsTheOutputTwice), Ok(mut located))
                 if self.world == BuildWorld::Normal =>
             {
@@ -369,7 +408,8 @@ impl BuildSystem for Flawed {
         let mut writer = Suffixed {
             into,
             suffix,
-            escape: self.is(Flaw::CopyOutEscapes),
+            escape: self.is(Flaw::CopyOutEscapes)
+                || (self.is(Flaw::CopyOutOfADirectoryEscapes) && out.shape == Shape::Directory),
             replace,
             extra: self.is(Flaw::CopyOutWritesAnExtraFile),
         };

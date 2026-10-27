@@ -417,6 +417,60 @@ fn observe_absent_is_not_an_error<R: PublisherRig>(rig: &R) {
         Presence::Absent,
         "a coordinate nobody wrote",
     );
+    a_held_coordinate_does_not_answer_for_one_that_differs_in_a_field(rig);
+}
+
+/// A coordinate is the whole of its five fields: the one held that differs from the one asked
+/// for in the version, the platform or the channel is not it, to `observe` or to `fetch`.
+fn a_held_coordinate_does_not_answer_for_one_that_differs_in_a_field<R: PublisherRig>(rig: &R) {
+    let mut p = rig.publisher(&ChannelShape::staging());
+    let held = coordinate("a");
+    publish(rig, &mut p, &Set::at(vec![held.clone()]));
+    present_held(stranger(&mut p, &held));
+    let others = [
+        (
+            "version",
+            Coordinate {
+                version: "1.2.4".to_owned(),
+                ..held.clone()
+            },
+        ),
+        (
+            "platform",
+            Coordinate {
+                platform: "darwin-arm64".to_owned(),
+                ..held.clone()
+            },
+        ),
+        (
+            "channel",
+            Coordinate {
+                channel: "beta".to_owned(),
+                ..held.clone()
+            },
+        ),
+    ];
+    for (field, asked) in &others {
+        same(
+            stranger(&mut p, asked),
+            Presence::Absent,
+            &format!("a coordinate that differs from a held one in its {field}"),
+        );
+        let grant = rig.grant(&p, GrantPhase::Read, std::slice::from_ref(asked));
+        same(
+            must(
+                p.observe(&grant, asked, &[]),
+                "an observe with a grant of a coordinate that differs",
+            ),
+            Presence::Absent,
+            &format!("a granted observe of a coordinate that differs in its {field}"),
+        );
+        same(
+            fetched(rig, &mut p, asked),
+            None,
+            &format!("the bytes of a coordinate that differs from a held one in its {field}"),
+        );
+    }
 }
 
 fn stage_then_observe_returns_staged_with_the_same_digest<R: PublisherRig>(rig: &R) {
@@ -704,4 +758,46 @@ fn list_may_lag_but_observe_is_exact<R: PublisherRig>(rig: &R) {
         true,
         "a listing names only what is held",
     );
+    a_listing_names_only_what_is_held_in_its_scope(rig);
+}
+
+/// A listing may leave coordinates out, but what it names is held, in the channel and under
+/// the prefix of its scope, and carries what the registry holds beside each.
+fn a_listing_names_only_what_is_held_in_its_scope<R: PublisherRig>(rig: &R) {
+    let mut p = rig.publisher(&ChannelShape::staging());
+    let mut set = Set::at(vec![
+        coordinate("a"),
+        coordinate("ab"),
+        coordinate("b"),
+        Coordinate {
+            channel: "beta".to_owned(),
+            ..coordinate("a")
+        },
+    ]);
+    set.held.exceptional = true;
+    publish(rig, &mut p, &set);
+    for (channel, prefix) in [("stable", "a"), ("stable", ""), ("beta", "a")] {
+        let scope = ListScope {
+            channel: channel.to_owned(),
+            prefix: prefix.to_owned(),
+        };
+        let grant = rig.grant(&p, GrantPhase::Read, &set.coords);
+        let listed = must(p.list(&grant, &scope), "list");
+        for entry in listed {
+            let c = &entry.coordinate;
+            same(
+                set.coords.contains(c) & (c.channel == channel) & c.name.starts_with(prefix),
+                true,
+                &format!("{c:?} listed for the channel {channel:?} and the prefix {prefix:?}"),
+            );
+            same(
+                entry.held,
+                Held {
+                    digest: sha(c.name.as_bytes()),
+                    ..set.held.clone()
+                },
+                &format!("what a listing holds beside {c:?}"),
+            );
+        }
+    }
 }

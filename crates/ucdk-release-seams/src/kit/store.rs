@@ -73,6 +73,10 @@ pub fn store_scenarios<R: StoreRig>() -> Vec<Scenario<R>> {
 fn an_entry_reads_back_what_was_written<R: StoreRig>(rig: &R) {
     let mut store = rig.store();
     let k = key("build", "g1", "tool");
+    // Bytes that are not text, a file past any buffer a store might size at a few kilobytes
+    // and an empty file are entries like any other.
+    let binary: &[u8] = &[0xff, 0xfe, 0x00, 0x80, 0xc3, 0x28];
+    let big: Vec<u8> = (0..=255u8).cycle().take(10_000).collect();
     {
         let mut writer = must(store.begin(&k), "begin");
         must(writer.put_file("tool", b"bytes"), "put_file");
@@ -80,7 +84,36 @@ fn an_entry_reads_back_what_was_written<R: StoreRig>(rig: &R) {
             writer.put_file("dir/inner", b"inner"),
             "put_file of a nested path",
         );
+        must(writer.put_file("binary", binary), "put_file of bytes");
+        must(writer.put_file("big", &big), "put_file of a large file");
+        must(writer.put_file("empty", b""), "put_file of an empty file");
     }
+    for (rel, want) in [
+        ("binary", binary),
+        ("big", big.as_slice()),
+        ("empty", b"".as_slice()),
+    ] {
+        same(
+            must(store.get(&k, rel), "get"),
+            Some(want.to_vec()),
+            &format!("the bytes of {rel}"),
+        );
+    }
+    // The order is the business of `an_entry_is_listed_exactly`.
+    let mut listed = must(store.files(&k), "files");
+    listed.sort();
+    same(
+        listed,
+        ["big", "binary", "dir/inner", "empty", "tool"]
+            .map(str::to_owned)
+            .to_vec(),
+        "the paths of the entry, the empty file among them",
+    );
+    same(
+        must(store.get(&k, "dir"), "get"),
+        None,
+        "a directory of the entry is no file",
+    );
     same(
         must(store.get(&k, "tool"), "get"),
         Some(b"bytes".to_vec()),
@@ -170,8 +203,10 @@ fn paths_that_escape_an_entry_are_refused<R: StoreRig>(rig: &R) {
     let k = key("build", "g1", "tool");
     {
         let mut writer = must(store.begin(&k), "begin");
+        must(writer.put_file("x", b"safe"), "put_file");
         for bad in [
-            "", ".", "..", "../x", "a/../b", "/abs", "a//b", "a\\b", "a\nb",
+            "", ".", "..", "../x", "a/../b", "./c", "/abs", "a//b", "a/", "a\\b", "a\nb", "a\0b",
+            "a\tb",
         ] {
             let refusal = must_err(writer.put_file(bad, b"x"), &format!("put_file of {bad:?}"));
             same(
@@ -183,9 +218,17 @@ fn paths_that_escape_an_entry_are_refused<R: StoreRig>(rig: &R) {
     }
     same(
         must(store.files(&k), "files"),
-        Vec::new(),
-        "the files after only refused paths",
+        vec!["x".to_owned()],
+        "the files after refused paths: only the good one",
     );
+    // A path nobody wrote is nothing, however it climbs or spells the file that is there.
+    for climbing in ["../x", "a/../x", "./x", "/x"] {
+        same(
+            matches!(store.get(&k, climbing), Ok(None) | Err(_)),
+            true,
+            &format!("get of {climbing:?} reads no file"),
+        );
+    }
     same(
         must(store.keys(), "keys"),
         vec![k],
