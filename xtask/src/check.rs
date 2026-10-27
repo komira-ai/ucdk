@@ -158,6 +158,11 @@ pub fn run(root: &Path, runner: &dyn Runner, event: &Event, flag: Option<&str>) 
             lint::check_pr_text(event),
             "title and body scanned".to_owned(),
         ),
+        (
+            "wall-clock",
+            lint::check_wall_clock(&files),
+            format!("{file_count} scanned"),
+        ),
     ];
     gates.extend(commit_gates(root, runner, event, flag));
     gates

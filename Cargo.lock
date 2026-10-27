@@ -613,6 +613,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucdk-release-fake"
+version = "0.0.0"
+dependencies = [
+ "sha2",
+ "ucdk-core",
+ "ucdk-release",
+ "ucdk-release-proto",
+ "ucdk-release-seams",
+]
+
+[[package]]
 name = "ucdk-release-proto"
 version = "0.0.0"
 dependencies = [
@@ -620,6 +631,14 @@ dependencies = [
  "prost-build",
  "prost-reflect",
  "protox",
+]
+
+[[package]]
+name = "ucdk-release-seams"
+version = "0.0.0"
+dependencies = [
+ "ucdk-release",
+ "ucdk-release-proto",
 ]
 
 [[package]]

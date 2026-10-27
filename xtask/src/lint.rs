@@ -411,6 +411,44 @@ pub fn check_tree(files: &[(String, String)]) -> Vec<Finding> {
         .collect()
 }
 
+/// The one file of production code that reads the wall clock: the home of `SystemClock`.
+pub const CLOCK_HOME: &str = "crates/ucdk-ledger/src/lease.rs";
+
+/// What reads the wall clock, or a monotonic one.
+const CLOCK_READS: [&str; 2] = ["SystemTime::now", "Instant::now"];
+
+/// Whether `path` is production source: a `.rs` file under the `src` directory of a crate.
+fn is_production_source(path: &str) -> bool {
+    path.ends_with(".rs") && path.starts_with("crates/") && path.split('/').nth(2) == Some("src")
+}
+
+/// The wall-clock rule: `SystemTime::now` and `Instant::now` are read in production code only
+/// in [`CLOCK_HOME`], so time reaches every other crate through the `Clock` it is given and a
+/// test moves it by hand. Test code, which is a file outside `src` or what follows a
+/// `#[cfg(test)]` line of one, and comment lines are not production code.
+pub fn check_wall_clock(files: &[(String, String)]) -> Vec<Finding> {
+    files
+        .iter()
+        .filter(|(path, _)| is_production_source(path) && path != CLOCK_HOME)
+        .flat_map(|(path, text)| {
+            text.lines()
+                .enumerate()
+                .take_while(|(_, line)| line.trim() != "#[cfg(test)]")
+                .filter(|(_, line)| {
+                    !line.trim_start().starts_with("//")
+                        && CLOCK_READS.iter().any(|read| line.contains(read))
+                })
+                .map(move |(n, _)| {
+                    Finding::new(
+                        "wall-clock",
+                        format!("{path}:{}", n + 1),
+                        format!("the clock is read only in {CLOCK_HOME}; take a `Clock`"),
+                    )
+                })
+        })
+        .collect()
+}
+
 /// The name part of a trailer that carries an identity the lint lets through: the sign-off of
 /// the commit's own author (`Signed-off-by: Name <author email>`), and the assistant's no-reply
 /// co-author line. The address must be exactly that one; the name is still scanned by the rules.

@@ -1,0 +1,21 @@
+[package]
+name = "ucdk-release-seams"
+description = "The seams of a release: the build system, the process runner, the output files, the artifact store, the publisher, the grant source and the source, with the classified error, the pause and the heartbeat every one of them shares."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Marks a crate that holds no I/O, no wall clock and no HashMap: `cargo xtask check` requires
+# the deny-list clippy.toml next to its manifest.
+[package.metadata.ucdk]
+pure = true
+
+[dependencies]
+ucdk-release = { path = "../ucdk-release" }
+ucdk-release-proto = { path = "../ucdk-release-proto" }
+
+[lints]
+workspace = true

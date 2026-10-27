@@ -8,6 +8,8 @@ Pre-release, not usable. See [CONTRIBUTING.md](CONTRIBUTING.md).
 - `crates/ucdk-ledger`: the ledger: one document with compare-and-swap writes, a lease and a fence, in memory or in a file.
 - `crates/ucdk-release-proto`: the `ucdk.release.v1` messages: a release machine, what a build produces, and what a run reports.
 - `crates/ucdk-release`: the release model: reading a machine against its rules, the text rules of its flags and environment, and the selection of what a run does.
+- `crates/ucdk-release-seams`: the seams of a release (build system, process runner, output files, artifact store, publisher, grant source, source) with the classified error, the pause and the heartbeat.
+- `crates/ucdk-release-fake`: working in-memory implementations of those seams, with fault injection and call logs.
 - `crates/ucdk-api`: the `ucdk.api.v1` messages and the one function that shows a ledger.
 - `crates/ucdk-capi`: the C ABI, a shared library of five functions.
 - `crates/ucdk-codegen`: the generator of the Python and TypeScript SDK sources.

@@ -53,7 +53,7 @@ fn failed(gates: &[xtask::check::Gate]) -> Vec<&str> {
         .collect()
 }
 
-const STATIC_GATES: [&str; 14] = [
+const STATIC_GATES: [&str; 15] = [
     "tools",
     "tree",
     "fmt",
@@ -68,6 +68,7 @@ const STATIC_GATES: [&str; 14] = [
     "sdk-fresh",
     "public-lint tree",
     "public-lint pull request text",
+    "wall-clock",
 ];
 
 #[test]
@@ -116,7 +117,7 @@ fn check_runs_every_gate_even_after_one_fails() {
         "{text}"
     );
     assert!(
-        text.ends_with("== xtask check: 2 of 14 gates failed\n"),
+        text.ends_with("== xtask check: 2 of 15 gates failed\n"),
         "{text}"
     );
     assert_eq!(
@@ -156,7 +157,7 @@ fn a_pull_request_adds_the_sign_off_and_commit_message_gates() {
         ..Fake::default()
     };
     let gates = run(&root, &unsigned, &pull_request("base1"), None);
-    assert_eq!(names(&gates)[14..], ["dco", "commit-message lint"]);
+    assert_eq!(names(&gates)[15..], ["dco", "commit-message lint"]);
     assert_eq!(failed(&gates), ["dco"]);
     assert!(
         unsigned
@@ -192,7 +193,7 @@ fn a_pull_request_without_a_base_or_with_an_unreadable_range_fails() {
     let root = project("check-pr-errors");
     let gates = run(&root, &Fake::default(), &pull_request(""), None);
     assert_eq!(failed(&gates), ["dco"]);
-    assert_eq!(gates[14].1[0].rule, "dco-no-base");
+    assert_eq!(gates[15].1[0].rule, "dco-no-base");
 
     let broken = Fake {
         fail_on: vec!["git log"],
@@ -200,7 +201,7 @@ fn a_pull_request_without_a_base_or_with_an_unreadable_range_fails() {
     };
     let gates = run(&root, &broken, &pull_request("base1"), None);
     assert_eq!(failed(&gates), ["dco"]);
-    assert_eq!(gates[14].1[0].rule, "git");
+    assert_eq!(gates[15].1[0].rule, "git");
 }
 
 #[test]

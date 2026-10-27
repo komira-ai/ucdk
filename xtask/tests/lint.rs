@@ -6,7 +6,9 @@ mod common;
 
 use xtask::dco::CommitInfo;
 use xtask::event::Event;
-use xtask::lint::{check_commits, check_pr_text, check_tree, scan_text};
+use xtask::lint::{
+    CLOCK_HOME, check_commits, check_pr_text, check_tree, check_wall_clock, scan_text,
+};
 use xtask::tree::read_tree;
 
 fn join(parts: &[&str]) -> String {
@@ -31,6 +33,52 @@ fn commit(author: &str, message: &str) -> CommitInfo {
         author_email: author.to_owned(),
         message: message.to_owned(),
     }
+}
+
+#[test]
+fn wall_clock_is_read_only_in_system_clock() {
+    let read = join(&["let at = std::time::System", "Time::now();\n"]);
+    let monotonic = join(&["let at = std::time::Inst", "ant::now();\n"]);
+    let source = |path: &str, text: &str| file(path, text);
+    let rules = |files: &[(String, String)]| -> Vec<(String, &'static str)> {
+        check_wall_clock(files)
+            .into_iter()
+            .map(|f| (f.subject, f.rule))
+            .collect()
+    };
+    // Production code of any crate but the home of the clock is refused, either reader.
+    let refused = rules(&[
+        source(
+            "crates/ucdk-release/src/a.rs",
+            &format!("fn f() {{\n{read}}}\n"),
+        ),
+        source("crates/ucdk-cli/src/b/c.rs", &monotonic),
+    ]);
+    assert_eq!(
+        refused,
+        [
+            ("crates/ucdk-release/src/a.rs:2".to_owned(), "wall-clock"),
+            ("crates/ucdk-cli/src/b/c.rs:1".to_owned(), "wall-clock"),
+        ]
+    );
+    // The home of the clock, tests, other languages, other directories and comments are not.
+    let allowed = rules(&[
+        source(CLOCK_HOME, &read),
+        source("crates/ucdk-release/tests/a.rs", &read),
+        source("crates/ucdk-release/src/a.md", &read),
+        source("crates/ucdk-release/build.rs", &read),
+        source("xtask/src/a.rs", &read),
+        source("crates/ucdk-release/src/doc.rs", &format!("// {read}")),
+        source(
+            "crates/ucdk-release/src/unit.rs",
+            &format!("fn f() {{}}\n#[cfg(test)]\nmod t {{\n{read}}}\n"),
+        ),
+    ]);
+    assert!(allowed.is_empty(), "{allowed:?}");
+    // The repository itself holds the rule.
+    let tree = read_tree(&xtask::workspace_root()).unwrap();
+    assert_eq!(check_wall_clock(&tree), []);
+    assert!(tree.iter().any(|(path, _)| path == CLOCK_HOME));
 }
 
 #[test]
