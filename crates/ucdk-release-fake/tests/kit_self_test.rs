@@ -49,6 +49,12 @@ fn further_build_system() {
     const ONE_OUTPUT: &str = "a_build_lists_exactly_one_output";
     const SYMLINK: &str = "a_symlink_in_an_output_is_refused";
     const RUN_SPECIFIC: &str = "nothing_run_specific_in_the_bytes";
+    const OWNED: &str = "ucdk_owned_flags_come_after_the_authors";
+    const FAILED_BUILD: &str = "a_failed_build_is_permanent_with_the_tail_of_its_output";
+    const UNSTARTABLE: &str = "unstartable_is_not_failed";
+    const NOTHING_RAN: &str = "a_test_target_that_runs_nothing_is_not_a_pass";
+    const FAILING: &str = "a_failing_test_target_is_not_a_pass";
+    const BEATS: &str = "the_build_system_beats_on_progress_and_stops_when_told";
     let scenarios = names(&build_system_scenarios::<FakeBuildRig>());
     for kind in [BuildSystemKind::Buck2, BuildSystemKind::Bazel] {
         further_stubs_fail_exactly(
@@ -81,6 +87,32 @@ fn further_build_system() {
                 (Build::CopyOutOfADirectoryEscapes, &[COPY_OUT]),
                 (Build::CopyOutOfADirectoryWritesGarbage, &[SAME_BYTES]),
                 (Build::CopyOutOfADirectoryCarriesTheClock, &[RUN_SPECIFIC]),
+                // The command a test runs is not the one it layers.
+                (Build::TestRunsOtherCommand, &[SAME_BYTES]),
+                // What ucdk owns in a command, whatever the verb.
+                (Build::DropsTheLabel, &[OWNED]),
+                (Build::WrongVerbWord, &[OWNED]),
+                (Build::BareReportFlag, &[OWNED]),
+                (Build::SwappedReportFlagNames, &[OWNED]),
+                (Build::DuplicatedReportFlag, &[OWNED]),
+                (Build::IgnoresConfigAndMode, &[SAME_BYTES, OWNED]),
+                (Build::TestWithoutReportAccepted, &[OWNED]),
+                // What the authors wrote.
+                (Build::DedupsFlags, &[FLAGS]),
+                (Build::UnknownPlaceholderPassedThrough, &[PLACEHOLDERS]),
+                (Build::NoBraceUnescape, &[PLACEHOLDERS]),
+                (Build::EnvOnlyVersionPlaceholder, &[PLACEHOLDERS]),
+                (Build::BaseFlagPlatformUnsubstituted, &[PLACEHOLDERS]),
+                (Build::LeaksTheRevision, &[STAMP]),
+                // What a test and a failure say.
+                (Build::RanInflated, &[NOTHING_RAN, FAILING]),
+                (Build::TestTailGarbage, &[FAILING]),
+                (Build::SkippedCountedAsRan, &[NOTHING_RAN]),
+                (Build::UnstartableTestIsPermanent, &[UNSTARTABLE]),
+                (Build::FailurePadded, &[FAILED_BUILD]),
+                // The heartbeat.
+                (Build::CapsBeatsAtThree, &[BEATS]),
+                (Build::KeepsBeatingAfterStop, &[BEATS]),
             ],
             |flaw| run_build_system_kit(&FakeBuildRig::flawed(kind, flaw)),
         );
@@ -92,6 +124,8 @@ fn further_build_system() {
         &[
             (Build::QueryVerbInheritsTheEnvironment, &[INHERITS]),
             (Build::InfoVerbLeaksTheStamp, &[STAMP]),
+            (Build::QueryRunsOtherCommand, &[SAME_BYTES]),
+            (Build::InfoRunsOtherCommand, &[SAME_BYTES]),
         ],
         |flaw| run_build_system_kit(&FakeBuildRig::flawed(BuildSystemKind::Bazel, flaw)),
     );

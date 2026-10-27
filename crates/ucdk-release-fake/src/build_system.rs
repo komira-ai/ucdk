@@ -31,6 +31,7 @@ struct Faults {
     test_fails: BTreeSet<String>,
     report_missing: BTreeSet<String>,
     report_unparseable: BTreeSet<String>,
+    report_skipped: BTreeSet<String>,
     beats: Option<(u32, Duration)>,
     silent_for: Option<Duration>,
 }
@@ -72,6 +73,17 @@ fn render(label: &str, command: &Command) -> Vec<u8> {
     text.into_bytes()
 }
 
+/// A report of `kind` whose results are all skipped, or of a target that was not built, so none
+/// of them ran.
+fn skipped_report(kind: BuildSystemKind) -> &'static [u8] {
+    match kind {
+        BuildSystemKind::Bazel => {
+            br#"{"testSummary":{"overallStatus":"FAILED_TO_BUILD","totalRunCount":4}}"#
+        }
+        _ => br#"{"TestResult":{"status":"SKIP"}}"#,
+    }
+}
+
 impl FakeBuildSystem {
     /// A build system of `kind` whose beats and silences move `clock`.
     pub fn new(kind: BuildSystemKind, clock: &ManualClock) -> Self {
@@ -93,8 +105,9 @@ impl FakeBuildSystem {
         self.faults.fail_at_call = Some(n);
     }
 
-    /// What an invocation that exits nonzero prints last; the `Permanent` answer carries it, as
-    /// the seam promises the tail of the output.
+    /// What an invocation that exits nonzero prints last; the `Permanent` answer of a build and
+    /// the tail of a test that did not pass carry it, as the seam promises the tail of the
+    /// output.
     pub fn failure_tail(&mut self, tail: &str) {
         self.faults.failure_tail = tail.to_owned();
     }
@@ -164,6 +177,11 @@ impl FakeBuildSystem {
     /// The report of the test target `label` cannot be parsed.
     pub fn report_unparseable(&mut self, label: &str) {
         self.faults.report_unparseable.insert(label.to_owned());
+    }
+
+    /// The report of the test target `label` holds only results that are skipped or untested.
+    pub fn report_skipped_only(&mut self, label: &str) {
+        self.faults.report_skipped.insert(label.to_owned());
     }
 
     /// Each invocation beats `n` times, moving the clock by `step` before each beat.
@@ -286,6 +304,8 @@ impl BuildSystem for FakeBuildSystem {
             test_report::ran(self.kind, None)
         } else if self.faults.report_unparseable.contains(label) {
             test_report::ran(self.kind, Some(b"this is not a report"))
+        } else if self.faults.report_skipped.contains(label) {
+            test_report::ran(self.kind, Some(skipped_report(self.kind)))
         } else {
             u32::from(!self.faults.test_runs_nothing.contains(label))
         };
@@ -296,7 +316,10 @@ impl BuildSystem for FakeBuildSystem {
             tail: if passed {
                 format!("{label} passed")
             } else {
-                format!("{label} did not pass")
+                format!(
+                    "{label} did not pass, and printed last: {}",
+                    self.faults.failure_tail
+                )
             },
         })
     }

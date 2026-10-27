@@ -2,11 +2,13 @@
 //! The build-system rig: the fake build system in each world, and the stubs that break one
 //! promise of a build system in one world.
 
+use std::cell::Cell;
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use ucdk_core::{Clock, ManualClock};
 use ucdk_release_fake::FakeBuildSystem;
-use ucdk_release_proto::v1::{BuildSystemKind, Reason};
+use ucdk_release_proto::v1::{BuildSystem as Authored, BuildSystemKind, Reason, Target};
 use ucdk_release_seams::kit::{BUILD_LABEL, BuildSystemRig, BuildWorld};
 use ucdk_release_seams::{
     BuildSystem, Command, EntryWriter, Heartbeat, Invocation, Located, SeamError, Shape, Stop,
@@ -86,6 +88,53 @@ pub enum Flaw {
     CopyOutOfADirectoryWritesGarbage,
     /// The bytes `copy_out` writes for a directory carry the time of the run.
     CopyOutOfADirectoryCarriesTheClock,
+    /// A test runs a command other than the one it layers (the flags reversed, the base flags
+    /// gone, a variable of the process added).
+    TestRunsOtherCommand,
+    /// A Bazel build also runs a query with a variable of the process that it does not layer.
+    QueryRunsOtherCommand,
+    /// A Bazel build also runs an info call with a flag that it does not layer.
+    InfoRunsOtherCommand,
+    /// A command that is not a build loses its last argument (the label or the tail).
+    DropsTheLabel,
+    /// A command that is not a build says `build` where its verb word is.
+    WrongVerbWord,
+    /// A `Test` command names its report path without the flag.
+    BareReportFlag,
+    /// A `Test` command names its report with the other kind's flag.
+    SwappedReportFlagNames,
+    /// A `Test` command names its report twice.
+    DuplicatedReportFlag,
+    /// The config file and the mode are ignored.
+    IgnoresConfigAndMode,
+    /// A flag passed again is dropped the second time.
+    DedupsFlags,
+    /// A placeholder that does not exist, or a stray brace, passes through as written.
+    UnknownPlaceholderPassedThrough,
+    /// A doubled brace stays doubled.
+    NoBraceUnescape,
+    /// Only `{release_version}` is replaced in an environment value.
+    EnvOnlyVersionPlaceholder,
+    /// `{platform}` is left as written in a base flag.
+    BaseFlagPlatformUnsubstituted,
+    /// A `Test` command without a report path has a layering.
+    TestWithoutReportAccepted,
+    /// The revision is added as a flag nobody wrote to every command that is not a build.
+    LeaksTheRevision,
+    /// A test says it ran seven times what the report says.
+    RanInflated,
+    /// The tail of a failing test is not what it printed.
+    TestTailGarbage,
+    /// A report that holds only skipped results counts them as runs.
+    SkippedCountedAsRan,
+    /// The heartbeat gets no beat after the third.
+    CapsBeatsAtThree,
+    /// A `Stop` is answered with more beats, and with `LEASE_LOST` once the work is done.
+    KeepsBeatingAfterStop,
+    /// A test of a build system that cannot start is `Permanent`.
+    UnstartableTestIsPermanent,
+    /// A failed build answers all of its output, the head and then the tail.
+    FailurePadded,
 }
 
 /// The time on the clock of a rig before anything moves it.
@@ -124,6 +173,10 @@ pub struct Flawed {
     world: BuildWorld,
     clock: ManualClock,
     builds: u32,
+    /// The commands run, as the process under the build system was given them.
+    ran: Vec<Command>,
+    /// How many commands of the fake `ran` already holds.
+    synced: usize,
 }
 
 impl BuildSystemRig for FakeBuildRig {
@@ -141,13 +194,17 @@ impl BuildSystemRig for FakeBuildRig {
                 fake.directory_output(BUILD_LABEL);
                 fake.symlink_in_output(BUILD_LABEL);
             }
-            BuildWorld::BuildFails { tail } => {
+            BuildWorld::BuildFails { tail, .. } => {
                 fake.fail_at_call(1);
                 fake.failure_tail(tail);
             }
             BuildWorld::Unstartable => fake.unstartable(),
             BuildWorld::TestRunsNothing => fake.test_runs_nothing(BUILD_LABEL),
-            BuildWorld::TestFails => fake.test_fails(BUILD_LABEL),
+            BuildWorld::TestSkipsEverything => fake.report_skipped_only(BUILD_LABEL),
+            BuildWorld::TestFails { tail } => {
+                fake.test_fails(BUILD_LABEL);
+                fake.failure_tail(tail);
+            }
             BuildWorld::ReportMissing => fake.report_missing(BUILD_LABEL),
             BuildWorld::ReportUnparseable => fake.report_unparseable(BUILD_LABEL),
             BuildWorld::Progress { events } => fake.beats(*events, Duration::from_millis(1)),
@@ -158,6 +215,8 @@ impl BuildSystemRig for FakeBuildRig {
             world: world.clone(),
             clock: self.clock.clone(),
             builds: 0,
+            ran: Vec::new(),
+            synced: 0,
         }
     }
 
@@ -186,14 +245,46 @@ impl BuildSystemRig for FakeBuildRig {
         };
         vec![(path.to_owned(), text.into_bytes())]
     }
+
+    fn executed(&self, system: &Flawed) -> Vec<Command> {
+        system.ran.clone()
+    }
 }
 
-/// A heartbeat that never stops.
-struct NeverStops;
+/// How the heartbeat the build system was given reaches the fake.
+enum Beating {
+    Forwarded,
+    /// Nothing is forwarded.
+    Swallowed,
+    /// Only the first `n` beats are forwarded.
+    Capped(u32),
+    /// Every beat is forwarded and a `Stop` is remembered, not obeyed.
+    KeepsGoing,
+}
 
-impl Heartbeat for NeverStops {
+/// The heartbeat the fake sees: the caller's, tampered with as `how` says.
+struct Beat<'a> {
+    heartbeat: &'a dyn Heartbeat,
+    how: Beating,
+    given: Cell<u32>,
+    stopped: Cell<bool>,
+}
+
+impl Heartbeat for Beat<'_> {
     fn beat(&self) -> Result<(), Stop> {
-        Ok(())
+        self.given.set(self.given.get() + 1);
+        match self.how {
+            Beating::Forwarded => self.heartbeat.beat(),
+            Beating::Swallowed => Ok(()),
+            Beating::Capped(n) if self.given.get() > n => Ok(()),
+            Beating::Capped(_) => self.heartbeat.beat(),
+            Beating::KeepsGoing => {
+                if self.heartbeat.beat().is_err() {
+                    self.stopped.set(true);
+                }
+                Ok(())
+            }
+        }
     }
 }
 
@@ -223,6 +314,20 @@ impl EntryWriter for Suffixed<'_> {
     }
 }
 
+/// The report flag of each kind, as the prefix of the argument that names the path.
+const REPORT_FLAGS: [&str; 2] = ["--event-log=", "--build_event_json_file="];
+
+/// Puts `flag` among the flags of the authors, after the second base flag, where the checks of
+/// what comes before and after them do not look.
+fn insert_among_flags(command: &mut Command, flag: String) {
+    let at = command
+        .argv
+        .iter()
+        .position(|a| a == "--base-two")
+        .map_or(command.argv.len(), |i| i + 1);
+    command.argv.insert(at, flag);
+}
+
 impl Flawed {
     fn is(&self, flaw: Flaw) -> bool {
         self.flaw == Some(flaw)
@@ -231,15 +336,56 @@ impl Flawed {
     fn in_world(&self, flaw: Flaw, world: &BuildWorld) -> bool {
         self.is(flaw) && self.world == *world
     }
-}
 
-impl BuildSystem for Flawed {
-    fn kind(&self) -> BuildSystemKind {
-        self.inner.kind()
+    /// The system and target the build system layers (`running` false) or runs (`running`
+    /// true) for `inv`.
+    fn seen(&self, inv: &Invocation<'_>, running: bool) -> (Authored, Target) {
+        let mut system = inv.system.clone();
+        let mut target = inv.target.clone();
+        if self.is(Flaw::IgnoresConfigAndMode) {
+            system.config_file.clear();
+            system.mode.clear();
+        }
+        if running && self.is(Flaw::TestRunsOtherCommand) && inv.verb == Verb::Test {
+            system.flags.clear();
+            target.flags.reverse();
+            system.env.insert("HOME".to_owned(), "/root".to_owned());
+        }
+        (system, target)
     }
 
-    fn command(&self, inv: &Invocation<'_>) -> Result<Command, SeamError> {
-        let mut command = self.inner.command(inv)?;
+    /// How the heartbeat of a call reaches the fake in this world.
+    fn tampered<'a>(&self, heartbeat: &'a dyn Heartbeat) -> Beat<'a> {
+        let how = if matches!(self.world, BuildWorld::Progress { .. }) {
+            match self.flaw {
+                Some(Flaw::StopIsSwallowed) => Beating::Swallowed,
+                Some(Flaw::CapsBeatsAtThree) => Beating::Capped(3),
+                Some(Flaw::KeepsBeatingAfterStop) => Beating::KeepsGoing,
+                _ => Beating::Forwarded,
+            }
+        } else {
+            Beating::Forwarded
+        };
+        Beat {
+            heartbeat,
+            how,
+            given: Cell::new(0),
+            stopped: Cell::new(false),
+        }
+    }
+
+    /// Records the commands the fake ran since the last call, with the flaws of the layering.
+    fn sync(&mut self, inv: &Invocation<'_>) {
+        let fresh: Vec<Command> = self.inner.commands()[self.synced..].to_vec();
+        self.synced += fresh.len();
+        for mut command in fresh {
+            self.flaw_command(&mut command, inv);
+            self.ran.push(command);
+        }
+    }
+
+    /// The flaws of the layering, applied to a layered command of `inv`.
+    fn flaw_command(&self, command: &mut Command, inv: &Invocation<'_>) {
         // A flaw of one verb is the flaw of every verb, applied to that verb alone.
         let flaw = match (self.flaw, inv.verb) {
             (Some(Flaw::TestVerbInheritsTheEnvironment), Verb::Test)
@@ -294,9 +440,10 @@ impl BuildSystem for Flawed {
                 }
             }
             Some(Flaw::StampLeaksIntoTheCommand) => {
-                command
-                    .argv
-                    .push(format!("--build-number={}", inv.stamp.build_number));
+                insert_among_flags(
+                    command,
+                    format!("--build-number={}", inv.stamp.build_number),
+                );
             }
             Some(Flaw::OwnedFlagFirst) => {
                 if let Some(at) = command.argv.iter().position(|a| a.contains("/scratch/")) {
@@ -304,9 +451,118 @@ impl BuildSystem for Flawed {
                     command.argv.insert(2, owned);
                 }
             }
+            Some(Flaw::DedupsFlags) => {
+                let mut seen = BTreeSet::new();
+                command
+                    .argv
+                    .retain(|a| !a.starts_with("--") || a.len() == 2 || seen.insert(a.clone()));
+            }
+            Some(Flaw::NoBraceUnescape) => {
+                for arg in &mut command.argv {
+                    *arg = arg.replace("{x}", "{{x}}");
+                }
+                for (_, value) in &mut command.env {
+                    *value = value.replace("{e}", "{{e}}");
+                }
+            }
+            Some(Flaw::EnvOnlyVersionPlaceholder) => {
+                for (key, value) in &mut command.env {
+                    let raw = inv.target.env.get(key).or_else(|| inv.system.env.get(key));
+                    if let Some(raw) = raw {
+                        *value = raw.replace("{release_version}", &inv.stamp.version);
+                    }
+                }
+            }
+            Some(Flaw::BaseFlagPlatformUnsubstituted) => {
+                for arg in &mut command.argv {
+                    if arg == "--p=linux-x86_64" {
+                        "--p={platform}".clone_into(arg);
+                    }
+                }
+            }
+            Some(Flaw::LeaksTheRevision) if inv.verb != Verb::Build => {
+                insert_among_flags(command, format!("--revision={}", inv.revision));
+            }
+            Some(Flaw::DropsTheLabel) if inv.verb != Verb::Build => {
+                command.argv.pop();
+            }
+            Some(Flaw::WrongVerbWord) if inv.verb != Verb::Build => {
+                let word = match inv.verb {
+                    Verb::Query => "cquery",
+                    Verb::Info => "info",
+                    _ => "test",
+                };
+                if let Some(arg) = command.argv.iter_mut().find(|a| a.as_str() == word) {
+                    "build".clone_into(arg);
+                }
+            }
+            Some(Flaw::BareReportFlag) if inv.verb == Verb::Test => {
+                for arg in &mut command.argv {
+                    for flag in REPORT_FLAGS {
+                        if let Some(path) = arg.strip_prefix(flag) {
+                            *arg = path.to_owned();
+                            break;
+                        }
+                    }
+                }
+            }
+            Some(Flaw::SwappedReportFlagNames) if inv.verb == Verb::Test => {
+                for arg in &mut command.argv {
+                    for (flag, other) in [
+                        (REPORT_FLAGS[0], REPORT_FLAGS[1]),
+                        (REPORT_FLAGS[1], REPORT_FLAGS[0]),
+                    ] {
+                        if let Some(path) = arg.strip_prefix(flag) {
+                            *arg = format!("{other}{path}");
+                            break;
+                        }
+                    }
+                }
+            }
+            Some(Flaw::DuplicatedReportFlag) if inv.verb == Verb::Test => {
+                let at = command
+                    .argv
+                    .iter()
+                    .position(|a| REPORT_FLAGS.iter().any(|f| a.starts_with(f)));
+                if let Some(at) = at {
+                    let again = command.argv[at].clone();
+                    command.argv.insert(at, again);
+                }
+            }
             _ => {}
         }
-        Ok(command)
+    }
+}
+
+impl BuildSystem for Flawed {
+    fn kind(&self) -> BuildSystemKind {
+        self.inner.kind()
+    }
+
+    fn command(&self, inv: &Invocation<'_>) -> Result<Command, SeamError> {
+        let (system, target) = self.seen(inv, false);
+        let inv = Invocation {
+            system: &system,
+            target: &target,
+            ..*inv
+        };
+        let layered = self.inner.command(&inv);
+        let report_fits = inv.report.is_some() == (inv.verb == Verb::Test);
+        let accepts = (self.is(Flaw::TestWithoutReportAccepted)
+            && inv.verb == Verb::Test
+            && inv.report.is_none())
+            || (self.is(Flaw::UnknownPlaceholderPassedThrough) && report_fits);
+        match layered {
+            Err(_) if accepts => Ok(Command {
+                argv: Vec::new(),
+                env: Vec::new(),
+            }),
+            other => {
+                let mut command = other?;
+                self.flaw_command(&mut command, &inv);
+                Ok(command)
+            }
+        }
     }
 
     fn build(
@@ -315,12 +571,47 @@ impl BuildSystem for Flawed {
         heartbeat: &dyn Heartbeat,
     ) -> Result<Vec<Located>, SeamError> {
         self.builds += 1;
-        let swallowed = self.in_world(Flaw::StopIsSwallowed, &BuildWorld::Progress { events: 3 });
-        let result = if swallowed {
-            self.inner.build(inv, &NeverStops)
-        } else {
-            self.inner.build(inv, heartbeat)
+        let (system, target) = self.seen(inv, true);
+        let run = Invocation {
+            system: &system,
+            target: &target,
+            ..*inv
         };
+        let beat = self.tampered(heartbeat);
+        let result = self.inner.build(&run, &beat);
+        let result = if beat.stopped.get() {
+            Err(SeamError::Refused(Reason::LeaseLost))
+        } else {
+            result
+        };
+        self.sync(inv);
+        if matches!(
+            self.flaw,
+            Some(Flaw::QueryRunsOtherCommand | Flaw::InfoRunsOtherCommand)
+        ) && self.inner.kind() == BuildSystemKind::Bazel
+            && result.is_ok()
+        {
+            let verb = if self.is(Flaw::QueryRunsOtherCommand) {
+                Verb::Query
+            } else {
+                Verb::Info
+            };
+            let mut extra = self
+                .inner
+                .command(&Invocation {
+                    verb,
+                    report: None,
+                    ..*inv
+                })
+                .expect("the fake layers the invocation");
+            if verb == Verb::Query {
+                extra.env.push(("HOME".to_owned(), "/root".to_owned()));
+                extra.env.sort();
+            } else {
+                insert_among_flags(&mut extra, "--extra".to_owned());
+            }
+            self.ran.push(extra);
+        }
         let made = Located {
             label: BUILD_LABEL.to_owned(),
             path: OUTPUT_PATH.to_owned(),
@@ -368,6 +659,13 @@ impl BuildSystem for Flawed {
             (Some(Flaw::FailureHasNoTail), Err(SeamError::Permanent(_))) => {
                 Err(SeamError::Permanent("the build failed".to_owned()))
             }
+            (Some(Flaw::FailurePadded), Err(SeamError::Permanent(why))) => {
+                let head = match &self.world {
+                    BuildWorld::BuildFails { head, .. } => head.as_str(),
+                    _ => "",
+                };
+                Err(SeamError::Permanent(format!("{head}{why}")))
+            }
             (Some(Flaw::UnstartableIsPermanent), Err(SeamError::Unknown(why))) => {
                 Err(SeamError::Permanent(why))
             }
@@ -380,22 +678,48 @@ impl BuildSystem for Flawed {
         inv: &Invocation<'_>,
         heartbeat: &dyn Heartbeat,
     ) -> Result<TestOutcome, SeamError> {
-        let swallowed = self.in_world(Flaw::StopIsSwallowed, &BuildWorld::Progress { events: 3 });
-        let result = if swallowed {
-            self.inner.test(inv, &NeverStops)
-        } else {
-            self.inner.test(inv, heartbeat)
+        let (system, target) = self.seen(inv, true);
+        let run = Invocation {
+            system: &system,
+            target: &target,
+            ..*inv
         };
+        let beat = self.tampered(heartbeat);
+        let result = self.inner.test(&run, &beat);
+        let result = if beat.stopped.get() {
+            Err(SeamError::Refused(Reason::LeaseLost))
+        } else {
+            result
+        };
+        self.sync(inv);
         let passes = self.in_world(Flaw::NothingRanPasses, &BuildWorld::TestRunsNothing)
-            || self.in_world(Flaw::FailureIsAPass, &BuildWorld::TestFails)
             || self.in_world(
                 Flaw::UnparseableReportPasses,
                 &BuildWorld::ReportUnparseable,
-            );
-        result.map(|outcome| TestOutcome {
-            passed: outcome.passed || passes,
-            ..outcome
-        })
+            )
+            || (self.is(Flaw::FailureIsAPass)
+                && matches!(self.world, BuildWorld::TestFails { .. }));
+        match result {
+            Err(SeamError::Unknown(why)) if self.is(Flaw::UnstartableTestIsPermanent) => {
+                Err(SeamError::Permanent(why))
+            }
+            result => result.map(|outcome| {
+                let counted = self.is(Flaw::SkippedCountedAsRan)
+                    && self.world == BuildWorld::TestSkipsEverything;
+                let mut outcome = TestOutcome {
+                    passed: outcome.passed || passes || counted,
+                    ran: if counted { 1 } else { outcome.ran },
+                    ..outcome
+                };
+                if self.is(Flaw::RanInflated) && outcome.ran >= 1 {
+                    outcome.ran *= 7;
+                }
+                if self.is(Flaw::TestTailGarbage) && !outcome.passed {
+                    "zzz".clone_into(&mut outcome.tail);
+                }
+                outcome
+            }),
+        }
     }
 
     fn copy_out(&mut self, out: &Located, into: &mut dyn EntryWriter) -> Result<(), SeamError> {

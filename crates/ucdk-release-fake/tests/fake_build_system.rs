@@ -236,6 +236,28 @@ fn a_failed_invocation_carries_the_tail_it_printed() {
 }
 
 #[test]
+fn a_failing_test_carries_the_tail_it_printed_and_skipped_results_are_not_runs() {
+    let (system, target, stamp) = (system(), target(LABEL, &[]), stamp("1"));
+    for kind in [BuildSystemKind::Buck2, BuildSystemKind::Bazel] {
+        let clock = ManualClock::at(1_000);
+        let hb = FakeHeartbeat::new(&clock);
+        let mut fake = FakeBuildSystem::new(kind, &clock);
+        fake.test_fails(LABEL);
+        fake.failure_tail("FAILED 1 of 3");
+        let failed = fake
+            .test(&invocation(&system, &target, &stamp, Verb::Test), &hb)
+            .unwrap();
+        assert!(failed.tail.ends_with("FAILED 1 of 3"));
+        let mut fake = FakeBuildSystem::new(kind, &clock);
+        fake.report_skipped_only(LABEL);
+        let skipped = fake
+            .test(&invocation(&system, &target, &stamp, Verb::Test), &hb)
+            .unwrap();
+        assert_eq!((skipped.ran, skipped.passed), (0, false));
+    }
+}
+
+#[test]
 fn a_build_that_fails_dies_or_cannot_start() {
     let (system, target, stamp) = (system(), target(LABEL, &[]), stamp("1"));
     let (_, mut fake, hb) = fake();

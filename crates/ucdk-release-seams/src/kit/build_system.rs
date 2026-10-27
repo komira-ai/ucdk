@@ -31,14 +31,16 @@ pub enum BuildWorld {
     /// The build succeeds and lists one directory output with a symlink in it, below its top
     /// level.
     SymlinkInDirectory,
-    /// The build exits nonzero after printing `tail` last.
-    BuildFails { tail: String },
+    /// The build exits nonzero after printing `head` first and `tail` last.
+    BuildFails { head: String, tail: String },
     /// The build system's binary cannot be started.
     Unstartable,
     /// A test exits 0 and its report shows nothing ran.
     TestRunsNothing,
-    /// A test runs and fails.
-    TestFails,
+    /// A test exits 0 and its report holds results that are all skipped or untested.
+    TestSkipsEverything,
+    /// A test runs once and fails, printing `tail` last.
+    TestFails { tail: String },
     /// A test exits 0 and writes no report.
     ReportMissing,
     /// A test exits 0 and its report cannot be parsed.
@@ -64,6 +66,11 @@ pub trait BuildSystemRig {
     /// [`BuildWorld::DirectoryOutput`] (a directory). The rig says what the build wrote from
     /// what it scripted, never from what the build system under test answers.
     fn output_of(&self, inv: &Invocation<'_>, world: &BuildWorld) -> Vec<(String, Vec<u8>)>;
+
+    /// Every command `system` ran so far, in order, as the process under it was given it: the
+    /// argument vector and the environment of each child. A command that could not be layered is
+    /// never run, so it is not here.
+    fn executed(&self, system: &Self::System) -> Vec<Command>;
 }
 
 /// The worlds in which a build lists an output that `copy_out` copies: a file and a directory.
@@ -74,8 +81,21 @@ struct Case {
     system: Authored,
     target: Target,
     stamp: BuildStamp,
+    revision: String,
+    platform: String,
     kind: BuildSystemKind,
 }
+
+/// The flags the default case's authors wrote, in the order they must come: the base's, then the
+/// target's. `--shared` is written by both, so it is passed twice.
+const AUTHORED: [&str; 6] = [
+    "--base-one",
+    "--base-two",
+    "--shared",
+    "--target-one",
+    "--target-two",
+    "--shared",
+];
 
 impl Case {
     fn new(kind: BuildSystemKind) -> Self {
@@ -83,9 +103,13 @@ impl Case {
             system: Authored {
                 kind: kind as i32,
                 binary: "/tools/build".to_owned(),
-                config_file: String::new(),
-                mode: String::new(),
-                flags: vec!["--base-one".to_owned(), "--base-two".to_owned()],
+                config_file: "/cfg/build.rc".to_owned(),
+                mode: "opt".to_owned(),
+                flags: vec![
+                    "--base-one".to_owned(),
+                    "--base-two".to_owned(),
+                    "--shared".to_owned(),
+                ],
                 env: BTreeMap::from([
                     ("X".to_owned(), "base".to_owned()),
                     ("KEEP".to_owned(), "keep".to_owned()),
@@ -93,7 +117,11 @@ impl Case {
             },
             target: Target {
                 label: BUILD_LABEL.to_owned(),
-                flags: vec!["--target-one".to_owned(), "--target-two".to_owned()],
+                flags: vec![
+                    "--target-one".to_owned(),
+                    "--target-two".to_owned(),
+                    "--shared".to_owned(),
+                ],
                 env: BTreeMap::from([("X".to_owned(), "target".to_owned())]),
             },
             stamp: BuildStamp {
@@ -102,6 +130,8 @@ impl Case {
                 source_commit: "abc123".to_owned(),
                 timestamp_ms: 1700,
             },
+            revision: "0123".to_owned(),
+            platform: "linux-x86_64".to_owned(),
             kind,
         }
     }
@@ -120,8 +150,8 @@ impl Case {
             verb,
             report,
             stamp: &self.stamp,
-            revision: "0123",
-            platform: "linux-x86_64",
+            revision: &self.revision,
+            platform: &self.platform,
         }
     }
 }
@@ -145,27 +175,32 @@ fn layered<B: BuildSystem>(bs: &B, case: &Case, verb: Verb) -> Command {
     )
 }
 
-/// The place of the first argument that holds `part`.
-fn index_holding(argv: &[String], part: &str) -> usize {
-    must_some(
-        argv.iter().position(|a| a.contains(part)),
-        &format!("{part} is not in the argument vector {argv:?}"),
+/// The layering the contract gives `case` and `verb`: the function every build system's
+/// `command` stands for, which a scenario compares the part it holds against.
+fn contract(case: &Case, verb: Verb) -> Command {
+    let report = case.report();
+    let report = (verb == Verb::Test).then_some(report.as_str());
+    must(
+        ucdk_release::invocation::command(&case.inv(verb, report))
+            .map_err(|e| SeamError::Permanent(e.to_string())),
+        &format!("the contract's command of the {verb} verb"),
     )
 }
 
-fn index_of(argv: &[String], arg: &str) -> usize {
-    must_some(
-        argv.iter().position(|a| a == arg),
-        &format!("{arg} is not in the argument vector {argv:?}"),
-    )
-}
-
-/// The place of the last argument that is `arg`.
-fn last_index_of(argv: &[String], arg: &str) -> usize {
-    must_some(
-        argv.iter().rposition(|a| a == arg),
-        &format!("{arg} is not in the argument vector {argv:?}"),
-    )
+/// What comes before the first flag an author wrote and what comes after the last: the binary,
+/// the startup arguments, the verb word and the mode, and the flags ucdk owns with the tail of
+/// the verb.
+fn around_authors(argv: &[String]) -> (Vec<String>, Vec<String>) {
+    let is_authored = |a: &String| AUTHORED.contains(&a.as_str());
+    let first = must_some(
+        argv.iter().position(is_authored),
+        &format!("no flag of an author in the argument vector {argv:?}"),
+    );
+    let last = must_some(
+        argv.iter().rposition(is_authored),
+        &format!("no flag of an author in the argument vector {argv:?}"),
+    );
+    (argv[..first].to_vec(), argv[last + 1..].to_vec())
 }
 
 fn env_of<'a>(command: &'a Command, key: &str) -> Vec<&'a str> {
@@ -302,6 +337,52 @@ fn same_command_same_bytes<R: BuildSystemRig>(rig: &R) {
             &format!("the bytes of two builds of one command ({world:?})"),
         );
     }
+    what_ran_is_what_was_layered(rig);
+}
+
+/// The commands a run of `verb` added to what `bs` ran must be commands the build system
+/// layers, and the verb's own among them: a test that runs a command other than the one it
+/// layers, or a query that runs with a variable of the process, is found here. A command is
+/// compared whole, so every verb the kind has is held, not only a build.
+fn ran_as_layered(ran: &[Command], allowed: &[Command], own: &Command, what: &str) {
+    same(
+        ran.iter().all(|c| allowed.contains(c)),
+        true,
+        &format!("every command of {what} is one the build system layers, ran {ran:?}"),
+    );
+    same(
+        ran.contains(own),
+        true,
+        &format!("the command {what} ran is the one it layers, ran {ran:?}"),
+    );
+}
+
+fn what_ran_is_what_was_layered<R: BuildSystemRig>(rig: &R) {
+    let mut bs = rig.system(&BuildWorld::Normal);
+    let case = Case::new(bs.kind());
+    let allowed: Vec<Command> = verbs_of(bs.kind())
+        .into_iter()
+        .map(|verb| layered(&bs, &case, verb))
+        .collect();
+    let before = rig.executed(&bs).len();
+    must(
+        bs.build(&case.inv(Verb::Build, None), &Beats::counting()),
+        "build",
+    );
+    ran_as_layered(
+        &rig.executed(&bs)[before..],
+        &allowed,
+        &layered(&bs, &case, Verb::Build),
+        "a build",
+    );
+    let before = rig.executed(&bs).len();
+    must(test_outcome(&mut bs, &case, &Beats::counting()), "test");
+    ran_as_layered(
+        &rig.executed(&bs)[before..],
+        &allowed,
+        &layered(&bs, &case, Verb::Test),
+        "a test",
+    );
 }
 
 fn base_flags_come_before_target_flags_in_order<R: BuildSystemRig>(rig: &R) {
@@ -309,23 +390,19 @@ fn base_flags_come_before_target_flags_in_order<R: BuildSystemRig>(rig: &R) {
     let case = Case::new(bs.kind());
     for verb in verbs_of(bs.kind()) {
         let command = layered(&bs, &case, verb);
-        let at: Vec<usize> = ["--base-one", "--base-two", "--target-one", "--target-two"]
+        // The flags of the authors, in the order they stand in: the base's then the target's,
+        // each as often as it was written (a flag both wrote is passed twice, never merged).
+        let authored: Vec<&str> = command
+            .argv
             .iter()
-            .map(|flag| index_of(&command.argv, flag))
+            .map(String::as_str)
+            .filter(|a| AUTHORED.contains(a))
             .collect();
         same(
-            at.windows(2).all(|w| w[0] < w[1]),
-            true,
-            &format!("the flags of the {verb} verb in the order base then target"),
+            authored,
+            AUTHORED.to_vec(),
+            &format!("the flags the authors wrote in the argument vector of the {verb} verb"),
         );
-        // Each flag an author wrote is passed once, not again further on.
-        for flag in ["--base-one", "--base-two", "--target-one", "--target-two"] {
-            same(
-                command.argv.iter().filter(|a| *a == flag).count(),
-                1,
-                &format!("the times {flag} is in the argument vector of the {verb} verb"),
-            );
-        }
     }
 }
 
@@ -364,34 +441,113 @@ fn nothing_is_inherited_from_the_process_environment<R: BuildSystemRig>(rig: &R)
 fn placeholders_are_substituted_in_flag_and_environment_values<R: BuildSystemRig>(rig: &R) {
     let bs = rig.system(&BuildWorld::Normal);
     let mut case = Case::new(bs.kind());
-    case.system.flags = vec!["--v={release_version}-{build_number}".to_owned()];
+    case.system.flags = vec![
+        "--v={release_version}-{build_number}".to_owned(),
+        "--p={platform}".to_owned(),
+    ];
+    case.system.env = BTreeMap::from([
+        ("BASE".to_owned(), "{build_number}".to_owned()),
+        ("PLAT".to_owned(), "{platform}".to_owned()),
+    ]);
     case.target.flags = vec![
         "--c={source_commit}".to_owned(),
         "--r={revision}@{platform}".to_owned(),
         "--t={timestamp_ms}".to_owned(),
+        "--lit={{x}}".to_owned(),
     ];
-    case.target.env = BTreeMap::from([("STAMP".to_owned(), "{release_version}".to_owned())]);
+    case.target.env = BTreeMap::from([
+        ("STAMP".to_owned(), "{release_version}".to_owned()),
+        ("COMMIT".to_owned(), "{source_commit}-{revision}".to_owned()),
+        ("TS".to_owned(), "{timestamp_ms}".to_owned()),
+        ("ESC".to_owned(), "{{e}}".to_owned()),
+    ]);
     for verb in verbs_of(bs.kind()) {
         let command = layered(&bs, &case, verb);
         for flag in [
             "--v=1.2.3-41",
+            "--p=linux-x86_64",
             "--c=abc123",
             "--r=0123@linux-x86_64",
             "--t=1700",
+            "--lit={x}",
         ] {
-            index_of(&command.argv, flag);
+            same(
+                command.argv.iter().any(|a| a == flag),
+                true,
+                &format!("{flag} is in the argument vector of the {verb} verb: {command:?}"),
+            );
         }
+        for (key, value) in [
+            ("STAMP", "1.2.3"),
+            ("COMMIT", "abc123-0123"),
+            ("TS", "1700"),
+            ("ESC", "{e}"),
+            ("BASE", "41"),
+            ("PLAT", "linux-x86_64"),
+        ] {
+            same(
+                env_of(&command, key),
+                vec![value],
+                &format!("a placeholder in the environment value of {key} of the {verb} verb"),
+            );
+        }
+        // The only brace left is the one a doubled brace wrote.
         same(
-            env_of(&command, "STAMP"),
-            vec!["1.2.3"],
-            &format!("a placeholder in an environment value of the {verb} verb"),
-        );
-        same(
-            command.argv.iter().any(|a| a.contains('{')),
+            command
+                .argv
+                .iter()
+                .filter(|a| *a != "--lit={x}")
+                .any(|a| a.contains('{')),
             false,
             &format!("a placeholder left in the argument vector of the {verb} verb"),
         );
     }
+    unknown_placeholders_are_refused(rig);
+}
+
+/// A flag or an environment value with a placeholder that does not exist, or a brace that is
+/// neither one nor a doubled one, has no layering: nothing is run with it.
+fn unknown_placeholders_are_refused<R: BuildSystemRig>(rig: &R) {
+    let mut bs = rig.system(&BuildWorld::Normal);
+    let kind = bs.kind();
+    let refused = |case: &Case| -> Vec<String> {
+        verbs_of(kind)
+            .into_iter()
+            .map(|verb| {
+                let report = case.report();
+                let report = (verb == Verb::Test).then_some(report.as_str());
+                format!("{:?}", bs.command(&case.inv(verb, report)))
+            })
+            .collect()
+    };
+    let mut flag = Case::new(kind);
+    flag.target.flags = vec!["--x={nope}".to_owned()];
+    let mut brace = Case::new(kind);
+    brace.system.env = BTreeMap::from([("E".to_owned(), "a}".to_owned())]);
+    for case in [&flag, &brace] {
+        for answer in refused(case) {
+            same(
+                answer.starts_with("Err(Permanent("),
+                true,
+                &format!("the command of a flag or value with a bad brace, got {answer}"),
+            );
+        }
+    }
+    let before = rig.executed(&bs).len();
+    let failure = must_err(
+        bs.build(&flag.inv(Verb::Build, None), &Beats::counting()),
+        "a build with a placeholder that does not exist",
+    );
+    same(
+        matches!(failure, SeamError::Permanent(_)),
+        true,
+        "a build with a placeholder that does not exist is Permanent",
+    );
+    same(
+        rig.executed(&bs).len(),
+        before,
+        "the commands run for a build that could not be layered",
+    );
 }
 
 fn the_stamp_reaches_a_build_only_through_placeholders<R: BuildSystemRig>(rig: &R) {
@@ -405,11 +561,18 @@ fn the_stamp_reaches_a_build_only_through_placeholders<R: BuildSystemRig>(rig: &
         source_commit: "ffffff".to_owned(),
         timestamp_ms: 1,
     };
+    // The revision and the platform are placeholders as well: no flag names them, so they do
+    // not reach the command either.
+    "9999".clone_into(&mut case.revision);
+    "darwin-arm64".clone_into(&mut case.platform);
     for (verb, before) in verbs.iter().zip(before) {
         same(
             layered(&bs, &case, *verb),
             before,
-            &format!("the {verb} command when only the stamp changed and no flag names it"),
+            &format!(
+                "the {verb} command when only the stamp, revision and platform changed and no \
+                 flag names them"
+            ),
         );
     }
 }
@@ -417,18 +580,35 @@ fn the_stamp_reaches_a_build_only_through_placeholders<R: BuildSystemRig>(rig: &
 fn ucdk_owned_flags_come_after_the_authors<R: BuildSystemRig>(rig: &R) {
     let bs = rig.system(&BuildWorld::Normal);
     let case = Case::new(bs.kind());
-    let report = case.report();
-    let command = must(bs.command(&case.inv(Verb::Test, Some(&report))), "command");
-    let owned = index_holding(&command.argv, &report);
-    let last_author = ["--base-one", "--base-two", "--target-one", "--target-two"]
-        .iter()
-        .map(|flag| last_index_of(&command.argv, flag))
-        .max()
-        .unwrap_or_default();
+    for verb in verbs_of(bs.kind()) {
+        // Before the first flag of an author: the binary, the startup arguments, the verb word
+        // and the config file and mode. After the last: the flags ucdk owns, report path
+        // included, and the tail of the verb. Both are the contract's, for the kind.
+        same(
+            around_authors(&layered(&bs, &case, verb).argv),
+            around_authors(&contract(&case, verb).argv),
+            &format!("what ucdk owns around the flags of the authors in the {verb} verb"),
+        );
+    }
+    // The flag ucdk owns names a path the engine gives: a test without one has no layering, and
+    // another verb with one has none either.
+    let no_report = must_err(
+        bs.command(&case.inv(Verb::Test, None)),
+        "the command of a test without a report path",
+    );
     same(
-        owned > last_author,
+        matches!(no_report, SeamError::Permanent(_)),
         true,
-        "the flag ucdk owns after the last flag an author wrote",
+        "a test without a report path is Permanent",
+    );
+    let stray = must_err(
+        bs.command(&case.inv(Verb::Build, Some("/scratch/t1/stray"))),
+        "the command of a build given a report path",
+    );
+    same(
+        matches!(stray, SeamError::Permanent(_)),
+        true,
+        "a build given a report path is Permanent",
     );
 }
 
@@ -491,15 +671,29 @@ fn a_symlink_in_an_output_is_refused<R: BuildSystemRig>(rig: &R) {
 }
 
 fn a_failed_build_is_permanent_with_the_tail_of_its_output<R: BuildSystemRig>(rig: &R) {
+    // The output is long: a head the answer must not carry, and the tail it must.
+    let first = "noise line 0 of the head";
+    let head: String = (0..20_000)
+        .map(|i| format!("noise line {i} of the head\n"))
+        .collect();
     let tail = "error: boom 42".to_owned();
-    let mut bs = rig.system(&BuildWorld::BuildFails { tail: tail.clone() });
+    let mut bs = rig.system(&BuildWorld::BuildFails {
+        head,
+        tail: tail.clone(),
+    });
     let case = Case::new(bs.kind());
     let beats = Beats::counting();
     let failure = must_err(bs.build(&case.inv(Verb::Build, None), &beats), "build");
+    let text = failure.to_string();
     same(
-        matches!(&failure, SeamError::Permanent(why) if why.contains(&tail)),
+        matches!(&failure, SeamError::Permanent(_)) & text.contains(&tail),
         true,
         &format!("a failed build is Permanent and names the tail, got {failure:?}"),
+    );
+    same(
+        text.contains(first),
+        false,
+        "the answer to a failed build holds the last lines of the output, not the first",
     );
 }
 
@@ -512,6 +706,12 @@ fn unstartable_is_not_failed<R: BuildSystemRig>(rig: &R) {
         matches!(failure, SeamError::Unknown(_)),
         true,
         "a build system that cannot start is Unknown, not a failed build",
+    );
+    let outcome = must_err(test_outcome(&mut bs, &case, &beats), "test");
+    same(
+        matches!(outcome, SeamError::Unknown(_)),
+        true,
+        "a test of a build system that cannot start is Unknown, not a failed test",
     );
 }
 
@@ -589,26 +789,37 @@ fn a_test_target_that_runs_nothing_is_not_a_pass<R: BuildSystemRig>(rig: &R) {
         "a test that runs",
     );
     same(
-        (passing.passed, passing.ran >= 1),
-        (true, true),
+        (passing.passed, passing.ran),
+        (true, 1),
         "a test that ran once and passed",
     );
-    let mut bs = rig.system(&BuildWorld::TestRunsNothing);
-    let outcome = must(test_outcome(&mut bs, &case, &Beats::counting()), "test");
-    same(
-        (outcome.passed, outcome.ran),
-        (false, 0),
-        "a test that ran nothing",
-    );
+    // Nothing ran: no report line, or results that are all skipped or untested.
+    for world in [BuildWorld::TestRunsNothing, BuildWorld::TestSkipsEverything] {
+        let mut bs = rig.system(&world);
+        let outcome = must(test_outcome(&mut bs, &case, &Beats::counting()), "test");
+        same(
+            (outcome.passed, outcome.ran),
+            (false, 0),
+            &format!("a test that ran nothing ({world:?})"),
+        );
+    }
 }
 
 fn a_failing_test_target_is_not_a_pass<R: BuildSystemRig>(rig: &R) {
-    let mut bs = rig.system(&BuildWorld::TestFails);
+    let tail = "FAILED //pkg:out, 1 of 3 cases".to_owned();
+    let mut bs = rig.system(&BuildWorld::TestFails { tail: tail.clone() });
     let case = Case::new(bs.kind());
     let outcome = must(test_outcome(&mut bs, &case, &Beats::counting()), "test");
-    same(outcome.passed, false, "a test that failed");
-    same(outcome.ran >= 1, true, "a failing test still ran");
-    same(outcome.tail.is_empty(), false, "the tail of a failing test");
+    same(
+        (outcome.passed, outcome.ran),
+        (false, 1),
+        "a test that ran once and failed",
+    );
+    same(
+        outcome.tail.contains(&tail),
+        true,
+        &format!("the tail of a failing test is what it printed last, got {outcome:?}"),
+    );
 }
 
 fn a_test_report_that_cannot_be_read_is_not_a_pass<R: BuildSystemRig>(rig: &R) {
@@ -625,22 +836,24 @@ fn a_test_report_that_cannot_be_read_is_not_a_pass<R: BuildSystemRig>(rig: &R) {
 }
 
 fn the_build_system_beats_on_progress_and_stops_when_told<R: BuildSystemRig>(rig: &R) {
-    let world = BuildWorld::Progress { events: 3 };
+    const EVENTS: u32 = 40;
+    let world = BuildWorld::Progress { events: EVENTS };
     let mut bs = rig.system(&world);
     let case = Case::new(bs.kind());
+    // One beat at least for each progress event, however many there are.
     let counting = Beats::counting();
     must(bs.build(&case.inv(Verb::Build, None), &counting), "build");
     same(
-        counting.count() >= 3,
+        counting.count() >= EVENTS,
         true,
-        "the beats of a build with three progress events",
+        "the beats of a build with many progress events",
     );
     let counting = Beats::counting();
     must(test_outcome(&mut bs, &case, &counting), "test");
     same(
-        counting.count() >= 3,
+        counting.count() >= EVENTS,
         true,
-        "the beats of a test with three progress events",
+        "the beats of a test with many progress events",
     );
     let stopping = Beats::stopping_at(2);
     let build = must_err(
@@ -652,6 +865,8 @@ fn the_build_system_beats_on_progress_and_stops_when_told<R: BuildSystemRig>(rig
         SeamError::Refused(Reason::LeaseLost),
         "a build told to stop",
     );
+    // Told to stop, it stops: no beat comes after the one that was answered with a Stop.
+    same(stopping.count(), 2, "the beats of a build up to its Stop");
     let stopping = Beats::stopping_at(2);
     let test = must_err(
         test_outcome(&mut bs, &case, &stopping),
@@ -662,4 +877,5 @@ fn the_build_system_beats_on_progress_and_stops_when_told<R: BuildSystemRig>(rig
         SeamError::Refused(Reason::LeaseLost),
         "a test told to stop",
     );
+    same(stopping.count(), 2, "the beats of a test up to its Stop");
 }
