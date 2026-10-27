@@ -116,6 +116,30 @@ fn a_bare_name_is_resolved_on_the_scripted_childs_path() {
 }
 
 #[test]
+fn a_program_with_a_slash_is_not_searched_on_the_path() {
+    let (_, mut runner, hb) = setup();
+    // "/usr" + "bin/git" and "/usr/bin" + "git" name one file, but only the bare name is searched.
+    runner.program("/usr/bin/git");
+    let sliced = command("bin/git", Some("/usr"));
+    runner.script(sliced.clone(), Exit::Code(0), b"", b"");
+    assert!(matches!(
+        run(&mut runner, &sliced, &hb, 1),
+        Err(SeamError::Unknown(_))
+    ));
+    let bare = command("git", Some("/usr/bin"));
+    runner.script(bare.clone(), Exit::Code(0), b"", b"");
+    assert!(run(&mut runner, &bare, &hb, 1).is_ok());
+    // A relative name with a slash is used as given, from the working directory ("/work").
+    runner.program("/work/tools/gen");
+    let relative = command("tools/gen", None);
+    runner.script(relative.clone(), Exit::Code(0), b"", b"");
+    assert!(run(&mut runner, &relative, &hb, 1).is_ok());
+    let elsewhere = command("tools/other", None);
+    runner.script(elsewhere.clone(), Exit::Code(0), b"", b"");
+    assert!(run(&mut runner, &elsewhere, &hb, 1).is_err());
+}
+
+#[test]
 fn faults_kill_signal_or_refuse_to_start() {
     let (_, mut runner, hb) = setup();
     let cmd = command("/opt/bin/buck2", None);

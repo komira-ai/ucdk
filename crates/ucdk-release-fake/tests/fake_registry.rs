@@ -392,6 +392,18 @@ fn newest_and_list_show_what_the_channel_holds() {
 }
 
 #[test]
+fn newest_calls_that_differ_where_a_slash_falls_log_differently() {
+    let (mut w, _) = staged(&["a"]);
+    let g = w.grant(GrantPhase::Read, &[]);
+    w.registry.newest(&g, "a", "b/c").unwrap();
+    w.registry.newest(&g, "a/b", "c").unwrap();
+    let log = w.registry.call_log();
+    let newest: Vec<&String> = log.iter().filter(|l| l.starts_with("newest ")).collect();
+    assert_eq!(newest.len(), 2);
+    assert_ne!(newest[0], newest[1]);
+}
+
+#[test]
 fn abort_gives_staged_state_back_and_never_touches_a_committed_coordinate() {
     let (mut w, set) = staged(&["a", "b"]);
     w.registry.present_different(&set.coords[1], b"held");

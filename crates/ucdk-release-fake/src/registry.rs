@@ -691,7 +691,7 @@ impl Publisher for FakeRegistry {
         ch: &str,
         name: &str,
     ) -> Result<Vec<(Coordinate, Held)>, SeamError> {
-        self.calls.push(format!("newest {ch}/{name}"));
+        self.calls.push(format!("newest {ch:?} {name:?}"));
         self.gate()?;
         self.admit(g, Need::Read, &[])?;
         Ok(self
