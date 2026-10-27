@@ -25,7 +25,7 @@ pub enum Flaw {
     EntriesShareTheBytesOfAPath,
     /// `discard` leaves the first path of the entry in place.
     DiscardLeavesTheFirstPath,
-    /// `files` of an entry that does not exist is an error.
+    /// `files` of an entry that was never begun is an error.
     MissingEntryIsAnError,
     /// `get` of a nested path answers nothing, though it was written.
     GetLosesNestedPaths,
@@ -293,6 +293,8 @@ pub struct Flawed {
     flaw: Option<Flaw>,
     /// The key last begun.
     last: Option<StoreKey>,
+    /// Every key ever begun, discarded or not.
+    begun: Vec<StoreKey>,
 }
 
 impl Flawed {
@@ -343,6 +345,7 @@ impl StoreRig for FakeStoreRig {
             inner: FakeStore::new(),
             flaw: self.flaw,
             last: None,
+            begun: Vec::new(),
         }
     }
 }
@@ -425,6 +428,7 @@ impl ArtifactStore for Flawed {
             return Err(SeamError::Refused(Reason::SetMember));
         }
         self.last = Some(key.clone());
+        self.begun.push(key.clone());
         let writer = self.inner.begin(key)?;
         if matches!(
             self.flaw,
@@ -485,7 +489,7 @@ impl ArtifactStore for Flawed {
 
     fn files(&mut self, key: &StoreKey) -> Result<Vec<String>, SeamError> {
         let key = &self.resolve(key)?;
-        if self.flaw == Some(Flaw::MissingEntryIsAnError) && !self.inner.keys()?.contains(key) {
+        if self.flaw == Some(Flaw::MissingEntryIsAnError) && !self.begun.contains(key) {
             return Err(SeamError::Permanent(format!("{key} does not exist")));
         }
         if self.flaw == Some(Flaw::FilesMatchedByKeyPrefix) {
