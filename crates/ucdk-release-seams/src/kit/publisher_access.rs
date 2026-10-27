@@ -1,0 +1,420 @@
+// SPDX-License-Identifier: Apache-2.0
+//! The scenarios of the publisher kit about who may read and write a channel, how a private
+//! channel is read, and what a call that went wrong left behind.
+
+use ucdk_release::codec::{GrantFault, GrantPhase};
+use ucdk_release::publish::Presence;
+use ucdk_release_proto::v1::{Coordinate, Stamped};
+
+use super::publisher::{
+    A_DAY_MS, Arrangement, ChannelShape, PublisherRig, ReadStep, Set, fetched, observed,
+    present_held, publish, stage, staged_held, stranger,
+};
+use super::{coordinate, must, must_err, same};
+use crate::{CommitAnswer, Grant, ListScope, Publisher, SeamError, StageAnswer};
+
+fn denied(error: &SeamError) -> bool {
+    *error == SeamError::GrantRefused(GrantFault::Denied)
+}
+
+fn held_by_another(set: &Set, at: usize, bytes: &[u8]) -> Arrangement {
+    Arrangement::HeldByAnother {
+        coordinate: set.coords[at].clone(),
+        bytes: bytes.to_vec(),
+    }
+}
+
+pub(super) fn public_read_needs_no_grant<R: PublisherRig>(rig: &R) {
+    let mut p = rig.publisher(&ChannelShape::staging());
+    let set = Set::of(&["a"]);
+    publish(rig, &mut p, &set);
+    let a = &set.coords[0];
+    present_held(stranger(&mut p, a));
+    same(
+        must(p.fetch(&Grant::none(), a), "fetch by a stranger"),
+        Some(b"a".to_vec()),
+        "the bytes a stranger fetches",
+    );
+    let newest = must(
+        p.newest(&Grant::none(), &a.channel, &a.name),
+        "newest by a stranger",
+    );
+    same(
+        newest.iter().map(|(c, _)| c.clone()).collect::<Vec<_>>(),
+        vec![a.clone()],
+        "what a stranger finds with newest",
+    );
+    let scope = ListScope {
+        channel: a.channel.clone(),
+        prefix: String::new(),
+    };
+    let listed = must(p.list(&Grant::none(), &scope), "list by a stranger");
+    same(
+        listed.iter().all(|l| l.coordinate == *a),
+        true,
+        "what a stranger lists",
+    );
+}
+
+pub(super) fn a_grant_for_another_repository_sends_nothing<R: PublisherRig>(rig: &R) {
+    let mut p = rig.publisher(&ChannelShape::staging());
+    let set = Set::of(&["a"]);
+    let blobs = set.blobs();
+    let items = set.items(&blobs);
+    let foreign = rig.foreign_grant(&p, GrantPhase::Stage, &set.coords);
+    let refusal = must_err(
+        p.stage(&foreign, &items),
+        "a stage with a grant for another repository",
+    );
+    same(
+        denied(&refusal),
+        true,
+        "a grant for another repository is Denied",
+    );
+    same(
+        observed(rig, &mut p, GrantPhase::Stage, &set, 0),
+        Presence::Absent,
+        "the coordinate after the refused stage",
+    );
+}
+
+pub(super) fn a_grant_of_the_wrong_phase_is_denied_and_nothing_happens<R: PublisherRig>(rig: &R) {
+    let mut p = rig.publisher(&ChannelShape::staging());
+    let set = Set::of(&["a"]);
+    let blobs = set.blobs();
+    let items = set.items(&blobs);
+    let commit_grant = rig.grant(&p, GrantPhase::Commit, &set.coords);
+    let refusal = must_err(
+        p.stage(&commit_grant, &items),
+        "a stage with a commit grant",
+    );
+    same(
+        denied(&refusal),
+        true,
+        "a stage with a commit grant is Denied",
+    );
+    same(
+        observed(rig, &mut p, GrantPhase::Stage, &set, 0),
+        Presence::Absent,
+        "the coordinate after the refused stage",
+    );
+    stage(rig, &mut p, &set);
+    let stage_grant = rig.grant(&p, GrantPhase::Stage, &set.coords);
+    let refusal = must_err(
+        p.commit(&stage_grant, &items),
+        "a commit with a stage grant",
+    );
+    same(
+        denied(&refusal),
+        true,
+        "a commit with a stage grant is Denied",
+    );
+    same(
+        fetched(rig, &mut p, &set.coords[0]),
+        None,
+        "the bytes of the coordinate after the refused commit",
+    );
+    staged_held(observed(rig, &mut p, GrantPhase::Stage, &set, 0));
+}
+
+pub(super) fn an_expired_grant_is_refused_and_nothing_happens<R: PublisherRig>(rig: &R) {
+    let mut p = rig.publisher(&ChannelShape::staging());
+    let set = Set::of(&["a"]);
+    let blobs = set.blobs();
+    let items = set.items(&blobs);
+    let old = rig.grant(&p, GrantPhase::Stage, &set.coords);
+    rig.advance(A_DAY_MS);
+    let refusal = must_err(p.stage(&old, &items), "a stage with an expired grant");
+    same(
+        refusal,
+        SeamError::GrantRefused(GrantFault::Expired),
+        "the answer to an expired grant",
+    );
+    same(
+        observed(rig, &mut p, GrantPhase::Stage, &set, 0),
+        Presence::Absent,
+        "the coordinate after the refused stage",
+    );
+}
+
+pub(super) fn newest_lists_every_held_coordinate_of_the_name<R: PublisherRig>(rig: &R) {
+    let mut p = rig.publisher(&ChannelShape::staging());
+    let a1 = coordinate("a");
+    let a2 = Coordinate {
+        version: "1.2.4".to_owned(),
+        ..a1.clone()
+    };
+    let a3 = Coordinate {
+        platform: "darwin-arm64".to_owned(),
+        ..a1.clone()
+    };
+    let set = Set::at(vec![a1.clone(), a2.clone(), a3.clone(), coordinate("b")]);
+    publish(rig, &mut p, &set);
+    let grant = rig.grant(&p, GrantPhase::Commit, std::slice::from_ref(&a2));
+    must(p.yank(&grant, &a2, "a reason"), "yank");
+    let read = rig.grant(&p, GrantPhase::Read, std::slice::from_ref(&a1));
+    let found = must(p.newest(&read, &a1.channel, &a1.name), "newest");
+    let key = |c: &Coordinate| (c.version.clone(), c.platform.clone());
+    let mut got: Vec<Coordinate> = found.into_iter().map(|(c, _)| c).collect();
+    got.sort_by_key(key);
+    let mut want = vec![a1, a2, a3];
+    want.sort_by_key(key);
+    same(
+        got,
+        want,
+        "every coordinate of the name, yanked ones included, and no other name",
+    );
+}
+
+pub(super) fn observe_returns_the_stamp_it_was_given<R: PublisherRig>(rig: &R) {
+    let mut p = rig.publisher(&ChannelShape::staging());
+    let mut set = Set::of(&["a"]);
+    set.held.stamp = Some(Stamped {
+        build_number: 7,
+        source_commit: "deadbeef".to_owned(),
+    });
+    set.held.exceptional = true;
+    stage(rig, &mut p, &set);
+    let staged = staged_held(observed(rig, &mut p, GrantPhase::Stage, &set, 0));
+    same(
+        (staged.stamp, staged.exceptional),
+        (set.held.stamp.clone(), true),
+        "the stamp and the exceptional mark of a staged coordinate",
+    );
+    super::publisher::commit(rig, &mut p, &set);
+    let present = present_held(stranger(&mut p, &set.coords[0]));
+    same(
+        (present.stamp, present.exceptional),
+        (set.held.stamp.clone(), true),
+        "the stamp and the exceptional mark of a committed coordinate",
+    );
+}
+
+pub(super) fn a_granted_observe_sees_a_coordinate_committed_by_another_writer<R: PublisherRig>(
+    rig: &R,
+) {
+    let mut p = rig.publisher(&ChannelShape::staging());
+    let set = Set::of(&["a"]);
+    rig.arrange(&mut p, &held_by_another(&set, 0, b"theirs"));
+    present_held(observed(rig, &mut p, GrantPhase::Stage, &set, 0));
+}
+
+pub(super) fn a_private_observe_reads_the_group_then_the_index<R: PublisherRig>(rig: &R) {
+    let mut p = rig.publisher(&ChannelShape::private_grouped());
+    let set = Set::of(&["a"]);
+    let before = rig.reads(&p).len();
+    same(
+        observed(rig, &mut p, GrantPhase::Stage, &set, 0),
+        Presence::Absent,
+        "a coordinate nobody wrote",
+    );
+    same(
+        rig.reads(&p)[before..].to_vec(),
+        vec![ReadStep::Group, ReadStep::Index],
+        "the reads of one observe",
+    );
+}
+
+pub(super) fn a_coordinate_committed_in_another_group_reads_as_present_never_absent<
+    R: PublisherRig,
+>(
+    rig: &R,
+) {
+    let mut p = rig.publisher(&ChannelShape::private_grouped());
+    let set = Set::of(&["a"]);
+    rig.arrange(&mut p, &held_by_another(&set, 0, b"theirs"));
+    present_held(observed(rig, &mut p, GrantPhase::Stage, &set, 0));
+}
+
+pub(super) fn a_failed_group_read_or_index_read_fails_the_observe_and_is_not_absent<
+    R: PublisherRig,
+>(
+    rig: &R,
+) {
+    for (which, failure) in [
+        ("group read", Arrangement::FailGroupRead),
+        ("index read", Arrangement::FailIndexRead),
+    ] {
+        let mut p = rig.publisher(&ChannelShape::private_grouped());
+        rig.arrange(&mut p, &failure);
+        let set = Set::of(&["a"]);
+        let blobs = set.blobs();
+        let items = set.items(&blobs);
+        let grant = rig.grant(&p, GrantPhase::Stage, &set.coords);
+        let error = must_err(
+            p.observe(&grant, &set.coords[0], &items),
+            &format!("an observe whose {which} fails"),
+        );
+        same(
+            error.promises_no_effect(),
+            false,
+            &format!("a failed {which} is Transient or Unknown"),
+        );
+    }
+}
+
+pub(super) fn observe_with_the_declared_set_finds_staged_state_addressed_by_the_group_of_that_set<
+    R: PublisherRig,
+>(
+    rig: &R,
+) {
+    let mut p = rig.publisher(&ChannelShape::private_grouped());
+    let set = Set::of(&["a", "b"]);
+    stage(rig, &mut p, &set);
+    staged_held(observed(rig, &mut p, GrantPhase::Stage, &set, 0));
+}
+
+pub(super) fn observe_with_an_empty_set_cannot_see_staged_state_and_still_sees_committed_coordinates<
+    R: PublisherRig,
+>(
+    rig: &R,
+) {
+    let mut p = rig.publisher(&ChannelShape::private_grouped());
+    let both = Set::of(&["a", "b"]);
+    stage(rig, &mut p, &Set::of(&["a"]));
+    rig.arrange(&mut p, &held_by_another(&both, 1, b"theirs"));
+    let grant = rig.grant(&p, GrantPhase::Stage, &both.coords);
+    same(
+        must(
+            p.observe(&grant, &both.coords[0], &[]),
+            "an observe of staged state with no set",
+        ),
+        Presence::Absent,
+        "staged state seen with no set",
+    );
+    present_held(must(
+        p.observe(&grant, &both.coords[1], &[]),
+        "an observe of a committed coordinate with no set",
+    ));
+}
+
+pub(super) fn a_read_grant_observes_committed_coordinates_and_can_neither_stage_nor_commit<
+    R: PublisherRig,
+>(
+    rig: &R,
+) {
+    let mut p = rig.publisher(&ChannelShape {
+        private: true,
+        ..ChannelShape::staging()
+    });
+    let (a, b) = (Set::of(&["a"]), Set::of(&["b"]));
+    publish(rig, &mut p, &a);
+    let read_a = rig.grant(&p, GrantPhase::Read, &a.coords);
+    let read_b = rig.grant(&p, GrantPhase::Read, &b.coords);
+    present_held(must(
+        p.observe(&read_a, &a.coords[0], &[]),
+        "an observe with a read grant",
+    ));
+    let blobs = b.blobs();
+    let items = b.items(&blobs);
+    let refusals = [
+        ("stage", must_err(p.stage(&read_b, &items), "stage")),
+        ("commit", must_err(p.commit(&read_b, &items), "commit")),
+        ("abort", must_err(p.abort(&read_a, &a.coords), "abort")),
+        (
+            "yank",
+            must_err(p.yank(&read_a, &a.coords[0], "a reason"), "yank"),
+        ),
+    ];
+    for (call, refusal) in &refusals {
+        same(
+            denied(refusal),
+            true,
+            &format!("a {call} with a read grant is Denied"),
+        );
+    }
+    same(
+        must(
+            p.observe(&read_b, &b.coords[0], &[]),
+            "an observe after the refusals",
+        ),
+        Presence::Absent,
+        "the coordinate a read grant tried to write",
+    );
+    present_held(must(
+        p.observe(&read_a, &a.coords[0], &[]),
+        "an observe after the refusals",
+    ));
+}
+
+pub(super) fn commit_is_atomic_when_the_coordinate_appears_between_observe_and_commit<
+    R: PublisherRig,
+>(
+    rig: &R,
+) {
+    let mut p = rig.publisher(&ChannelShape::staging());
+    let set = Set::of(&["a"]);
+    stage(rig, &mut p, &set);
+    rig.arrange(&mut p, &Arrangement::RaceNextCommit(b"theirs".to_vec()));
+    let blobs = set.blobs();
+    let items = set.items(&blobs);
+    let grant = rig.grant(&p, GrantPhase::Commit, &set.coords);
+    same(
+        must(p.commit(&grant, &items), "commit"),
+        CommitAnswer::Duplicate,
+        "a commit that lost the race",
+    );
+    same(
+        fetched(rig, &mut p, &set.coords[0]),
+        Some(b"theirs".to_vec()),
+        "the bytes after the race",
+    );
+}
+
+pub(super) fn transient_after_commit_is_observed_before_retry<R: PublisherRig>(rig: &R) {
+    let mut p = rig.publisher(&ChannelShape::staging());
+    let set = Set::of(&["a"]);
+    stage(rig, &mut p, &set);
+    rig.arrange(&mut p, &Arrangement::FailAfterCommit);
+    let blobs = set.blobs();
+    let items = set.items(&blobs);
+    let grant = rig.grant(&p, GrantPhase::Commit, &set.coords);
+    let failure = must_err(
+        p.commit(&grant, &items),
+        "a commit that fails after it landed",
+    );
+    same(
+        failure.promises_no_effect(),
+        false,
+        "a failure after the commit may have landed",
+    );
+    present_held(stranger(&mut p, &set.coords[0]));
+}
+
+pub(super) fn duplicate_over_other_bytes_leaves_the_old_bytes<R: PublisherRig>(rig: &R) {
+    let mut p = rig.publisher(&ChannelShape::staging());
+    let (a, b) = (Set::of(&["a"]), Set::of(&["b"]));
+    rig.arrange(&mut p, &held_by_another(&a, 0, b"theirs"));
+    rig.arrange(
+        &mut p,
+        &Arrangement::StagedByAnother {
+            coordinate: b.coords[0].clone(),
+            bytes: b"theirs".to_vec(),
+        },
+    );
+    for set in [&a, &b] {
+        let blobs = set.blobs();
+        let items = set.items(&blobs);
+        let grant = rig.grant(&p, GrantPhase::Stage, &set.coords);
+        same(
+            must(p.stage(&grant, &items), "stage"),
+            StageAnswer::Duplicate,
+            "a stage over the bytes of another writer",
+        );
+    }
+    same(
+        fetched(rig, &mut p, &a.coords[0]),
+        Some(b"theirs".to_vec()),
+        "the committed bytes after it",
+    );
+    same(
+        observed(rig, &mut p, GrantPhase::Stage, &b, 0),
+        Presence::Absent,
+        "another writer's staged state seen by a grant that did not make it",
+    );
+    same(
+        fetched(rig, &mut p, &b.coords[0]),
+        None,
+        "a coordinate only staged by another writer",
+    );
+}
