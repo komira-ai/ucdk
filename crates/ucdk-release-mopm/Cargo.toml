@@ -1,0 +1,28 @@
+[package]
+name = "ucdk-release-mopm"
+description = "The mopm registry channel of a release: the configuration and its time budget, the transport and its secret types, the mapping of a coordinate onto mopm's package, version and file grammars, the checks of a set, and the classification of mopm's answers into seam errors."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# This crate is not marked pure: it reads the trust bundle from disk and, with the HTTP adapter
+# of a later change, talks to the network.
+
+[dependencies]
+serde_json.workspace = true
+ucdk-ledger = { path = "../ucdk-ledger" }
+ucdk-release = { path = "../ucdk-release" }
+ucdk-release-proto = { path = "../ucdk-release-proto" }
+ucdk-release-seams = { path = "../ucdk-release-seams" }
+# The blocking HTTP client the adapter of a later change is built on. Only the TLS plumbing is
+# enabled, not the default root store (`webpki-roots`, whose licence is not allowed here): the
+# trust anchors are one bundle file named in `Config`, never a built-in or platform store.
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider"] }
+# Selects the `ring` crypto provider for that client (no C TLS stack, no `aws-lc`).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+
+[lints]
+workspace = true
