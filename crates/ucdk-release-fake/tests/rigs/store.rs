@@ -206,6 +206,8 @@ pub enum Flaw {
     KeysOfAnEmptyStoreIsAnError,
     /// A writer keeps no more than the first 16 MiB of a file.
     TruncatesAt16MiB,
+    /// A writer that refuses a path with a part that is `con`, `~` or `-rf`.
+    WriterRefusesReservedNames,
 }
 
 /// The name a stub that refuses or rewrites names writes `rel` under, or `None` when it
@@ -220,6 +222,10 @@ fn named(flaw: Flaw, rel: &str) -> Option<String> {
     match flaw {
         Flaw::WriterRefusesAnyDoubleDot => (!rel.contains("..")).then(|| rel.to_owned()),
         Flaw::WriterRefusesAColon => without(&[':']),
+        Flaw::WriterRefusesReservedNames => (!rel
+            .split('/')
+            .any(|part| matches!(part, "con" | "~" | "-rf")))
+        .then(|| rel.to_owned()),
         Flaw::WriterRefusesUrlCharacters => without(&['?', '#', '%']),
         Flaw::WriterRefusesPatternCharacters => without(&['*', '<', '>', '|']),
         Flaw::WriterRefusesQuotesAndSeparators => without(&['"', '\'', '$', ',', ';']),
@@ -666,6 +672,7 @@ impl ArtifactStore for Flawed {
                     | Flaw::WriterRefusesPatternCharacters
                     | Flaw::WriterRefusesQuotesAndSeparators
                     | Flaw::WriterRefusesAnInnerSpace
+                    | Flaw::WriterRefusesReservedNames
                     | Flaw::WriterRewritesReservedCharacters
                     | Flaw::WriterEncodesASpace
                     | Flaw::WriterPercentDecodes

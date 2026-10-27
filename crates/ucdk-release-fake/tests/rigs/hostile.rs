@@ -3,7 +3,8 @@
 //! rewrite or the name of a path is handled, a fault that shows only when the entries or the
 //! writes around it are chosen to bring it out.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
 
 use ucdk_release::store::StoreKey;
 use ucdk_release_fake::FakeStore;
@@ -64,6 +65,59 @@ pub enum Wrong {
     DeepRewriteKeepsTheOldTail,
     /// A write of an empty file to a path three or more parts deep that holds a file is ignored.
     DeepEmptyRewriteIgnored,
+    /// `discard` drops the files of an entry but keeps which names were directories and which
+    /// were files, so a name that was one is refused as the other in the entry begun again.
+    TreeIndexSurvivesDiscard,
+    /// The files and the directories are two sets for the whole store, so a name that is a
+    /// directory in one entry is refused as a file in another, and the reverse.
+    GlobalTreeIndex,
+    /// A path is refused when the path written just before it starts with its text, with no
+    /// slash between, so `f` is refused right after `fg`.
+    PrefixNoSlashRefuses,
+    /// The check of a file against a directory compares names in lower case.
+    TreeCheckCaseFolded,
+    /// The check of a file against a directory compares names in one Unicode composition.
+    TreeCheckUnicodeFolded,
+    /// The check of a file against a directory compares names without their trailing spaces and
+    /// dots.
+    TreeCheckTrimmed,
+    /// The index of the tree is kept by member name alone, shared by every stage, platform,
+    /// revision and generation.
+    TreeIndexByMember,
+}
+
+/// The names of the files and of the directories of the paths an index has seen.
+#[derive(Default)]
+struct Tree {
+    files: BTreeSet<String>,
+    directories: BTreeSet<String>,
+}
+
+impl Tree {
+    fn clashes(&self, rel: &str) -> bool {
+        self.directories.contains(rel)
+            || rel
+                .match_indices('/')
+                .any(|(at, _)| self.files.contains(&rel[..at]))
+    }
+
+    fn record(&mut self, rel: &str) {
+        for (at, _) in rel.match_indices('/') {
+            self.directories.insert(rel[..at].to_owned());
+        }
+        self.files.insert(rel.to_owned());
+    }
+}
+
+/// The path as the check of a file against a directory compares it.
+fn compared(flaw: Wrong, rel: &str) -> String {
+    let part = |text: &str| match flaw {
+        Wrong::TreeCheckCaseFolded => text.to_lowercase(),
+        Wrong::TreeCheckUnicodeFolded => text.replace("e\u{301}", "\u{e9}"),
+        Wrong::TreeCheckTrimmed => text.trim_end_matches([' ', '.']).to_owned(),
+        _ => text.to_owned(),
+    };
+    rel.split('/').map(part).collect::<Vec<_>>().join("/")
 }
 
 pub struct HostileRig {
@@ -79,8 +133,20 @@ impl StoreRig for HostileRig {
             flaw: self.flaw,
             parked: BTreeMap::new(),
             ghosts: BTreeMap::new(),
+            kept: BTreeMap::new(),
+            global: Arc::default(),
+            members: BTreeMap::new(),
         }
     }
+}
+
+/// The member name of a key: its last part.
+fn member(key: &StoreKey) -> String {
+    key.as_str()
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_owned()
 }
 
 pub struct Hostile {
@@ -90,6 +156,12 @@ pub struct Hostile {
     parked: BTreeMap<StoreKey, Vec<(String, Vec<u8>)>>,
     /// The names a discard left behind, for the stub that goes on listing them.
     ghosts: BTreeMap<StoreKey, Vec<String>>,
+    /// The index of each key, which a discard leaves in place.
+    kept: BTreeMap<StoreKey, Arc<Mutex<Tree>>>,
+    /// The one index of the store, for the stub that has one.
+    global: Arc<Mutex<Tree>>,
+    /// The index of each member name, for the stub that keeps one per name.
+    members: BTreeMap<String, Arc<Mutex<Tree>>>,
 }
 
 /// The key as the stubs that read from the wrong entry compare it.
@@ -186,6 +258,31 @@ struct Writer<'a> {
     flaw: Wrong,
     /// What each path was given, write by write, as the entry holds it.
     history: BTreeMap<String, Vec<Vec<u8>>>,
+    /// The index that the stubs of the tree rule consult and fill.
+    tree: Arc<Mutex<Tree>>,
+    /// The path written last.
+    last: String,
+}
+
+impl Writer<'_> {
+    /// Whether the stub refuses `name`, a path that the fake would take, as the clash of a file
+    /// and a directory.
+    fn refuses_as_a_clash(&self, name: &str) -> bool {
+        match self.flaw {
+            Wrong::TreeIndexSurvivesDiscard
+            | Wrong::GlobalTreeIndex
+            | Wrong::TreeCheckCaseFolded
+            | Wrong::TreeCheckUnicodeFolded
+            | Wrong::TreeCheckTrimmed
+            | Wrong::TreeIndexByMember => self
+                .tree
+                .lock()
+                .expect("the index is not poisoned")
+                .clashes(&compared(self.flaw, name)),
+            Wrong::PrefixNoSlashRefuses => self.last != name && self.last.starts_with(name),
+            _ => false,
+        }
+    }
 }
 
 fn folded_directories(rel: &str, fold: impl Fn(&str) -> String) -> String {
@@ -217,6 +314,9 @@ impl EntryWriter for Writer<'_> {
             }
             _ => rel.to_owned(),
         };
+        if self.refuses_as_a_clash(&name) {
+            return Err(SeamError::Refused(Reason::SetMember));
+        }
         let past = self.history.get(&name).cloned().unwrap_or_default();
         let deep = name.split('/').count() >= 3;
         let kept: Vec<u8> = match (self.flaw, past.last()) {
@@ -240,6 +340,10 @@ impl EntryWriter for Writer<'_> {
             _ => bytes.to_vec(),
         };
         self.inner.put_file(&name, &kept)?;
+        let mut tree = self.tree.lock().expect("the index is not poisoned");
+        tree.record(&compared(self.flaw, &name));
+        drop(tree);
+        self.last.clone_from(&name);
         self.history.entry(name).or_default().push(kept);
         Ok(())
     }
@@ -253,10 +357,20 @@ impl ArtifactStore for Hostile {
         for (rel, bytes) in revived {
             writer.put_file(&rel, &bytes)?;
         }
+        let tree = match self.flaw {
+            Wrong::GlobalTreeIndex => Arc::clone(&self.global),
+            Wrong::TreeIndexSurvivesDiscard => {
+                Arc::clone(self.kept.entry(key.clone()).or_default())
+            }
+            Wrong::TreeIndexByMember => Arc::clone(self.members.entry(member(key)).or_default()),
+            _ => Arc::default(),
+        };
         Ok(Box::new(Writer {
             inner: writer,
             flaw: self.flaw,
             history: BTreeMap::new(),
+            tree,
+            last: String::new(),
         }))
     }
 
@@ -311,7 +425,33 @@ impl ArtifactStore for Hostile {
             }
             _ => {}
         }
-        self.inner.discard(key)
+        self.inner.discard(key)?;
+        if self.flaw == Wrong::GlobalTreeIndex {
+            // The one index is what the entries that are left hold.
+            let mut live = Tree::default();
+            for other in self.inner.keys()? {
+                for rel in self.inner.files(&other)? {
+                    live.record(&rel);
+                }
+            }
+            *self.global.lock().expect("the index is not poisoned") = live;
+        }
+        if self.flaw == Wrong::TreeIndexByMember {
+            // The index of the name is what the entries of that name that are left hold.
+            let name = member(key);
+            let mut live = Tree::default();
+            for other in self.inner.keys()? {
+                if member(&other) == name {
+                    for rel in self.inner.files(&other)? {
+                        live.record(&rel);
+                    }
+                }
+            }
+            if let Some(index) = self.members.get(&name) {
+                *index.lock().expect("the index is not poisoned") = live;
+            }
+        }
+        Ok(())
     }
 
     fn keys(&mut self) -> Result<Vec<StoreKey>, SeamError> {

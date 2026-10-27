@@ -6,7 +6,7 @@
 mod rigs;
 
 use rigs::hostile::{HostileRig, Wrong};
-use rigs::loose::LooseRig;
+use rigs::loose::{LooseRig, ShallowRig};
 use rigs::output_files::{FakeFilesRig, Flaw as Files};
 use rigs::store::{FakeStoreRig, Flaw as Store};
 use rigs::{each_fails_alone, further_stubs_fail_exactly, names};
@@ -53,7 +53,7 @@ fn further_store() {
             (Store::DiscardWipesEveryEntry, &[DISCARD]),
             (Store::DiscardOfAMissingEntryIsAnError, &[DISCARD]),
             (Store::FilesMatchedByKeyPrefix, &[KEYS, TWO, DISCARD]),
-            (Store::PathsAreCaseFolded, &[LISTED]),
+            (Store::PathsAreCaseFolded, &[LISTED, ESCAPES]),
             (Store::GetTakesATrailingSlash, &[ESCAPES]),
             (Store::EmptyEntryIsNoEntry, &[SECOND_BEGIN]),
             (Store::DeepPathsDropped, &[READ_BACK, ESCAPES, DISCARD]),
@@ -68,8 +68,8 @@ fn further_store() {
             (Store::KeysOmitsEmptyEntries, &[SECOND_BEGIN]),
             (Store::WriterPoisonedAfterRefusal, &[ESCAPES]),
             (Store::DotfilesHidden, &[LISTED]),
-            (Store::TrailingSpaceTrimmed, &[LISTED]),
-            (Store::UnicodeFolded, &[LISTED]),
+            (Store::TrailingSpaceTrimmed, &[LISTED, ESCAPES]),
+            (Store::UnicodeFolded, &[LISTED, ESCAPES]),
             (Store::FilesCappedAt100, &[LISTED]),
             (Store::KeysCappedAt100, &[KEYS]),
             (Store::RewriteKeepsTheOldTail, &[READ_BACK]),
@@ -127,6 +127,7 @@ fn further_store() {
             (Store::KeysCollapseAcrossGenerations, &[KEYS, TWO]),
             (Store::MissingEntryIsAnError, &[TWO, MISSING]),
             (Store::TruncatesAt16MiB, &[READ_BACK]),
+            (Store::WriterRefusesReservedNames, &[LISTED]),
         ],
         |flaw| run_store_kit(&FakeStoreRig::flawed(flaw)),
     );
@@ -138,6 +139,16 @@ fn a_store_that_lets_a_file_and_a_directory_share_a_name_fails_the_kit() {
     // promise that the paths of an entry form a tree.
     assert_eq!(
         run_store_kit(&LooseRig).failed(),
+        ["paths_that_escape_an_entry_are_refused"]
+    );
+}
+
+#[test]
+fn a_store_that_checks_a_file_against_a_directory_two_parts_deep_fails_the_kit() {
+    // The store is the fake in all else: it refuses a path below a file, and a file where a
+    // directory is, within the first two parts of a path, and takes a clash below them.
+    assert_eq!(
+        run_store_kit(&ShallowRig).failed(),
         ["paths_that_escape_an_entry_are_refused"]
     );
 }
@@ -170,12 +181,19 @@ fn each_wrong_store_stub_fails_the_scenario_that_holds_it() {
             (Wrong::DirectoriesCaseFolded, &[LISTED]),
             (Wrong::DirectoriesUnicodeFolded, &[LISTED]),
             (Wrong::DirectoriesTrailingSpaceTrimmed, &[LISTED]),
-            (Wrong::TrailingDotTrimmed, &[LISTED]),
+            (Wrong::TrailingDotTrimmed, &[LISTED, ESCAPES]),
             (Wrong::ThirdWriteIgnored, &[READ_BACK]),
             (Wrong::WriteOfEarlierBytesIgnored, &[READ_BACK]),
             (Wrong::IdenticalRewriteRefused, &[READ_BACK]),
             (Wrong::DeepRewriteKeepsTheOldTail, &[READ_BACK]),
             (Wrong::DeepEmptyRewriteIgnored, &[READ_BACK]),
+            (Wrong::TreeIndexSurvivesDiscard, &[DISCARD]),
+            (Wrong::GlobalTreeIndex, &[TWO]),
+            (Wrong::PrefixNoSlashRefuses, &[ESCAPES]),
+            (Wrong::TreeCheckCaseFolded, &[ESCAPES]),
+            (Wrong::TreeCheckUnicodeFolded, &[ESCAPES]),
+            (Wrong::TreeCheckTrimmed, &[ESCAPES]),
+            (Wrong::TreeIndexByMember, &[TWO]),
         ],
         |flaw| run_store_kit(&HostileRig { flaw }),
     );
