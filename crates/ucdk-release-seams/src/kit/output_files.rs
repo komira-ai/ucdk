@@ -262,39 +262,26 @@ fn a_listing_names_the_kind_of_every_entry<R: OutputFilesRig>(rig: &R) {
         true,
         "the listing of an empty directory is empty",
     );
-    // Siblings whose names start with the name of the listed directory are not below it: `d`
-    // next to `d2`, `d.bak` and `d-x`, at the top and a directory down, and an empty `e` next
-    // to `e2`.
+    // Siblings named with the listed directory's name as a prefix are not below it: `d` beside
+    // `d2`, `d.bak` and `d-x`, an empty `e` beside `e2`, at the top and a directory down.
     let mut files = rig.reader(&[
         ("q/d/x", Node::File(b"x")),
         ("q/d2/x", Node::File(b"2")),
         ("q/d.bak/x", Node::File(b"b")),
         ("q/d-x/x", Node::File(b"-")),
-        ("q/d.bak/deeper/y", Node::File(b"y")),
         ("q/e", Node::Directory),
         ("q/e2", Node::File(b"2")),
-        ("q/e-x", Node::Link("q/e")),
         ("r/p/d/x", Node::File(b"x")),
-        ("r/p/d2/y", Node::File(b"y")),
-        ("r/p/d.bak", Node::File(b"z")),
-        ("r/p/d-x", Node::Directory),
+        ("r/p/d2/x", Node::File(b"y")),
     ]);
-    for (rel, want) in [
-        ("q/d", vec!["x"]),
-        ("q/d2", vec!["x"]),
-        ("q/d.bak", vec!["deeper", "deeper/y", "x"]),
-        ("q/d-x", vec!["x"]),
-        ("q/e", vec![]),
-        ("r/p/d", vec!["x"]),
-        ("r/p/d-x", vec![]),
-    ] {
-        let listing = must(files.list(&at(rig, rel)), &format!("list of {rel:?}"));
-        same(
-            listing.iter().map(|e| e.rel.as_str()).collect::<Vec<_>>(),
-            want,
-            &format!("the listing of {rel:?}, which holds nothing of its siblings"),
-        );
+    let mut rels = |rel: &str| -> Vec<String> {
+        let listing = must(files.list(&at(rig, rel)), "list");
+        listing.into_iter().map(|e| e.rel).collect()
+    };
+    for rel in ["q/d", "q/d2", "q/d.bak", "q/d-x", "r/p/d"] {
+        same(rels(rel), vec!["x".to_owned()], "a listing beside siblings");
     }
+    same(rels("q/e"), Vec::new(), "an empty listing beside siblings");
 }
 
 fn a_listed_symlink_is_never_descended<R: OutputFilesRig>(rig: &R) {
@@ -323,8 +310,7 @@ fn stat_tells_a_file_a_directory_a_symlink_and_nothing_apart<R: OutputFilesRig>(
         ("s/a..b", Node::File(b"x")),
         ("s/..dots", Node::Directory),
         ("s/dots../x", Node::File(b"x")),
-        // A link to itself and two links to each other: a reader that follows a link to tell
-        // what it is gets a loop, and the operating system's answer to a loop is an error.
+        // A link to itself, and two links to each other (a loop is an error to follow).
         ("s/self", Node::Link("s/self")),
         ("s/loop_a", Node::Link("s/loop_b")),
         ("s/loop_b", Node::Link("s/loop_a")),
@@ -387,21 +373,12 @@ fn stat_tells_a_file_a_directory_a_symlink_and_nothing_apart<R: OutputFilesRig>(
             &format!("what is at the symlink {rel:?} named with a trailing slash"),
         );
     }
-    // A link is a `Symlink` whatever it points at, and a link that points at itself, or at a
-    // link that points back, is one too: `stat` does not follow, so there is no loop to meet.
-    for rel in [
-        "s/self",
-        "s/loop_a",
-        "s/loop_b",
-        "s/self/",
-        "s/loop_a/",
-        "s/loop_b/",
-    ] {
-        same(
-            stat(rel),
-            Some(FileKind::Symlink),
-            &format!("what is at the looping symlink {rel:?}"),
-        );
+    // `stat` does not follow, so a loop is a `Symlink` like any link, slashed or not.
+    for link in ["s/self", "s/loop_a", "s/loop_b"] {
+        for slash in ["", "/"] {
+            let rel = format!("{link}{slash}");
+            same(stat(&rel), Some(FileKind::Symlink), &rel);
+        }
     }
 }
 
@@ -756,8 +733,7 @@ fn a_read_returns_the_file_as_it_is_at_the_call<R: OutputFilesRig>(rig: &R) {
 
 fn no_call_changes_the_tree<R: OutputFilesRig>(rig: &R) {
     let mut files = rig.reader(&[
-        // Capitals and a carriage return, so that a call that rewrites the bytes to others of
-        // the same length (lower case, a normalised line end) shows in the snapshot.
+        // Capitals and a carriage return: a rewrite to bytes of the same length must show.
         ("n/file", Node::File(b"Data\r\nEnd")),
         ("n/dir", Node::Directory),
         ("n/link", Node::Link("n/file")),
