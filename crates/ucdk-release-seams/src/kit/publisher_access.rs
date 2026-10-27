@@ -182,9 +182,11 @@ pub(super) fn a_grant_for_another_repository_sends_nothing<R: PublisherRig>(rig:
 pub(super) fn a_grant_of_the_wrong_phase_is_denied_and_nothing_happens<R: PublisherRig>(rig: &R) {
     if staging_shape(rig).is_some() {
         a_commit_grant_stages_nothing_and_a_stage_grant_commits_nothing(rig);
-        a_grant_covers_the_coordinates_it_names_and_no_others(rig);
         a_yank_needs_the_commit_grant_that_names_it(rig);
         grants::an_abort_needs_the_stage_grant_that_names_it(rig);
+    }
+    for shape in rig.shapes() {
+        a_grant_covers_the_coordinates_it_names_and_no_others(rig, &shape);
     }
     grants::a_grant_names_every_field_of_the_coordinates_it_covers(rig);
     grants::every_shape_refuses_a_bad_write_grant(rig, Spoiled::Uncovered);
@@ -296,25 +298,34 @@ fn picked(trio: &Set, mask: usize) -> Vec<Coordinate> {
 
 /// A grant of the right phase that names some of three coordinates and not all of them does not
 /// stage, commit or abort the three, whichever it names: each one of them, and each two (the
-/// first and the last, the first and the one between, the one between and the last).
-fn a_grant_covers_the_coordinates_it_names_and_no_others<R: PublisherRig>(rig: &R) {
-    let mut p = staging_publisher(rig);
+/// first and the last, the first and the one between, the one between and the last). Held on
+/// every shape the rig declares; a channel that does not stage is not asked to stage or to abort.
+fn a_grant_covers_the_coordinates_it_names_and_no_others<R: PublisherRig>(
+    rig: &R,
+    shape: &ChannelShape,
+) {
+    let mut p = built(rig, shape);
     let trio = Set::of(rig, &["c", "d", "e"]);
     let blobs = trio.blobs();
     let items = trio.items(&blobs);
-    // Every subset but the empty one and the whole, by the bits of the mask.
-    for mask in 1..7 {
-        let some = rig.grant(&p, GrantPhase::Stage, &picked(&trio, mask));
-        is_denied(
-            p.stage(&some, &items),
-            &format!("a stage grant that names only the coordinates {mask:03b} of three"),
-        );
+    let phase = first_phase(&p);
+    if p.stages() {
+        // Every subset but the empty one and the whole, by the bits of the mask.
+        for mask in 1..7 {
+            let some = rig.grant(&p, GrantPhase::Stage, &picked(&trio, mask));
+            is_denied(
+                p.stage(&some, &items),
+                &format!(
+                    "a stage grant that names only the coordinates {mask:03b} of three ({shape:?})"
+                ),
+            );
+        }
     }
     for at in 0..3 {
         same(
-            observed(rig, &mut p, GrantPhase::Stage, &trio, at),
+            observed(rig, &mut p, phase, &trio, at),
             Presence::Absent,
-            "a coordinate after the refused stages",
+            &format!("a coordinate after the refused stages ({shape:?})"),
         );
     }
     stage(rig, &mut p, &trio);
@@ -322,27 +333,35 @@ fn a_grant_covers_the_coordinates_it_names_and_no_others<R: PublisherRig>(rig: &
         let some = rig.grant(&p, GrantPhase::Commit, &picked(&trio, mask));
         is_denied(
             p.commit(&some, &items),
-            &format!("a commit grant that names only the coordinates {mask:03b} of three"),
+            &format!(
+                "a commit grant that names only the coordinates {mask:03b} of three ({shape:?})"
+            ),
         );
     }
     for coord in &trio.coords {
         same(
             fetched(rig, &mut p, coord),
             None,
-            "the bytes of a coordinate after the refused commits",
+            &format!("the bytes of a coordinate after the refused commits ({shape:?})"),
         );
     }
-    for mask in 1..7 {
-        let some = rig.grant(&p, GrantPhase::Stage, &picked(&trio, mask));
-        is_denied(
-            p.abort(&some, &trio.coords),
-            &format!(
-                "a stage grant that names only the coordinates {mask:03b} of three cannot abort them"
-            ),
-        );
-    }
-    for at in 0..3 {
-        staged_held(observed(rig, &mut p, GrantPhase::Stage, &trio, at));
+    if p.stages() {
+        for mask in 1..7 {
+            let some = rig.grant(&p, GrantPhase::Stage, &picked(&trio, mask));
+            is_denied(
+                p.abort(&some, &trio.coords),
+                &format!(
+                    "a stage grant that names only the coordinates {mask:03b} of three cannot abort them ({shape:?})"
+                ),
+            );
+        }
+        if !shape.group_addressed {
+            // Staged state addressed by group is found only by an observe told the set: the
+            // scenarios of that rule hold it, and this one does not depend on them.
+            for at in 0..3 {
+                staged_held(observed(rig, &mut p, GrantPhase::Stage, &trio, at));
+            }
+        }
     }
 }
 

@@ -363,7 +363,12 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
             Stub::Flaw(F::StrangerObservesPrivateWithASet),
             &[READ_GRANT],
         ),
-        (Stub::Flaw(F::StrangerFetchesStaged), &[PUBLIC_READ]),
+        // The scenario about read grants asks a private channel for a stranger's fetch of a staged
+        // coordinate too.
+        (
+            Stub::Flaw(F::StrangerFetchesStaged),
+            &[PUBLIC_READ, READ_GRANT],
+        ),
         (
             Stub::Flaw(F::ListIncludesStaged),
             &[PUBLIC_READ, WRITER_READS],
