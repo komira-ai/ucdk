@@ -8,10 +8,12 @@ mod rigs;
 use rigs::hostile::{HostileRig, Wrong};
 use rigs::loose::{LooseRig, ShallowRig};
 use rigs::output_files::{FakeFilesRig, Flaw as Files};
+use rigs::process_runner::{FakeProcessRig, Flaw as Process};
 use rigs::store::{FakeStoreRig, Flaw as Store};
 use rigs::{each_fails_alone, further_stubs_fail_exactly, names};
 use ucdk_release_seams::kit::{
-    output_files_scenarios, run_output_files_kit, run_store_kit, store_scenarios,
+    output_files_scenarios, process_runner_scenarios, run_output_files_kit, run_process_runner_kit,
+    run_store_kit, store_scenarios,
 };
 
 #[test]
@@ -22,6 +24,59 @@ fn each_further_output_files_stub_fails_the_scenarios_that_hold_it() {
 #[test]
 fn each_further_store_stub_fails_the_scenarios_that_hold_it() {
     further_store();
+}
+
+#[test]
+fn each_further_process_runner_stub_fails_the_scenarios_that_hold_it() {
+    further_process_runner();
+}
+
+fn further_process_runner() {
+    const BARE: &str = "a_bare_name_is_resolved_on_the_childs_path_and_never_the_runners";
+    const ARGV: &str = "argv_and_environment_are_exactly_what_was_given";
+    const EXIT: &str = "exit_code_and_signal_are_distinguished";
+    const OUTPUT: &str = "output_is_bounded_and_its_tail_is_kept";
+    further_stubs_fail_exactly(
+        "process runner",
+        &names(&process_runner_scenarios::<FakeProcessRig>()),
+        &[
+            (
+                Process::CwdIgnored,
+                &["argv_and_environment_are_exactly_what_was_given"],
+            ),
+            (
+                Process::NoPathFallsBackToOwn,
+                &["a_name_found_nowhere_on_the_childs_path_is_unstartable"],
+            ),
+            (
+                Process::AStopPoisonsTheRunner,
+                &[
+                    ARGV,
+                    "the_runner_beats_on_progress_and_stops_the_child_when_told",
+                ],
+            ),
+            (
+                Process::EnvironmentLeaksIntoTheNextRun,
+                &["argv_and_environment_are_exactly_what_was_given"],
+            ),
+            (
+                Process::LastPathEntryWins,
+                &["a_bare_name_is_resolved_on_the_childs_path_and_never_the_runners"],
+            ),
+            (Process::CwdIsFirstRuns, &[ARGV]),
+            (Process::LimitIsFirstRuns, &[OUTPUT]),
+            (Process::PathMissCached, &[BARE]),
+            (Process::StderrTailAccumulates, &[OUTPUT]),
+            (Process::EnvLeaksAfterAnUnstartableRun, &[ARGV]),
+            (Process::EnvLeaksAfterAStop, &[ARGV]),
+            (Process::SignalOtherThan9IsCode128Plus, &[EXIT]),
+            (Process::HighCodeIsASignal, &[EXIT]),
+            (Process::ZeroLimitMeansUnlimited, &[OUTPUT]),
+            (Process::EnvValueWithEqualsTruncated, &[ARGV]),
+            (Process::NonexistentPathEntryIsFatal, &[BARE]),
+        ],
+        |flaw| run_process_runner_kit(&FakeProcessRig::flawed(flaw)),
+    );
 }
 
 fn further_store() {
@@ -290,6 +345,7 @@ fn further_output_files() {
 fn each_scenario_fails_on_its_nonconforming_stub() {
     output_files();
     store();
+    process_runner();
 }
 
 fn output_files() {
@@ -346,6 +402,52 @@ fn output_files() {
             ),
         ],
         |flaw| run_output_files_kit(&FakeFilesRig::flawed(flaw)),
+    );
+}
+
+fn process_runner() {
+    each_fails_alone(
+        "process runner",
+        &names(&process_runner_scenarios::<FakeProcessRig>()),
+        &[
+            (
+                "a_bare_name_is_resolved_on_the_childs_path_and_never_the_runners",
+                Process::ResolvesOnItsOwnPath,
+            ),
+            (
+                "a_name_found_nowhere_on_the_childs_path_is_unstartable",
+                Process::BareNameNotFoundIsPermanent,
+            ),
+            (
+                "argv_and_environment_are_exactly_what_was_given",
+                Process::InheritsTheEnvironment,
+            ),
+            (
+                "no_shell_interprets_an_argument",
+                Process::ShellExpandsAnArgument,
+            ),
+            (
+                "exit_code_and_signal_are_distinguished",
+                Process::SignalIsAnExitCode,
+            ),
+            (
+                "unstartable_is_not_a_nonzero_exit",
+                Process::UnstartableIsAnExit,
+            ),
+            (
+                "output_is_bounded_and_its_tail_is_kept",
+                Process::KeepsTheHead,
+            ),
+            (
+                "the_runner_beats_on_progress_and_stops_the_child_when_told",
+                Process::IgnoresStop,
+            ),
+            (
+                "a_stopped_child_and_its_process_group_are_gone",
+                Process::LeavesTheGroupRunning,
+            ),
+        ],
+        |flaw| run_process_runner_kit(&FakeProcessRig::flawed(flaw)),
     );
 }
 
