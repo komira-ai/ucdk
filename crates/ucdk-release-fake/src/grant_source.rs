@@ -18,6 +18,8 @@ use crate::token::{coordinate_key, encode};
 pub struct JobClaims {
     pub subject: String,
     pub audience: String,
+    /// The CI environment the job runs in.
+    pub environment: String,
     pub pinned: BTreeMap<String, String>,
 }
 
@@ -103,12 +105,16 @@ impl GrantSource for FakeGrantSource {
         if req.coordinates.len() > self.limit {
             return Err(SeamError::Refused(Reason::Credential));
         }
-        let subject = if req.exceptional {
-            &declared.exceptional_subject
+        let (subject, environment) = if req.exceptional {
+            (
+                &declared.exceptional_subject,
+                &declared.exceptional_environment,
+            )
         } else {
-            &declared.subject
+            (&declared.subject, &declared.environment)
         };
         if *subject != self.claims.subject
+            || *environment != self.claims.environment
             || declared.audience != self.claims.audience
             || declared.pinned_claims != self.claims.pinned
         {

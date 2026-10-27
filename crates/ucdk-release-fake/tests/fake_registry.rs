@@ -9,11 +9,11 @@ use common::*;
 use sha2::{Digest as _, Sha256};
 use ucdk_core::{Hash256, ManualClock};
 use ucdk_release::codec::{GrantFault, GrantPhase};
-use ucdk_release::publish::Presence;
+use ucdk_release::publish::{Held, Presence};
 use ucdk_release_fake::{FakeRegistry, Read, Scopes};
-use ucdk_release_proto::v1::{ArtifactType, Reason};
+use ucdk_release_proto::v1::{ArtifactType, Coordinate, Reason};
 use ucdk_release_seams::{
-    CommitAnswer, CommitUnit, Grant, ListScope, Publisher, SeamError, StageAnswer,
+    Blob, CommitAnswer, CommitUnit, Grant, ListScope, Publisher, SeamError, StageAnswer, StageItem,
 };
 
 fn sha(bytes: &[u8]) -> String {
@@ -398,7 +398,7 @@ fn abort_gives_staged_state_back_and_never_touches_a_committed_coordinate() {
 fn staged_state_of_another_writer_blocks_a_stage_and_is_not_seen() {
     let mut w = World::new();
     let set = Set::of(&["a"]);
-    w.registry.stage_other_bytes(&set.coords[0]);
+    w.registry.stage_other_bytes(&set.coords[0], b"theirs");
     let (blobs, g) = (set.blobs(), w.grant(GrantPhase::Stage, &set.coords));
     assert_eq!(
         w.registry.stage(&g, &set.items(&blobs)),
@@ -466,6 +466,214 @@ fn an_observe_with_a_set_that_lacks_the_coordinate_is_refused() {
         w.registry.observe(&g, &set.coords[0], &other.items(&blobs)),
         Err(SeamError::Refused(Reason::Channel))
     );
+}
+
+fn blob<'a>(c: &'a Coordinate, bytes: &'a [u8]) -> Blob<'a> {
+    Blob {
+        name: c.name.as_str(),
+        bytes,
+    }
+}
+
+fn item<'a>(c: &'a Coordinate, file: &'a Blob<'a>, held: &'a Held) -> StageItem<'a> {
+    StageItem {
+        coordinate: c,
+        file,
+        held,
+    }
+}
+
+fn is_permanent<T: std::fmt::Debug>(answer: &Result<T, SeamError>) -> bool {
+    matches!(answer, Err(SeamError::Permanent(_)))
+}
+
+#[test]
+fn a_stage_that_names_a_coordinate_twice_is_refused_and_stages_nothing() {
+    let mut w = World::new();
+    let (a, h) = (coordinate("a"), held());
+    let (x, evil) = (blob(&a, b"X"), blob(&a, b"EVIL"));
+    let g = w.grant(GrantPhase::Stage, std::slice::from_ref(&a));
+    let answer = w
+        .registry
+        .stage(&g, &[item(&a, &x, &h), item(&a, &evil, &h)]);
+    assert!(is_permanent(&answer), "{answer:?}");
+    assert!(!w.registry.is_staged(&a));
+    assert!(w.registry.stage_log().is_empty());
+}
+
+#[test]
+fn a_commit_that_names_a_staged_coordinate_twice_is_refused_and_commits_nothing() {
+    let mut w = World::new();
+    let (a, h) = (coordinate("a"), held());
+    let (x, evil) = (blob(&a, b"X"), blob(&a, b"EVIL"));
+    let g = w.grant(GrantPhase::Stage, std::slice::from_ref(&a));
+    assert_eq!(
+        w.registry.stage(&g, &[item(&a, &x, &h)]),
+        Ok(StageAnswer::Staged)
+    );
+    let g = w.grant(GrantPhase::Commit, std::slice::from_ref(&a));
+    let answer = w
+        .registry
+        .commit(&g, &[item(&a, &x, &h), item(&a, &evil, &h)]);
+    assert!(is_permanent(&answer), "{answer:?}");
+    assert_eq!(w.registry.bytes(&a), None);
+    assert!(w.registry.is_staged(&a));
+    assert!(w.registry.commit_log().is_empty());
+    // The honest commit still lands, with the staged bytes.
+    assert_eq!(
+        w.registry.commit(&g, &[item(&a, &x, &h)]),
+        Ok(CommitAnswer::Committed)
+    );
+    assert_eq!(w.registry.bytes(&a), Some(&b"X"[..]));
+}
+
+#[test]
+fn a_commit_that_names_a_coordinate_twice_on_a_channel_that_does_not_stage_commits_nothing() {
+    let clock = ManualClock::at(1_000_000);
+    let mut w = World::with(
+        &clock,
+        FakeRegistry::new(&clock, LOCATION).without_staging(),
+    );
+    let (a, h) = (coordinate("a"), held());
+    let (x, evil) = (blob(&a, b"X"), blob(&a, b"EVIL"));
+    let g = w.grant(GrantPhase::Commit, std::slice::from_ref(&a));
+    let answer = w
+        .registry
+        .commit(&g, &[item(&a, &x, &h), item(&a, &evil, &h)]);
+    assert!(is_permanent(&answer), "{answer:?}");
+    assert_eq!(w.registry.bytes(&a), None);
+}
+
+#[test]
+fn an_observe_with_a_set_that_names_a_coordinate_twice_is_refused() {
+    let mut w = World::new();
+    let (a, h) = (coordinate("a"), held());
+    let (x, evil) = (blob(&a, b"X"), blob(&a, b"EVIL"));
+    let g = w.grant(GrantPhase::Read, std::slice::from_ref(&a));
+    let answer = w
+        .registry
+        .observe(&g, &a, &[item(&a, &x, &h), item(&a, &evil, &h)]);
+    assert!(is_permanent(&answer), "{answer:?}");
+}
+
+#[test]
+fn a_commit_that_differs_from_what_was_staged_is_refused_and_the_staged_state_stays() {
+    let mut w = World::new();
+    let (a, h) = (coordinate("a"), held());
+    let (x, y) = (blob(&a, b"X"), blob(&a, b"Y"));
+    let g = w.grant(GrantPhase::Stage, std::slice::from_ref(&a));
+    w.registry.stage(&g, &[item(&a, &x, &h)]).unwrap();
+    let g = w.grant(GrantPhase::Commit, std::slice::from_ref(&a));
+    // Other bytes.
+    let answer = w.registry.commit(&g, &[item(&a, &y, &h)]);
+    assert!(is_permanent(&answer), "{answer:?}");
+    // The same bytes with another stamp.
+    let mut stamped = held();
+    stamped.exceptional = true;
+    let answer = w.registry.commit(&g, &[item(&a, &x, &stamped)]);
+    assert!(is_permanent(&answer), "{answer:?}");
+    assert_eq!(w.registry.bytes(&a), None);
+    assert!(w.registry.is_staged(&a));
+    assert_eq!(
+        w.registry.commit(&g, &[item(&a, &x, &h)]),
+        Ok(CommitAnswer::Committed)
+    );
+    assert_eq!(w.registry.bytes(&a), Some(&b"X"[..]));
+}
+
+#[test]
+fn a_private_repository_refuses_every_read_without_a_grant() {
+    let clock = ManualClock::at(1_000_000);
+    let mut w = World::with(&clock, FakeRegistry::new(&clock, LOCATION).private());
+    let set = Set::of(&["a"]);
+    let (blobs, g) = (set.blobs(), w.grant(GrantPhase::Stage, &set.coords));
+    w.registry.stage(&g, &set.items(&blobs)).unwrap();
+    assert_eq!(commit(&mut w, &set), Ok(CommitAnswer::Committed));
+    let denied = Some(SeamError::GrantRefused(GrantFault::Denied));
+    let none = Grant::none();
+    assert_eq!(w.registry.observe(&none, &set.coords[0], &[]).err(), denied);
+    assert_eq!(w.registry.fetch(&none, &set.coords[0]).err(), denied);
+    assert_eq!(w.registry.newest(&none, "stable", "a").err(), denied);
+    let scope = ListScope {
+        channel: "stable".to_owned(),
+        prefix: String::new(),
+    };
+    assert_eq!(w.registry.list(&none, &scope).err(), denied);
+    // The same reads with a read grant are answered.
+    let g = w.grant(GrantPhase::Read, &set.coords);
+    assert!(matches!(
+        w.registry.observe(&g, &set.coords[0], &[]),
+        Ok(Presence::Present(_))
+    ));
+    assert_eq!(
+        w.registry.fetch(&g, &set.coords[0]),
+        Ok(Some(b"a".to_vec()))
+    );
+    assert_eq!(w.registry.newest(&g, "stable", "a").unwrap().len(), 1);
+    assert_eq!(w.registry.list(&g, &scope).unwrap().len(), 1);
+}
+
+#[test]
+fn a_channel_that_commits_per_coordinate_refuses_a_set_and_takes_one_at_a_time() {
+    let clock = ManualClock::at(1_000_000);
+    let mut w = World::with(
+        &clock,
+        FakeRegistry::new(&clock, LOCATION).commit_per_coordinate(),
+    );
+    let set = Set::of(&["a", "b"]);
+    let (blobs, g) = (set.blobs(), w.grant(GrantPhase::Stage, &set.coords));
+    let items = set.items(&blobs);
+    assert_eq!(w.registry.stage(&g, &items), Ok(StageAnswer::Staged));
+    let g = w.grant(GrantPhase::Commit, &set.coords);
+    let answer = w.registry.commit(&g, &items);
+    assert!(is_permanent(&answer), "{answer:?}");
+    assert_eq!(w.registry.bytes(&set.coords[0]), None);
+    assert_eq!(w.registry.bytes(&set.coords[1]), None);
+    assert!(w.registry.commit_log().is_empty());
+    for (at, item) in items.iter().enumerate() {
+        assert_eq!(
+            w.registry.commit(&g, std::slice::from_ref(item)),
+            Ok(CommitAnswer::Committed)
+        );
+        assert_eq!(w.registry.commit_log().len(), at + 1);
+    }
+    assert_eq!(w.registry.bytes(&set.coords[1]), Some(&b"b"[..]));
+}
+
+#[test]
+fn staged_state_of_another_writer_is_seen_with_its_digest_only_when_made_visible() {
+    let mut w = World::new();
+    let set = Set::of(&["a"]);
+    w.registry.stage_other_bytes(&set.coords[0], b"theirs");
+    w.registry.others_staged_visible();
+    let g = w.grant(GrantPhase::Read, &set.coords);
+    let Ok(Presence::Staged(held)) = w.registry.observe(&g, &set.coords[0], &[]) else {
+        panic!("a grant sees the staged state of another writer");
+    };
+    assert_eq!(held.digest, sha(b"theirs"));
+    // A stranger still sees nothing.
+    assert_eq!(stranger(&mut w, &set, 0), Presence::Absent);
+}
+
+#[test]
+fn staged_state_of_another_writer_on_a_grouped_registry_is_seen_only_with_a_set() {
+    let clock = ManualClock::at(1_000_000);
+    let mut w = World::with(
+        &clock,
+        FakeRegistry::new(&clock, LOCATION).group_addressed(),
+    );
+    let set = Set::of(&["a"]);
+    w.registry.stage_other_bytes(&set.coords[0], b"theirs");
+    w.registry.others_staged_visible();
+    let (blobs, g) = (set.blobs(), w.grant(GrantPhase::Read, &set.coords));
+    assert_eq!(
+        w.registry.observe(&g, &set.coords[0], &[]),
+        Ok(Presence::Absent)
+    );
+    assert!(matches!(
+        w.registry.observe(&g, &set.coords[0], &set.items(&blobs)),
+        Ok(Presence::Staged(_))
+    ));
 }
 
 mod grouped {

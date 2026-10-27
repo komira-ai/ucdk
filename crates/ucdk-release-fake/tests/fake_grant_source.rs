@@ -167,9 +167,40 @@ fn an_exceptional_run_presents_the_exceptional_subject() {
     let clock = ManualClock::at(0);
     let mut job = claims();
     job.subject = "exceptional".to_owned();
+    job.environment = "publish-exceptional".to_owned();
     let mut source = FakeGrantSource::new(&clock, job);
     ask(&mut source, GrantPhase::Stage, true, 1).unwrap();
     assert_eq!(source.exchanges()[0].subject, "exceptional");
+}
+
+#[test]
+fn a_job_in_the_wrong_environment_is_denied_and_spends_nothing() {
+    let clock = ManualClock::at(0);
+    // An ordinary run from another environment than the declared one.
+    let mut job = claims();
+    job.environment = "scratch".to_owned();
+    let mut source = FakeGrantSource::new(&clock, job);
+    assert_eq!(
+        ask(&mut source, GrantPhase::Stage, false, 1).err(),
+        Some(SeamError::GrantRefused(GrantFault::Denied))
+    );
+    // An exceptional run whose subject is right but which runs in the ordinary environment.
+    let mut job = claims();
+    job.subject = "exceptional".to_owned();
+    let mut source = FakeGrantSource::new(&clock, job);
+    assert_eq!(
+        ask(&mut source, GrantPhase::Stage, true, 1).err(),
+        Some(SeamError::GrantRefused(GrantFault::Denied))
+    );
+    // An ordinary run from the exceptional environment.
+    let mut job = claims();
+    job.environment = "publish-exceptional".to_owned();
+    let mut source = FakeGrantSource::new(&clock, job);
+    assert_eq!(
+        ask(&mut source, GrantPhase::Stage, false, 1).err(),
+        Some(SeamError::GrantRefused(GrantFault::Denied))
+    );
+    assert!(source.exchanges().is_empty());
 }
 
 #[test]

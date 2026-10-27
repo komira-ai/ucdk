@@ -65,6 +65,7 @@ pub fn claims() -> JobClaims {
     JobClaims {
         subject: "release".to_owned(),
         audience: "registry".to_owned(),
+        environment: "publish".to_owned(),
         pinned: BTreeMap::new(),
     }
 }

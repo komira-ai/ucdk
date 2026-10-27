@@ -74,6 +74,7 @@ struct Faults {
     no_digest_exposed: bool,
     unreadable_after: Option<u32>,
     lose_staged_state: bool,
+    others_staged_visible: bool,
     commit_set_fails_whole: bool,
     fail_group_read: bool,
     fail_index_read: bool,
@@ -90,11 +91,12 @@ pub struct FakeRegistry {
     conditional: bool,
     group_addressed: bool,
     open: bool,
+    private: bool,
     limit: usize,
     faults: Faults,
     committed: BTreeMap<String, Stored>,
     staged: BTreeMap<String, Staged>,
-    others_staged: BTreeSet<String>,
+    others_staged: BTreeMap<String, Stored>,
     commit_calls: u32,
     observes: u32,
     commits: Vec<Vec<String>>,
@@ -110,6 +112,18 @@ fn digest(bytes: &[u8]) -> String {
 
 fn keys(items: &[StageItem<'_>]) -> Vec<String> {
     items.iter().map(|i| coordinate_key(i.coordinate)).collect()
+}
+
+/// Refuses a set that names one coordinate twice: its two copies could carry different bytes,
+/// and a registry cannot hold both.
+fn distinct(ks: &[String]) -> Result<(), SeamError> {
+    let mut seen = BTreeSet::new();
+    if ks.iter().any(|k| !seen.insert(k)) {
+        return Err(SeamError::Permanent(
+            "the set names a coordinate twice".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// The group a set of items is staged under: every member with its digest, so the group read of
@@ -144,11 +158,12 @@ impl FakeRegistry {
             conditional: true,
             group_addressed: false,
             open: false,
+            private: false,
             limit: usize::MAX,
             faults: Faults::default(),
             committed: BTreeMap::new(),
             staged: BTreeMap::new(),
-            others_staged: BTreeSet::new(),
+            others_staged: BTreeMap::new(),
             commit_calls: 0,
             observes: 0,
             commits: Vec::new(),
@@ -165,7 +180,9 @@ impl FakeRegistry {
         self
     }
 
-    /// A channel that commits each coordinate on its own.
+    /// A channel that commits each coordinate on its own: a `commit` that names more than one
+    /// coordinate is refused (`Permanent`, nothing committed), so an engine that sends a set to
+    /// such a channel is caught.
     #[must_use]
     pub fn commit_per_coordinate(mut self) -> Self {
         self.unit = CommitUnit::Coordinate;
@@ -191,6 +208,14 @@ impl FakeRegistry {
     #[must_use]
     pub fn open(mut self) -> Self {
         self.open = true;
+        self
+    }
+
+    /// A private repository: every read (observe, fetch, newest, list) needs a grant, as a
+    /// write does. A registry is public until this is called.
+    #[must_use]
+    pub fn private(mut self) -> Self {
+        self.private = true;
         self
     }
 
@@ -272,14 +297,32 @@ impl FakeRegistry {
         self.faults.unreadable_after = Some(n);
     }
 
-    /// Staged coordinates vanish between `stage` and `commit`.
+    /// Staged coordinates vanish between `stage` and `commit`: nothing is kept at `stage`, so
+    /// every reader, the stager's own grant included, finds `Absent`.
     pub fn lose_staged_state(&mut self) {
         self.faults.lose_staged_state = true;
     }
 
-    /// `coordinate` is staged by another writer, with other bytes.
-    pub fn stage_other_bytes(&mut self, coordinate: &Coordinate) {
-        self.others_staged.insert(coordinate_key(coordinate));
+    /// `coordinate` is staged by another writer, with `bytes`. A stage over it answers
+    /// `Duplicate`; an observe finds `Absent`, the staged state of another writer being held
+    /// where the grant cannot see it, unless `others_staged_visible` is called.
+    pub fn stage_other_bytes(&mut self, coordinate: &Coordinate, bytes: &[u8]) {
+        self.others_staged.insert(
+            coordinate_key(coordinate),
+            Stored {
+                coordinate: coordinate.clone(),
+                bytes: bytes.to_vec(),
+                held: Held::default(),
+                yanked: false,
+            },
+        );
+    }
+
+    /// An observe that carries a grant sees the staged state of another writer, with that
+    /// writer's digest (and, on a registry that addresses staged state by group, only when it
+    /// is told a set).
+    pub fn others_staged_visible(&mut self) {
+        self.faults.others_staged_visible = true;
     }
 
     /// A commit of a set fails whole: nothing becomes readable.
@@ -351,11 +394,12 @@ impl FakeRegistry {
         Ok(())
     }
 
-    /// Admits a call that needs `need` and covers `coords`: a read needs no grant, and a grant
-    /// of any scope may read; a write needs the scope of its phase and every coordinate.
+    /// Admits a call that needs `need` and covers `coords`: a read of a public repository needs
+    /// no grant, and a grant of any scope may read; a write, and a read of a private repository,
+    /// need the scope of their phase and every coordinate.
     fn admit(&self, g: &Grant, need: Need, coords: &[String]) -> Result<(), SeamError> {
         if g.is_none() {
-            return if need == Need::Read || self.open {
+            return if (need == Need::Read && !self.private) || self.open {
                 Ok(())
             } else {
                 Err(SeamError::GrantRefused(GrantFault::Denied))
@@ -431,8 +475,12 @@ impl Publisher for FakeRegistry {
         self.calls.push(format!("observe {key}"));
         self.gate()?;
         self.admit(g, Need::Read, std::slice::from_ref(&key))?;
-        if !set.is_empty() && !keys(set).contains(&key) {
-            return Err(SeamError::Refused(Reason::Channel));
+        if !set.is_empty() {
+            let declared = keys(set);
+            distinct(&declared)?;
+            if !declared.contains(&key) {
+                return Err(SeamError::Refused(Reason::Channel));
+            }
         }
         self.observes += 1;
         if self
@@ -468,8 +516,14 @@ impl Publisher for FakeRegistry {
         // Staged state is visible only to a grant, and, when it is addressed by group, only to
         // an observe that is told the set it was staged under.
         let group_ok = |s: &Staged| !self.group_addressed || (by_group && s.group == group_of(set));
-        Ok(match self.staged.get(&key) {
-            Some(s) if !g.is_none() && group_ok(s) => Presence::Staged(self.held_of(&s.stored)),
+        let other = self.others_staged.get(&key).filter(|_| {
+            self.faults.others_staged_visible && !g.is_none() && (!self.group_addressed || by_group)
+        });
+        Ok(match (self.staged.get(&key), other) {
+            (Some(s), _) if !g.is_none() && group_ok(s) => {
+                Presence::Staged(self.held_of(&s.stored))
+            }
+            (None, Some(theirs)) => Presence::Staged(self.held_of(theirs)),
             _ => Presence::Absent,
         })
     }
@@ -484,11 +538,12 @@ impl Publisher for FakeRegistry {
             ));
         }
         self.admit(g, Need::Stage, &ks)?;
+        distinct(&ks)?;
         self.stages.push(ks.clone());
         let taken = |k: &String| {
             self.committed.contains_key(k)
                 || self.staged.contains_key(k)
-                || self.others_staged.contains(k)
+                || self.others_staged.contains_key(k)
         };
         if ks.iter().any(taken) {
             return Ok(StageAnswer::Duplicate);
@@ -532,6 +587,12 @@ impl Publisher for FakeRegistry {
         self.commit_calls += 1;
         let n = self.commit_calls;
         self.admit(g, Need::Commit, &ks)?;
+        distinct(&ks)?;
+        if self.unit == CommitUnit::Coordinate && ks.len() > 1 {
+            return Err(SeamError::Permanent(
+                "the channel commits one coordinate at a time".to_owned(),
+            ));
+        }
         self.commits.push(ks.clone());
         if self.faults.lose_answer_before_commit == Some(n) {
             return Err(SeamError::Unknown("the answer was lost".to_owned()));
@@ -545,10 +606,19 @@ impl Publisher for FakeRegistry {
         if ks.iter().any(|k| self.committed.contains_key(k)) {
             return Ok(CommitAnswer::Duplicate);
         }
-        if self.staging && ks.iter().any(|k| !self.staged.contains_key(k)) {
-            return Err(SeamError::Permanent(
-                "a coordinate is not staged".to_owned(),
-            ));
+        if self.staging {
+            for (k, item) in ks.iter().zip(items) {
+                let Some(staged) = self.staged.get(k) else {
+                    return Err(SeamError::Permanent(
+                        "a coordinate is not staged".to_owned(),
+                    ));
+                };
+                if staged.stored.bytes != item.file.bytes || staged.stored.held != *item.held {
+                    return Err(SeamError::Permanent(
+                        "a coordinate differs from what was staged".to_owned(),
+                    ));
+                }
+            }
         }
         let landing = if self.faults.torn_commit {
             1
