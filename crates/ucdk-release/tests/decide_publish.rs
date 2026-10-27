@@ -27,7 +27,7 @@ fn held(digest: &str) -> Held {
 fn table_over_presence_digest_yank() {
     // Every presence (absent, staged, present, yanked) with every digest a registry can report
     // beside ours: the same, another, and none exposed at all. A registry that exposes no digest
-    // is never equal to ours, and a yanked coordinate is burned whatever its bytes.
+    // is never equal to ours, and a yanked coordinate is withdrawn whatever its bytes.
     type Row = (&'static str, fn(Held) -> Presence, [PublishDecision; 3]);
     let rows: [Row; 3] = [
         (
@@ -67,6 +67,33 @@ fn table_over_presence_digest_yank() {
     }
     // Nothing is there, so there is no digest to compare.
     assert_eq!(decide_publish(OURS, &Presence::Absent), Put);
+}
+
+#[test]
+fn a_burned_coordinate_is_refused_as_burned_and_is_not_absent() {
+    // A burned number holds no bytes, so no digest of ours can match it. It is refused with its
+    // own reason: not `Put` (the number can never be used), not a yank (nothing was published),
+    // and not the "no digest exposed" refusal.
+    assert_eq!(
+        decide_publish(OURS, &Presence::Burned),
+        Refused(Reason::PublishBurned)
+    );
+    assert_ne!(
+        decide_publish(OURS, &Presence::Burned),
+        decide_publish(OURS, &Presence::Absent)
+    );
+    assert_ne!(
+        decide_publish(OURS, &Presence::Burned),
+        Refused(Reason::PublishYanked)
+    );
+    // The ledger's record changes nothing about it, a confirmed publication included.
+    for record in Stand::ALL {
+        assert_eq!(
+            decide_publish_recorded(OURS, record, &Presence::Burned),
+            Refused(Reason::PublishBurned),
+            "{record:?}"
+        );
+    }
 }
 
 #[test]
@@ -137,6 +164,7 @@ fn the_decision_over_every_record_state_and_report() {
             Presence::Staged(held(digest)),
             Presence::Present(held(digest)),
             Presence::Yanked(held(digest)),
+            Presence::Burned,
         ]
     };
     assert_eq!(Stand::ALL.len(), 4);

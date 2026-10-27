@@ -109,9 +109,30 @@ fn a_file_the_entry_does_not_hold_is_refused() {
 }
 
 #[test]
+fn a_conda_package_is_identified_by_the_sha256_of_its_file_bytes() {
+    let decl = ArtifactDecl {
+        r#type: ArtifactType::Conda as i32,
+        ..file_decl()
+    };
+    let entry = Entry::from([("tool.conda".to_owned(), BYTES.to_vec())]);
+    let manifest =
+        compose_manifest(&decl, PLATFORM, &stamp(), "tool.conda", &entry).expect("composes");
+    assert_eq!(manifest.r#type, ArtifactType::Conda as i32);
+    assert_eq!(manifest.sha256, hex(BYTES));
+    assert_eq!(manifest.size, BYTES.len() as u64);
+    // The same bytes as a plain file give the same identity: the type does not change the digest.
+    let plain = compose_manifest(&file_decl(), PLATFORM, &stamp(), "tool.bin", &file_entry())
+        .expect("composes");
+    assert_eq!(manifest.sha256, plain.sha256);
+    assert_eq!(
+        verify_member(&decl, &manifest, &entry, PLATFORM, &stamp()),
+        Ok(())
+    );
+}
+
+#[test]
 fn a_type_that_names_no_identity_has_no_manifest() {
     for kind in [
-        ArtifactType::Conda as i32,
         ArtifactType::Python as i32,
         ArtifactType::Npm as i32,
         ArtifactType::Unspecified as i32,

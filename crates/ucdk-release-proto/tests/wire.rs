@@ -331,3 +331,15 @@ fn the_vanished_publication_reason_decodes_from_literal_bytes() {
     assert_eq!(report.name, "a");
     assert_eq!(Reason::PublishStage as i32, 34);
 }
+
+#[test]
+fn the_burned_publication_reason_decodes_from_literal_bytes() {
+    // 3 reason 36 (a coordinate whose number a failed group burned), then 1 name "a". The number
+    // follows the last one in use and moves none of the earlier ones.
+    let bytes = [0x18, 0x24, 0x0A, 0x01, b'a'];
+    let report = ActionReport::decode(bytes.as_slice()).expect("decodes");
+    assert_eq!(report.reason, Reason::PublishBurned as i32);
+    assert_eq!(report.reason, 36);
+    assert_eq!(report.name, "a");
+    assert_eq!(Reason::PublishVanished as i32, 35);
+}
