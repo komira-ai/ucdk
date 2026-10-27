@@ -7,17 +7,18 @@ use std::time::Duration;
 use ucdk_core::{Clock, ManualClock};
 use ucdk_release::codec::{GrantFault, GrantPhase};
 use ucdk_release::publish::{Held, Presence};
-use ucdk_release_fake::{FakeGrantSource, FakeRegistry, JobClaims, Read, coordinate_key};
+use ucdk_release_fake::{FakeRegistry, Read, coordinate_key};
 use ucdk_release_proto::v1::{ArtifactType, Coordinate, Reason, Repository};
 use ucdk_release_seams::kit::{
     Arrangement, ChannelShape, LOCATION, Payload, Placement, PublisherRig, ReadStep, Sibling,
-    coordinate, every_field_in_a_set_of_its_own, federated_repository, matching_job,
+    coordinate, every_field_in_a_set_of_its_own, federated_repository,
 };
 use ucdk_release_seams::{
-    CommitAnswer, CommitUnit, Grant, GrantRequest, GrantSource, ListScope, Listed, Publisher,
-    SeamError, StageAnswer, StageItem, YankUnit,
+    CommitAnswer, CommitUnit, Grant, ListScope, Listed, Publisher, SeamError, StageAnswer,
+    StageItem, YankUnit,
 };
 
+use super::publisher_grant::{issue, scope_of};
 use super::secret::texts;
 
 pub use super::publisher_flaw::{Flaw, Hook};
@@ -30,6 +31,8 @@ const FOREIGN_PLATFORM: &str = "plan9-mips";
 pub struct FakePublisherRig {
     clock: ManualClock,
     flaw: Option<Flaw>,
+    /// The stub is behind the channels that do not stage only.
+    flaw_only_unstaged: bool,
     hook: Option<Hook>,
     shapes: Vec<ChannelShape>,
     /// The rig says a version is sealed by its first group.
@@ -51,6 +54,7 @@ impl FakePublisherRig {
         Self {
             clock: ManualClock::at(1_000_000),
             flaw: None,
+            flaw_only_unstaged: false,
             hook: None,
             shapes: vec![
                 ChannelShape::staging(),
@@ -106,6 +110,16 @@ impl FakePublisherRig {
             flaw: Some(flaw),
             version_yank,
             ..self
+        }
+    }
+
+    /// The same rig with the stub of `flaw` behind the channels that do not stage only: the
+    /// channels of the other shapes are the conforming fake.
+    #[must_use]
+    pub fn with_flaw_only_unstaged(self, flaw: Flaw) -> Self {
+        Self {
+            flaw_only_unstaged: true,
+            ..self.with_flaw(flaw)
         }
     }
 
@@ -227,31 +241,6 @@ impl FakePublisherRig {
     }
 }
 
-/// A grant of `phase` for `coordinates` in `repository`, good now.
-pub(super) fn issue(
-    clock: &ManualClock,
-    repository: &Repository,
-    phase: GrantPhase,
-    coordinates: &[Coordinate],
-) -> Grant {
-    let job = matching_job();
-    let claims = JobClaims {
-        subject: job.subject,
-        audience: job.audience,
-        environment: job.environment,
-        pinned: job.pinned,
-    };
-    let mut source = FakeGrantSource::new(clock, claims);
-    source
-        .grant(&GrantRequest {
-            repository,
-            phase,
-            coordinates,
-            exceptional: false,
-        })
-        .expect("the issuer gives a grant")
-}
-
 pub struct Flawed {
     pub(super) inner: FakeRegistry,
     pub(super) clock: ManualClock,
@@ -286,6 +275,9 @@ impl PublisherRig for FakePublisherRig {
     }
 
     fn publisher(&self, shape: &ChannelShape) -> Flawed {
+        let flaw = self
+            .flaw
+            .filter(|_| !(self.flaw_only_unstaged && shape.stages));
         let mut registry = FakeRegistry::new(&self.clock, LOCATION);
         if !shape.stages {
             registry = registry.without_staging();
@@ -296,7 +288,7 @@ impl PublisherRig for FakePublisherRig {
         if shape.group_addressed {
             registry = registry.group_addressed();
         }
-        if self.per_coordinate || self.flaw == Some(Flaw::CommitUnitSaysSet) {
+        if self.per_coordinate || flaw == Some(Flaw::CommitUnitSaysSet) {
             registry = registry.commit_per_coordinate();
         }
         if self.unconditional {
@@ -308,7 +300,7 @@ impl PublisherRig for FakePublisherRig {
             known: Vec::new(),
             declared: Vec::new(),
             banned: self.banned(),
-            flaw: self.flaw,
+            flaw,
             shape: *shape,
             seals: self.seals,
             version_yank: self.version_yank,
@@ -492,11 +484,6 @@ impl PublisherRig for FakePublisherRig {
     fn can_burn(&self) -> bool {
         self.burns
     }
-}
-
-/// The scope of a grant: the first text its issuer wrote into the secret.
-fn scope_of(g: &Grant) -> String {
-    texts(g.secret()).into_iter().next().unwrap_or_default()
 }
 
 impl Flawed {

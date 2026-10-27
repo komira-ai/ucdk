@@ -16,6 +16,7 @@ pub mod output_files;
 pub mod process_runner;
 pub mod publisher;
 pub mod publisher_flaw;
+pub mod publisher_grant;
 pub mod publisher_more;
 pub mod publisher_plain;
 pub mod secret;

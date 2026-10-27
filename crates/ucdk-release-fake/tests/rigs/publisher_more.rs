@@ -4,7 +4,7 @@
 
 use ucdk_release::codec::GrantPhase;
 use ucdk_release::publish::{Held, Presence};
-use ucdk_release_proto::v1::{ArtifactType, Coordinate};
+use ucdk_release_proto::v1::{ArtifactType, Coordinate, Stamped};
 use ucdk_release_seams::kit::{
     Arrangement, ChannelShape, Payload, PublisherRig, ReadStep, Sibling, federated_repository,
 };
@@ -13,7 +13,8 @@ use ucdk_release_seams::{
     StageItem, YankUnit,
 };
 
-use super::publisher::{FakePublisherRig, Flawed, issue};
+use super::publisher::{FakePublisherRig, Flawed};
+use super::publisher_grant::issue;
 use super::secret::texts;
 
 /// One field of a coordinate.
@@ -78,11 +79,39 @@ pub enum More {
     /// An observe of a coordinate nobody staged is `Staged` when one of the name that differs in
     /// the field is staged.
     ObserveStagedSibling(Field),
+    /// A commit of a set that is refused for one coordinate still applies the others.
+    CommitPartialOnRefusal,
+    /// A stage of a set that is refused for one coordinate still stages the others.
+    StagePartialOnRefusal,
+    /// A yank also yanks the other coordinates of the commit that made the one it names.
+    YankWidensToTheCommitSet,
+    /// A yank also yanks every held coordinate whose name starts with the name it names.
+    YankByNamePrefix,
+    /// An observe of a coordinate nobody holds answers a held coordinate whose name extends its
+    /// name.
+    ObserveByNamePrefix,
+    /// A fetch of a coordinate nobody holds answers the bytes of a held coordinate whose name
+    /// extends its name.
+    FetchByNamePrefix,
+    /// A commit of one coordinate publishes the bytes another staged coordinate holds.
+    CommitPublishesOtherStagedBytes,
+    /// A commit that is answered `Duplicate` replaces the stamp the coordinate holds.
+    DuplicateRestamps,
+    /// An abort also drops the committed coordinates it does not name.
+    AbortDropsUnnamedCommitted,
+    /// While the listing lags, an observe of a coordinate another writer committed reads it.
+    ObserveOfOthersReadsTheLaggingList,
+    /// An observe echoes the digest the writer declared for a coordinate of a set of several.
+    EchoesOnAMultiMemberSet,
+    /// An observe of a yanked coordinate echoes the digest the writer declared.
+    EchoesOnAYankedCoordinate,
 }
 
 pub struct MoreRig {
     base: FakePublisherRig,
     flaw: More,
+    /// The stub is behind the channels that do not stage only.
+    only_unstaged: bool,
 }
 
 impl MoreRig {
@@ -92,14 +121,41 @@ impl MoreRig {
 
     /// The stub of `flaw` around the rig `base`.
     pub fn flawed_on(base: FakePublisherRig, flaw: More) -> Self {
-        Self { base, flaw }
+        Self {
+            base,
+            flaw,
+            only_unstaged: false,
+        }
+    }
+
+    /// The stub of `flaw` around the rig `base`, behind the channels that do not stage only: the
+    /// channels of the other shapes are the conforming fake.
+    pub fn flawed_only_unstaged(base: FakePublisherRig, flaw: More) -> Self {
+        Self {
+            only_unstaged: true,
+            ..Self::flawed_on(base, flaw)
+        }
     }
 }
 
 pub struct Wrapped {
     base: Flawed,
     flaw: More,
+    /// The stub is in force on this channel.
+    active: bool,
     shape: ChannelShape,
+    /// The digest each coordinate was declared with, and how many coordinates the set had.
+    declared: Vec<(Coordinate, String, usize)>,
+    /// The coordinates of each commit that landed.
+    sets: Vec<Vec<Coordinate>>,
+    /// Committed coordinates an abort dropped.
+    dropped: Vec<Coordinate>,
+    /// The stamp the last commit answered `Duplicate` declared for a coordinate.
+    restamped: Vec<(Coordinate, Option<Stamped>)>,
+    /// Coordinates another writer committed.
+    others: Vec<Coordinate>,
+    /// The listing lags.
+    lagging: bool,
     /// A commit was raced.
     raced: bool,
     /// The coordinates of every call that went through, before the call that is running.
@@ -120,7 +176,14 @@ impl PublisherRig for MoreRig {
         Wrapped {
             base: self.base.publisher(shape),
             flaw: self.flaw,
+            active: !(self.only_unstaged && shape.stages),
             shape: *shape,
+            declared: Vec::new(),
+            sets: Vec::new(),
+            dropped: Vec::new(),
+            restamped: Vec::new(),
+            others: Vec::new(),
+            lagging: false,
             raced: false,
             known: Vec::new(),
             committed: Vec::new(),
@@ -133,7 +196,13 @@ impl PublisherRig for MoreRig {
         if matches!(what, Arrangement::RaceNextCommit(_)) {
             p.raced = true;
         }
+        match what {
+            Arrangement::ListLags => p.lagging = true,
+            Arrangement::HeldByAnother { coordinate, .. } => p.others.push(coordinate.clone()),
+            _ => {}
+        }
         if self.flaw == More::NonStagingSetCommitIsTorn
+            && p.active
             && !p.shape.stages
             && matches!(what, Arrangement::CommitSetFailsWhole)
         {
@@ -218,7 +287,45 @@ fn is_writer(g: &Grant) -> bool {
 
 impl Wrapped {
     fn is(&self, flaw: More) -> bool {
-        self.flaw == flaw
+        self.active && self.flaw == flaw
+    }
+
+    /// The flaw of the stub, when it is in force on this channel.
+    fn flaw(&self) -> Option<More> {
+        self.active.then_some(self.flaw)
+    }
+
+    /// A committed coordinate that differs from `k` in its name alone, which extends the name of
+    /// `k`.
+    fn extending(&self, k: &Coordinate) -> Option<Coordinate> {
+        self.committed
+            .iter()
+            .find(|c| {
+                c.name != k.name
+                    && c.name.starts_with(&k.name)
+                    && c.channel == k.channel
+                    && c.version == k.version
+                    && c.platform == k.platform
+                    && c.r#type == k.r#type
+            })
+            .cloned()
+    }
+
+    /// The digest the writer declared for `k`, when there was one.
+    fn declared_for(&self, k: &Coordinate) -> Option<&(Coordinate, String, usize)> {
+        self.declared.iter().rev().find(|(c, _, _)| c == k)
+    }
+
+    fn remember_declared(&mut self, items: &[StageItem<'_>]) {
+        for item in items {
+            if !item.held.digest.is_empty() {
+                self.declared.push((
+                    item.coordinate.clone(),
+                    item.held.digest.clone(),
+                    items.len(),
+                ));
+            }
+        }
     }
 
     fn internal(&self, phase: GrantPhase, coordinates: &[Coordinate]) -> Grant {
@@ -272,6 +379,15 @@ impl Publisher for Wrapped {
         k: &Coordinate,
         set: &[StageItem<'_>],
     ) -> Result<Presence, SeamError> {
+        if self.is(More::AbortDropsUnnamedCommitted) && self.dropped.contains(k) {
+            return Ok(Presence::Absent);
+        }
+        if self.is(More::ObserveOfOthersReadsTheLaggingList)
+            && self.lagging
+            && self.others.contains(k)
+        {
+            return Ok(Presence::Absent);
+        }
         let mut result = self.base.observe(g, k, set);
         if self.is(More::DupObserveSetAccepted) && result.is_err() {
             let once = deduped(set);
@@ -279,7 +395,34 @@ impl Publisher for Wrapped {
                 result = self.base.observe(g, k, &once);
             }
         }
-        if let More::ObserveStagedSibling(field) = self.flaw
+        if self.is(More::ObserveByNamePrefix)
+            && matches!(result, Ok(Presence::Absent))
+            && let Some(longer) = self.extending(k)
+        {
+            result = self.base.observe(&Grant::none(), &longer, &[]);
+        }
+        if self.is(More::DuplicateRestamps)
+            && let Ok(Presence::Present(held)) = &mut result
+            && let Some((_, stamp)) = self.restamped.iter().rev().find(|(c, _)| c == k)
+        {
+            held.stamp.clone_from(stamp);
+        }
+        let echoes = match (&result, self.declared_for(k)) {
+            (Ok(Presence::Present(_) | Presence::Staged(_)), Some((_, digest, members))) => {
+                (self.is(More::EchoesOnAMultiMemberSet) && *members > 1).then(|| digest.clone())
+            }
+            (Ok(Presence::Yanked(_)), Some((_, digest, _))) => self
+                .is(More::EchoesOnAYankedCoordinate)
+                .then(|| digest.clone()),
+            _ => None,
+        };
+        if let Some(digest) = echoes
+            && let Ok(Presence::Present(held) | Presence::Staged(held) | Presence::Yanked(held)) =
+                &mut result
+        {
+            held.digest = digest;
+        }
+        if let Some(More::ObserveStagedSibling(field)) = self.flaw()
             && matches!(result, Ok(Presence::Absent))
             && !g.is_none()
             && self
@@ -299,7 +442,17 @@ impl Publisher for Wrapped {
         } else {
             items.to_vec()
         };
+        self.remember_declared(items);
         let mut result = self.base.stage(g, &used);
+        if self.is(More::StagePartialOnRefusal)
+            && items.len() > 1
+            && result.as_ref().is_err_and(SeamError::promises_no_effect)
+        {
+            for item in items {
+                let grant = self.internal(GrantPhase::Stage, std::slice::from_ref(item.coordinate));
+                let _ = self.base.stage(&grant, std::slice::from_ref(item));
+            }
+        }
         if result == Ok(StageAnswer::Duplicate) && self.is(More::StagePartial) {
             for item in items {
                 let one = [item.coordinate.clone()];
@@ -308,11 +461,11 @@ impl Publisher for Wrapped {
             }
         }
         if result == Ok(StageAnswer::Staged) {
-            let taken = match self.flaw {
-                More::StageAfterAbortIsDuplicate => {
+            let taken = match self.flaw() {
+                Some(More::StageAfterAbortIsDuplicate) => {
                     coordinates.iter().any(|c| self.aborted.contains(c))
                 }
-                More::StageSiblingTaken(field) => coordinates
+                Some(More::StageSiblingTaken(field)) => coordinates
                     .iter()
                     .any(|c| self.sibling_in_place(c, field, false)),
                 _ => false,
@@ -333,7 +486,16 @@ impl Publisher for Wrapped {
         let result = self.base.abort(g, ks);
         if result.is_ok() {
             self.aborted.extend(ks.iter().cloned());
-            if let More::AbortSiblings(field) = self.flaw {
+            if self.is(More::AbortDropsUnnamedCommitted) {
+                let unnamed: Vec<Coordinate> = self
+                    .committed
+                    .iter()
+                    .filter(|c| !ks.contains(c))
+                    .cloned()
+                    .collect();
+                self.dropped.extend(unnamed);
+            }
+            if let Some(More::AbortSiblings(field)) = self.flaw() {
                 let siblings: Vec<Coordinate> = self
                     .staged
                     .iter()
@@ -362,7 +524,18 @@ impl Publisher for Wrapped {
         let yanked_first = items
             .first()
             .is_some_and(|item| self.base.inner.is_yanked(item.coordinate));
+        self.remember_declared(items);
         let mut result = self.base.commit(g, &used);
+        if self.is(More::CommitPartialOnRefusal)
+            && items.len() > 1
+            && result.as_ref().is_err_and(SeamError::promises_no_effect)
+        {
+            for item in items {
+                let grant =
+                    self.internal(GrantPhase::Commit, std::slice::from_ref(item.coordinate));
+                let _ = self.base.commit(&grant, std::slice::from_ref(item));
+            }
+        }
         let redo = match &result {
             Err(SeamError::Permanent(why)) => (self.is(More::CommitReplacesStaged)
                 && why.contains("differs from what was staged"))
@@ -381,6 +554,12 @@ impl Publisher for Wrapped {
             result = self.base.commit(g, items);
         }
         if result == Ok(CommitAnswer::Duplicate) {
+            if self.is(More::DuplicateRestamps) {
+                for item in items {
+                    self.restamped
+                        .push((item.coordinate.clone(), item.held.stamp.clone()));
+                }
+            }
             if self.is(More::CommitPartial) && items.len() > 1 {
                 for item in items {
                     let one = [item.coordinate.clone()];
@@ -407,14 +586,24 @@ impl Publisher for Wrapped {
             result = Err(SeamError::Permanent("the commit failed".to_owned()));
         }
         if result == Ok(CommitAnswer::Committed) {
-            let taken = match self.flaw {
-                More::CommitSiblingTaken(field) => coordinates.iter().any(|c| {
+            let taken = match self.flaw() {
+                Some(More::CommitSiblingTaken(field)) => coordinates.iter().any(|c| {
                     self.committed
                         .iter()
                         .any(|held| differs_only_in(held, c, field))
                 }),
                 _ => false,
             };
+            if self.is(More::CommitPublishesOtherStagedBytes)
+                && let [item] = items
+                && let Some((_, theirs)) = self
+                    .staged
+                    .iter()
+                    .find(|(c, _)| c != item.coordinate && self.base.inner.is_staged(c))
+            {
+                self.base.inner.present_different(item.coordinate, theirs);
+            }
+            self.sets.push(coordinates.clone());
             self.committed.extend(coordinates.iter().cloned());
             self.staged.retain(|(c, _)| !coordinates.contains(c));
             self.known.extend(coordinates);
@@ -433,7 +622,30 @@ impl Publisher for Wrapped {
         {
             result = Ok(());
         }
-        if let (Ok(()), More::YankSiblings(field)) = (&result, self.flaw) {
+        if result.is_ok() {
+            let widened: Vec<Coordinate> = if self.is(More::YankWidensToTheCommitSet) {
+                self.sets
+                    .iter()
+                    .filter(|set| set.contains(k))
+                    .flatten()
+                    .filter(|c| *c != k)
+                    .cloned()
+                    .collect()
+            } else if self.is(More::YankByNamePrefix) {
+                self.committed
+                    .iter()
+                    .filter(|c| *c != k && c.name.starts_with(&k.name))
+                    .cloned()
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            for other in widened {
+                let grant = self.internal(GrantPhase::Commit, std::slice::from_ref(&other));
+                let _ = self.base.yank(&grant, &other, reason);
+            }
+        }
+        if let (Ok(()), Some(More::YankSiblings(field))) = (&result, self.flaw()) {
             let siblings: Vec<Coordinate> = self
                 .committed
                 .iter()
@@ -449,7 +661,16 @@ impl Publisher for Wrapped {
     }
 
     fn fetch(&mut self, g: &Grant, k: &Coordinate) -> Result<Option<Vec<u8>>, SeamError> {
+        if self.is(More::AbortDropsUnnamedCommitted) && self.dropped.contains(k) {
+            return Ok(None);
+        }
         let mut result = self.base.fetch(g, k);
+        if self.is(More::FetchByNamePrefix)
+            && matches!(result, Ok(None))
+            && let Some(longer) = self.extending(k)
+        {
+            result = self.base.fetch(&Grant::none(), &longer);
+        }
         if self.is(More::FetchWithWriterGrantSeesStaged)
             && matches!(result, Ok(None))
             && is_writer(g)
