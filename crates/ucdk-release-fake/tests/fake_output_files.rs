@@ -171,6 +171,53 @@ fn a_directory_a_symlink_and_a_file_are_only_read_as_a_file() {
 }
 
 #[test]
+fn a_trailing_slash_is_dropped_before_the_lookup_for_a_file_and_for_a_symlink() {
+    let mut files = tree();
+    // A regular file with a slash is the file.
+    assert_eq!(files.stat("/out/pkg/b.txt/"), Ok(Some(FileKind::File)));
+    assert_eq!(files.read("/out/pkg/b.txt/"), Ok(b"b".to_vec()));
+    assert_eq!(files.read("/out/pkg/b.txt//"), Ok(b"b".to_vec()));
+    // A symlink with a slash is the symlink: not followed, not a file, not a directory.
+    assert_eq!(files.stat("/out/pkg/link/"), Ok(Some(FileKind::Symlink)));
+    assert!(matches!(
+        files.read("/out/pkg/link/"),
+        Err(SeamError::Permanent(_))
+    ));
+    assert!(matches!(
+        files.list("/out/pkg/link/"),
+        Err(SeamError::Permanent(_))
+    ));
+    // Nothing with a slash is nothing.
+    assert_eq!(files.stat("/out/pkg/nothing/"), Ok(None));
+}
+
+#[test]
+fn a_fault_is_registered_for_the_path_a_call_is_about() {
+    let mut files = tree();
+    files.missing("/out//pkg/./a/");
+    files.unreadable("/out/pkg//b.txt/");
+    assert_eq!(files.stat("/out/pkg/a/z.txt"), Ok(None));
+    assert_eq!(files.stat("/out/pkg/a"), Ok(None));
+    assert!(matches!(
+        files.stat("/out/pkg/b.txt"),
+        Err(SeamError::Unknown(_))
+    ));
+    assert!(matches!(
+        files.read("/out/pkg/b.txt/"),
+        Err(SeamError::Unknown(_))
+    ));
+}
+
+#[test]
+fn the_snapshot_holds_the_bytes_so_a_changed_byte_of_the_same_length_shows() {
+    let mut files = tree();
+    let before = files.snapshot();
+    assert!(before.contains(&("/out/pkg/b.txt".to_owned(), FileKind::File, b"b".to_vec())));
+    files.file("/out/pkg/b.txt", b"B");
+    assert_ne!(files.snapshot(), before);
+}
+
+#[test]
 fn a_path_that_is_relative_or_climbs_is_refused() {
     let mut files = tree();
     let refused = Err(SeamError::Refused(Reason::BuildOutput));

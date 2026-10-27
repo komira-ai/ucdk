@@ -185,6 +185,19 @@ pub enum Flaw {
     ReadTrimsTrailingBlanks,
     /// A `read` that answers the bytes it answered before when the file has the same length.
     CachesReadsByLength,
+    /// A `read` that leaves the file it read with its letters in lower case: other bytes of the
+    /// same length.
+    ReadLowercasesTheFile,
+    /// A `list` that takes every path that starts with the name of the directory (no `/` after
+    /// it) for one below it, so `/work/d2/x` is listed as `2/x`.
+    ListIncludesPrefixSiblings,
+    /// A `stat` that follows a symlink, to tell what it is, at most eight links deep, and fails
+    /// with `Unknown` (a loop) when it does not come to the end; a link that comes to something,
+    /// or to nothing, is still said to be a `Symlink`.
+    StatFollowsALinkToClassifyIt,
+    /// A `stat` of a regular file named with a trailing slash that answers `None`, and a `read`
+    /// of it that answers `Permanent`.
+    SlashedFileIsNothing,
 }
 
 /// How many parts a path below the root has; 0 for any other.
@@ -309,7 +322,7 @@ impl OutputFilesRig for FakeFilesRig {
         files.inner.file(&full(rel), bytes);
     }
 
-    fn snapshot(&self, files: &Flawed) -> Vec<(String, FileKind, usize)> {
+    fn snapshot(&self, files: &Flawed) -> Vec<(String, FileKind, Vec<u8>)> {
         files.inner.snapshot()
     }
 }
@@ -389,6 +402,26 @@ impl Flawed {
             .is_some_and(|(parent, _)| self.inner.stat(parent) == Ok(Some(FileKind::Directory)))
     }
 
+    /// Whether `path` names a regular file with a slash after it.
+    fn is_a_slashed_file(&mut self, path: &str) -> bool {
+        path.strip_suffix('/')
+            .is_some_and(|file| self.inner.stat(file) == Ok(Some(FileKind::File)))
+    }
+
+    /// Follows the symlink at `link` to the end, at most eight links deep.
+    fn follow_to_the_end(&self, link: &str) -> Result<(), SeamError> {
+        let mut at = link;
+        for _ in 0..8 {
+            match self.targets.get(at) {
+                Some(next) => at = next,
+                None => return Ok(()),
+            }
+        }
+        Err(SeamError::Unknown(format!(
+            "{link}: too many levels of symbolic links"
+        )))
+    }
+
     /// The target of the symlink that `path` names with a slash after it, when it does.
     fn slashed_target(&self, path: &str) -> Option<String> {
         self.target_of(path.strip_suffix('/')?)
@@ -398,6 +431,12 @@ impl Flawed {
 impl OutputFiles for Flawed {
     fn stat(&mut self, path: &str) -> Result<Option<FileKind>, SeamError> {
         self.last_stat = Some(path.to_owned());
+        if self.is(Flaw::SlashedFileIsNothing) && self.is_a_slashed_file(path) {
+            return Ok(None);
+        }
+        if self.is(Flaw::StatFollowsALinkToClassifyIt) {
+            self.follow_to_the_end(path.strip_suffix('/').unwrap_or(path))?;
+        }
         if self.is(Flaw::StatRefusesDotDotNames) && has_dot_dot_name(path) {
             return Err(SeamError::Refused(
                 ucdk_release_proto::v1::Reason::BuildOutput,
@@ -494,6 +533,21 @@ impl OutputFiles for Flawed {
         }
         let base = path.trim_end_matches('/').to_owned();
         self.listed.push(base.clone());
+        if self.is(Flaw::ListIncludesPrefixSiblings) {
+            let siblings: Vec<DirEntry> = self
+                .inner
+                .snapshot()
+                .into_iter()
+                .filter(|(p, _, _)| p.starts_with(&base) && !p[base.len()..].starts_with('/'))
+                .filter(|(p, _, _)| *p != base)
+                .map(|(p, kind, _)| DirEntry {
+                    rel: p[base.len()..].to_owned(),
+                    kind,
+                })
+                .collect();
+            entries.extend(siblings);
+            entries.sort_by(|a, b| a.rel.cmp(&b.rel));
+        }
         if self.is(Flaw::DotfilesHidden) {
             entries.retain(|e| !e.rel.split('/').any(|part| part.starts_with('.')));
         }
@@ -634,6 +688,9 @@ impl OutputFiles for Flawed {
     }
 
     fn read(&mut self, path: &str) -> Result<Vec<u8>, SeamError> {
+        if self.is(Flaw::SlashedFileIsNothing) && self.is_a_slashed_file(path) {
+            return Err(SeamError::Permanent(format!("{path} is not a directory")));
+        }
         if let Some(refused) = self.refuses(path) {
             return Err(refused);
         }
@@ -822,6 +879,9 @@ impl OutputFiles for Flawed {
         if let Ok(bytes) = &result {
             if self.is(Flaw::CachesReads) || self.is(Flaw::CachesReadsByLength) {
                 self.cache.insert(path.to_owned(), bytes.clone());
+            }
+            if self.is(Flaw::ReadLowercasesTheFile) {
+                self.inner.file(path, &bytes.to_ascii_lowercase());
             }
             if self.is(Flaw::ReadTouches) {
                 let mut touched = bytes.clone();

@@ -208,6 +208,7 @@ fn further_output_files() {
     const SORTED: &str = "a_listing_is_sorted_relative_paths";
     const CLIMB: &str = "a_path_that_is_relative_or_climbs_is_refused";
     const CHANGED: &str = "a_read_returns_the_file_as_it_is_at_the_call";
+    const UNCHANGED: &str = "no_call_changes_the_tree";
     const DOTS: &str =
         "a_dot_part_a_repeated_slash_and_a_trailing_slash_name_the_path_they_stand_in";
     further_stubs_fail_exactly(
@@ -281,6 +282,10 @@ fn further_output_files() {
             (Files::ReadDropsTheLastByteAtA128kMultiple, &[READ_THROUGH]),
             (Files::ReadTrimsTrailingBlanks, &[READ_THROUGH]),
             (Files::CachesReadsByLength, &[CHANGED]),
+            (Files::ReadLowercasesTheFile, &[UNCHANGED]),
+            (Files::ListIncludesPrefixSiblings, &[KINDS]),
+            (Files::StatFollowsALinkToClassifyIt, &[STAT]),
+            (Files::SlashedFileIsNothing, &[DOTS]),
         ],
         |flaw| run_output_files_kit(&FakeFilesRig::flawed(flaw)),
     );
