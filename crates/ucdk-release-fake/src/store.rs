@@ -29,6 +29,19 @@ impl EntryWriter for Writer<'_> {
         if !valid_rel(rel) || rel.contains('\\') || rel.chars().any(char::is_control) {
             return Err(SeamError::Refused(Reason::SetMember));
         }
+        // The paths form a tree: no directory of `rel` is a file, and `rel` is no directory.
+        let below = format!("{rel}/");
+        let is_directory = self
+            .entry
+            .range(below.clone()..)
+            .next()
+            .is_some_and(|(path, _)| path.starts_with(&below));
+        let under_a_file = rel
+            .match_indices('/')
+            .any(|(at, _)| self.entry.contains_key(&rel[..at]));
+        if is_directory || under_a_file {
+            return Err(SeamError::Refused(Reason::SetMember));
+        }
         self.entry.insert(rel.to_owned(), bytes.to_vec());
         Ok(())
     }
