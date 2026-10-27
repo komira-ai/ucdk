@@ -38,6 +38,46 @@ fn an_entry_refuses_paths_that_escape_it() {
 }
 
 #[test]
+fn a_file_and_a_directory_of_one_name_cannot_share_an_entry() {
+    let mut store = FakeStore::new();
+    let key = member("g1", "tree");
+    let refused = Err(SeamError::Refused(Reason::SetMember));
+    {
+        let mut writer = store.begin(&key).unwrap();
+        writer.put_file("a", b"file").unwrap();
+        writer.put_file("p/q/r", b"deep").unwrap();
+        writer.put_file("m/n", b"nested").unwrap();
+        // A path below a file, at any depth, and a file where a directory is.
+        assert_eq!(writer.put_file("a/b", b"x"), refused);
+        assert_eq!(writer.put_file("a/b/c", b"x"), refused);
+        assert_eq!(writer.put_file("m/n/o/p", b"x"), refused);
+        assert_eq!(writer.put_file("p", b"x"), refused);
+        assert_eq!(writer.put_file("p/q", b"x"), refused);
+        // A name that only starts with another's is no directory of it, and a path may be
+        // written again.
+        writer.put_file("ab", b"ab").unwrap();
+        writer.put_file("a.b", b"a.b").unwrap();
+        writer.put_file("p/q/r", b"again").unwrap();
+        writer.put_file("p/q/s", b"sibling").unwrap();
+    }
+    assert_eq!(
+        store.files(&key).unwrap(),
+        ["a", "a.b", "ab", "m/n", "p/q/r", "p/q/s"]
+    );
+    assert_eq!(store.get(&key, "a"), Ok(Some(b"file".to_vec())));
+    assert_eq!(store.get(&key, "p/q/r"), Ok(Some(b"again".to_vec())));
+    assert_eq!(store.get(&key, "p"), Ok(None));
+    // A discard frees the names.
+    store.discard(&key).unwrap();
+    {
+        let mut writer = store.begin(&key).unwrap();
+        writer.put_file("a/b", b"now a directory").unwrap();
+        assert_eq!(writer.put_file("a", b"x"), refused);
+    }
+    assert_eq!(store.files(&key).unwrap(), ["a/b"]);
+}
+
+#[test]
 fn an_entry_reads_back_what_was_written_and_lists_sorted() {
     let mut store = FakeStore::new();
     let key = member("g1", "image");
