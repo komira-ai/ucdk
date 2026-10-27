@@ -95,7 +95,10 @@ fn further_build_system() {
                 (Build::BareReportFlag, &[OWNED]),
                 (Build::SwappedReportFlagNames, &[OWNED]),
                 (Build::DuplicatedReportFlag, &[OWNED]),
-                (Build::IgnoresConfigAndMode, &[SAME_BYTES, OWNED]),
+                (
+                    Build::IgnoresConfigAndMode,
+                    &[SAME_BYTES, PLACEHOLDERS, OWNED],
+                ),
                 (Build::TestWithoutReportAccepted, &[OWNED]),
                 // What the authors wrote.
                 (Build::DedupsFlags, &[FLAGS]),
@@ -103,7 +106,33 @@ fn further_build_system() {
                 (Build::NoBraceUnescape, &[PLACEHOLDERS]),
                 (Build::EnvOnlyVersionPlaceholder, &[PLACEHOLDERS]),
                 (Build::BaseFlagPlatformUnsubstituted, &[PLACEHOLDERS]),
-                (Build::LeaksTheRevision, &[STAMP]),
+                // A flag nobody wrote is seen between the authors' flags and by the stamp.
+                (Build::StampLeaksIntoTheCommand, &[FLAGS, STAMP]),
+                (Build::LeaksTheRevision, &[FLAGS, STAMP]),
+                (Build::ConstantFlagBetweenTheAuthors, &[FLAGS]),
+                // Exactly the commands a build and a test run, each once and in order.
+                (Build::RunsTheBuildTwice, &[SAME_BYTES]),
+                (Build::BuildAlsoRunsTheTest, &[SAME_BYTES]),
+                (Build::TestRunsTheBuildFirst, &[SAME_BYTES]),
+                // The binary, config file, mode and label are written as they are.
+                (Build::SubstitutesTheBinary, &[PLACEHOLDERS]),
+                (Build::SubstitutesTheConfigFile, &[PLACEHOLDERS]),
+                (Build::SubstitutesTheMode, &[PLACEHOLDERS]),
+                (Build::SubstitutesTheLabel, &[PLACEHOLDERS]),
+                (Build::RefusesABraceInTheBinary, &[PLACEHOLDERS]),
+                (Build::RefusesABraceInTheConfigFile, &[PLACEHOLDERS]),
+                (Build::RefusesABraceInTheMode, &[PLACEHOLDERS]),
+                (Build::RefusesABraceInTheLabel, &[PLACEHOLDERS]),
+                // What a listing says.
+                (Build::ListsTheFirstLineWhateverItsLabel, &[ONE_OUTPUT]),
+                (
+                    Build::SplitsAtTheLastSpace,
+                    &[SAME_BYTES, ONE_OUTPUT, RUN_SPECIFIC, COPY_OUT],
+                ),
+                (Build::AcceptsATab, &[ONE_OUTPUT]),
+                (Build::AcceptsAControlCharacter, &[ONE_OUTPUT]),
+                (Build::AcceptsARelativePath, &[ONE_OUTPUT]),
+                (Build::AcceptsAPathThatClimbs, &[ONE_OUTPUT]),
                 // What a test and a failure say.
                 (Build::RanInflated, &[NOTHING_RAN, FAILING]),
                 (Build::TestTailGarbage, &[FAILING]),
@@ -129,9 +158,13 @@ fn further_build_system() {
         &scenarios,
         &[
             (Build::QueryVerbInheritsTheEnvironment, &[INHERITS]),
-            (Build::InfoVerbLeaksTheStamp, &[STAMP]),
+            (Build::InfoVerbLeaksTheStamp, &[FLAGS, STAMP]),
             (Build::QueryRunsOtherCommand, &[SAME_BYTES]),
             (Build::InfoRunsOtherCommand, &[SAME_BYTES]),
+            (Build::RunsQueryTwice, &[SAME_BYTES]),
+            (Build::RunsInfoTwice, &[SAME_BYTES]),
+            (Build::NeverRunsQuery, &[SAME_BYTES]),
+            (Build::NeverRunsInfo, &[SAME_BYTES]),
         ],
         |flaw| run_build_system_kit(&FakeBuildRig::flawed(BuildSystemKind::Bazel, flaw)),
     );
@@ -618,7 +651,7 @@ fn build_system() {
                 ),
                 (
                     "the_stamp_reaches_a_build_only_through_placeholders",
-                    Build::StampLeaksIntoTheCommand,
+                    Build::StampLeaksWhenItChanges,
                 ),
                 (
                     "ucdk_owned_flags_come_after_the_authors",
