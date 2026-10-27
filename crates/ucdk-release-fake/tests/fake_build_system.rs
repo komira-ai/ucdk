@@ -278,7 +278,7 @@ fn the_build_system_refuses_none_or_two_outputs_and_reports_the_shape_of_one() {
     assert_eq!(one(listing("//a:twice").unwrap()).shape, Shape::File);
     let plain = one(listing("//a:plain").unwrap());
     assert_eq!(plain.label, "//a:plain");
-    assert_eq!(plain.path, "/out/a_plain/plain");
+    assert_eq!(plain.path, "/out/_s_sa_cplain/plain");
 }
 
 #[test]
@@ -378,4 +378,43 @@ fn a_later_build_changes_the_earliest_built_output_not_the_smallest_path() {
     );
     assert_eq!(copied(&mut fake, &a).remove(0).1, a_before);
     assert!(!copied(&mut fake, &b).remove(0).1.ends_with(b"mutated"));
+}
+
+#[test]
+fn labels_that_differ_only_in_the_separators_get_their_own_outputs() {
+    let (_, mut fake, hb) = fake();
+    let labels = ["//p:x", "//p/x", "//p_x"];
+    let outs: Vec<Located> = labels
+        .iter()
+        .map(|label| build_one(&mut fake, &hb, label))
+        .collect();
+    for (i, a) in outs.iter().enumerate() {
+        for b in &outs[i + 1..] {
+            assert_ne!(a.path, b.path);
+        }
+    }
+    // Every output still holds the bytes of its own build.
+    for (label, out) in labels.iter().zip(&outs) {
+        let bytes = copied(&mut fake, out).remove(0).1;
+        assert!(String::from_utf8(bytes).unwrap().contains(label));
+    }
+}
+
+#[test]
+fn arguments_that_differ_only_in_where_the_line_breaks_fall_change_the_bytes() {
+    assert_ne!(built_bytes(&["a\nb"], "1"), built_bytes(&["a", "b"], "1"));
+}
+
+#[test]
+fn environment_pairs_that_differ_only_in_where_the_equals_sign_falls_change_the_bytes() {
+    let built = |key: &str, value: &str| {
+        let (_, mut fake, hb) = fake();
+        let (system, stamp) = (system(), stamp("1.2.3"));
+        let mut target = target(LABEL, &[]);
+        target.env = BTreeMap::from([(key.to_owned(), value.to_owned())]);
+        let inv = invocation(&system, &target, &stamp, Verb::Build);
+        let located = fake.build(&inv, &hb).unwrap();
+        copied(&mut fake, &located[0]).remove(0).1
+    };
+    assert_ne!(built("A", "b=c"), built("A=b", "c"));
 }

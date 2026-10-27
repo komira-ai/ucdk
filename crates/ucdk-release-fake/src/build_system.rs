@@ -45,27 +45,30 @@ pub struct FakeBuildSystem {
     built: Vec<String>,
 }
 
-/// The directory and the file name an output of `label` is made at.
+/// The directory and the file name an output of `label` is made at. The directory spells the
+/// label with `_` as `__`, `:` as `_c` and `/` as `_s`: every character has one spelling and
+/// no spelling starts another, so two labels never share a directory.
 fn output_at(label: &str, suffix: &str) -> (String, String) {
     let name = label.rsplit([':', '/']).next().unwrap_or_default();
-    let dir = label.trim_start_matches('/').replace([':', '/'], "_");
+    let dir = label
+        .replace('_', "__")
+        .replace(':', "_c")
+        .replace('/', "_s");
     (format!("/out/{dir}"), format!("{name}{suffix}"))
 }
 
 /// What a build of `label` with `command` writes: it names every argument and every
-/// environment pair, so the bytes move with any of them.
+/// environment pair, so the bytes move with any of them. Each is quoted, so a line break or an
+/// `=` inside one cannot pass for the end of it.
 fn render(label: &str, command: &Command) -> Vec<u8> {
-    let env: Vec<String> = command
-        .env
-        .iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect();
-    format!(
-        "built {label}\n{}\n{}\n",
-        command.argv.join("\n"),
-        env.join("\n")
-    )
-    .into_bytes()
+    let mut text = format!("built {label:?}\n");
+    for arg in &command.argv {
+        text.push_str(&format!("{arg:?}\n"));
+    }
+    for pair in &command.env {
+        text.push_str(&format!("{pair:?}\n"));
+    }
+    text.into_bytes()
 }
 
 impl FakeBuildSystem {

@@ -92,12 +92,16 @@ impl FakeProcessRunner {
         &self.calls
     }
 
-    /// Whether the program of `command` is found: an absolute name where it is, a bare name on
-    /// the `PATH` of the command's own environment and nowhere else.
-    fn startable(&self, command: &Command) -> bool {
+    /// Whether the program of `command` is found, as `exec` finds it: an absolute name where it
+    /// is, a name with a `/` in it relative to the working directory `cwd`, and only a bare name
+    /// on the `PATH` of the command's own environment.
+    fn startable(&self, command: &Command, cwd: &str) -> bool {
         let program = command.argv.first().map_or("", String::as_str);
         if program.starts_with('/') {
             return self.programs.contains(program);
+        }
+        if program.contains('/') {
+            return self.programs.contains(&format!("{cwd}/{program}"));
         }
         command
             .env
@@ -119,7 +123,7 @@ impl ProcessRunner for FakeProcessRunner {
         let Some((_, reply)) = self.scripts.iter().find(|(c, _)| c == spec.command) else {
             panic!("a call nobody scripted: {:?}", spec.command);
         };
-        if self.unstartable || !self.startable(spec.command) {
+        if self.unstartable || !self.startable(spec.command, spec.cwd) {
             return Err(SeamError::Unknown(
                 "the program cannot be started".to_owned(),
             ));
