@@ -18,7 +18,8 @@ pub const BUILD_LABEL: &str = "//pkg:out";
 /// What the build system finds when it runs, so a scenario can ask for a good run or a bad one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuildWorld {
-    /// A build lists one regular file; a test runs once and passes.
+    /// A build lists one regular file at a path that holds a space; a test runs once and
+    /// passes.
     Normal,
     /// The build succeeds and lists no output.
     NoOutput,
@@ -31,6 +32,12 @@ pub enum BuildWorld {
     /// The build succeeds and lists one directory output with a symlink in it, below its top
     /// level.
     SymlinkInDirectory,
+    /// The build succeeds and its listing names another target than the one built.
+    ListsAnotherTarget,
+    /// The build succeeds and its listing names `path` as the output of the target built, a
+    /// path that is relative, climbs with `..` or holds a control character. The rig writes it
+    /// in the form its kind's listing carries a path in.
+    ListsAHostilePath { path: String },
     /// The build exits nonzero after printing `head` first and `tail` last.
     BuildFails { head: String, tail: String },
     /// The build system's binary cannot be started.
@@ -67,8 +74,13 @@ pub trait BuildSystemRig {
     /// what it scripted, never from what the build system under test answers.
     fn output_of(&self, inv: &Invocation<'_>, world: &BuildWorld) -> Vec<(String, Vec<u8>)>;
 
+    /// The path the build of [`BUILD_LABEL`] lists in `world`, [`BuildWorld::Normal`] (a file) or
+    /// [`BuildWorld::DirectoryOutput`] (a directory), as the rig scripted it. It holds a space.
+    fn listed_path(&self, world: &BuildWorld) -> String;
+
     /// Every command `system` ran so far, in order, as the process under it was given it: the
-    /// argument vector and the environment of each child. A command that could not be layered is
+    /// argument vector and the environment of each child; a Bazel build's `Query` and `Info` are
+    /// among them, in the order they ran. A command that could not be layered is
     /// never run, so it is not here.
     fn executed(&self, system: &Self::System) -> Vec<Command>;
 }
@@ -186,20 +198,28 @@ fn contract(case: &Case, verb: Verb) -> Command {
     )
 }
 
+/// The positions of the first and the last flag an author wrote.
+fn authored_bounds(argv: &[String]) -> (usize, usize) {
+    let is_authored = |a: &String| AUTHORED.contains(&a.as_str());
+    let missing = format!("no flag of an author in the argument vector {argv:?}");
+    (
+        must_some(argv.iter().position(is_authored), &missing),
+        must_some(argv.iter().rposition(is_authored), &missing),
+    )
+}
+
 /// What comes before the first flag an author wrote and what comes after the last: the binary,
 /// the startup arguments, the verb word and the mode, and the flags ucdk owns with the tail of
 /// the verb.
 fn around_authors(argv: &[String]) -> (Vec<String>, Vec<String>) {
-    let is_authored = |a: &String| AUTHORED.contains(&a.as_str());
-    let first = must_some(
-        argv.iter().position(is_authored),
-        &format!("no flag of an author in the argument vector {argv:?}"),
-    );
-    let last = must_some(
-        argv.iter().rposition(is_authored),
-        &format!("no flag of an author in the argument vector {argv:?}"),
-    );
+    let (first, last) = authored_bounds(argv);
     (argv[..first].to_vec(), argv[last + 1..].to_vec())
+}
+
+/// Everything from the first flag an author wrote to the last, both included.
+fn authored_span(argv: &[String]) -> Vec<String> {
+    let (first, last) = authored_bounds(argv);
+    argv[first..=last].to_vec()
 }
 
 fn env_of<'a>(command: &'a Command, key: &str) -> Vec<&'a str> {
@@ -364,68 +384,70 @@ fn same_command_same_bytes<R: BuildSystemRig>(rig: &R) {
     what_ran_is_what_was_layered(rig);
 }
 
-/// The commands a run of `verb` added to what `bs` ran must be commands the build system
-/// layers, and the verb's own among them: a test that runs a command other than the one it
-/// layers, or a query that runs with a variable of the process, is found here. A command is
-/// compared whole, so every verb the kind has is held, not only a build.
-fn ran_as_layered(ran: &[Command], allowed: &[Command], own: &Command, what: &str) {
+/// What a build of one artifact runs, in order: a `Build`, and for Bazel the `Query` and then
+/// the `Info` that locate its output. A test of one target runs a `Test` and nothing else.
+fn build_verbs(kind: BuildSystemKind) -> Vec<Verb> {
+    if kind == BuildSystemKind::Bazel {
+        vec![Verb::Build, Verb::Query, Verb::Info]
+    } else {
+        vec![Verb::Build]
+    }
+}
+
+/// The commands a call added to what `bs` ran must be exactly the commands the build system
+/// layers for `verbs`, each once and in that order: a command run twice or never, one that is
+/// not the one layered, or a verb that runs another's, is found here. A command is compared
+/// whole, so every verb the kind has is held. The layering the build system gives is held
+/// against the contract's by the scenarios that read `command`, so this holds that what ran is
+/// what was layered, whichever `command` the implementation has.
+fn ran_as_layered<R: BuildSystemRig>(
+    rig: &R,
+    bs: &R::System,
+    before: usize,
+    expected: &[Verb],
+    case: &Case,
+    what: &str,
+) {
+    let want: Vec<Command> = expected.iter().map(|v| layered(bs, case, *v)).collect();
     same(
-        ran.iter().all(|c| allowed.contains(c)),
-        true,
-        &format!("every command of {what} is one the build system layers, ran {ran:?}"),
-    );
-    same(
-        ran.contains(own),
-        true,
-        &format!("the command {what} ran is the one it layers, ran {ran:?}"),
+        rig.executed(bs)[before..].to_vec(),
+        want,
+        &format!("the commands {what} ran, which are exactly {expected:?}, each once and in order"),
     );
 }
 
 fn what_ran_is_what_was_layered<R: BuildSystemRig>(rig: &R) {
     let mut bs = rig.system(&BuildWorld::Normal);
     let case = Case::new(bs.kind());
-    let allowed: Vec<Command> = verbs_of(bs.kind())
-        .into_iter()
-        .map(|verb| layered(&bs, &case, verb))
-        .collect();
     let before = rig.executed(&bs).len();
     must(
         bs.build(&case.inv(Verb::Build, None), &Beats::counting()),
         "build",
     );
-    ran_as_layered(
-        &rig.executed(&bs)[before..],
-        &allowed,
-        &layered(&bs, &case, Verb::Build),
-        "a build",
-    );
+    ran_as_layered(rig, &bs, before, &build_verbs(bs.kind()), &case, "a build");
     let before = rig.executed(&bs).len();
     must(test_outcome(&mut bs, &case, &Beats::counting()), "test");
-    ran_as_layered(
-        &rig.executed(&bs)[before..],
-        &allowed,
-        &layered(&bs, &case, Verb::Test),
-        "a test",
-    );
+    ran_as_layered(rig, &bs, before, &[Verb::Test], &case, "a test");
 }
 
 fn base_flags_come_before_target_flags_in_order<R: BuildSystemRig>(rig: &R) {
     let bs = rig.system(&BuildWorld::Normal);
     let case = Case::new(bs.kind());
     for verb in verbs_of(bs.kind()) {
-        let command = layered(&bs, &case, verb);
-        // The flags of the authors, in the order they stand in: the base's then the target's,
-        // each as often as it was written (a flag both wrote is passed twice, never merged).
-        let authored: Vec<&str> = command
-            .argv
-            .iter()
-            .map(String::as_str)
-            .filter(|a| AUTHORED.contains(a))
-            .collect();
+        // From the first flag of an author to the last stands what they wrote, the base's then
+        // the target's, each as often as it was written (a flag both wrote is passed twice,
+        // never merged), and nothing else between them. The contract's layering is the oracle,
+        // and it is held to what the authors wrote.
+        let span = authored_span(&contract(&case, verb).argv);
         same(
-            authored,
+            span.iter().map(String::as_str).collect::<Vec<_>>(),
             AUTHORED.to_vec(),
-            &format!("the flags the authors wrote in the argument vector of the {verb} verb"),
+            &format!("the contract's flags of the authors in the {verb} verb"),
+        );
+        same(
+            authored_span(&layered(&bs, &case, verb).argv),
+            span,
+            &format!("everything from the first flag of an author to the last in the {verb} verb"),
         );
     }
 }
@@ -453,7 +475,9 @@ fn nothing_is_inherited_from_the_process_environment<R: BuildSystemRig>(rig: &R)
     let case = Case::new(bs.kind());
     for verb in verbs_of(bs.kind()) {
         let command = layered(&bs, &case, verb);
-        let keys: Vec<&str> = command.env.iter().map(|(k, _)| k.as_str()).collect();
+        // The order of the pairs is not held here, only which keys there are.
+        let mut keys: Vec<&str> = command.env.iter().map(|(k, _)| k.as_str()).collect();
+        keys.sort_unstable();
         same(
             keys,
             vec!["KEEP", "X"],
@@ -538,7 +562,40 @@ fn placeholders_are_substituted_in_flag_and_environment_values<R: BuildSystemRig
             &format!("a placeholder left in the argument vector of the {verb} verb"),
         );
     }
+    names_are_not_substituted(rig);
     unknown_placeholders_are_refused(rig);
+}
+
+/// The binary, the config file, the mode and the label are written as they are, whatever they
+/// hold: a placeholder in one is not replaced, and a brace in one is not refused.
+fn names_are_not_substituted<R: BuildSystemRig>(rig: &R) {
+    let bs = rig.system(&BuildWorld::Normal);
+    let mut case = Case::new(bs.kind());
+    case.system.binary = "/tools/{platform}/build}".to_owned();
+    case.system.config_file = "/cfg/{platform}/}.rc".to_owned();
+    case.system.mode = "{platform}}".to_owned();
+    case.target.label = "//{platform}:out}".to_owned();
+    let pieces = [
+        &case.system.binary,
+        &case.system.config_file,
+        &case.system.mode,
+        &case.target.label,
+    ];
+    for verb in verbs_of(bs.kind()) {
+        let command = layered(&bs, &case, verb);
+        // The label is held in the verb that is a build; the others are held to what they own
+        // by the scenario of the flags ucdk owns.
+        let named = if verb == Verb::Build { 4 } else { 3 };
+        for piece in &pieces[..named] {
+            same(
+                command.argv.iter().any(|a| a.contains(piece.as_str())),
+                true,
+                &format!(
+                    "{piece} as written in the argument vector of the {verb} verb: {command:?}"
+                ),
+            );
+        }
+    }
 }
 
 /// A flag or an environment value with a placeholder that does not exist, or a brace that is
@@ -546,13 +603,13 @@ fn placeholders_are_substituted_in_flag_and_environment_values<R: BuildSystemRig
 fn unknown_placeholders_are_refused<R: BuildSystemRig>(rig: &R) {
     let mut bs = rig.system(&BuildWorld::Normal);
     let kind = bs.kind();
-    let refused = |case: &Case| -> Vec<String> {
+    let refused = |case: &Case| -> Vec<Result<Command, SeamError>> {
         verbs_of(kind)
             .into_iter()
             .map(|verb| {
                 let report = case.report();
                 let report = (verb == Verb::Test).then_some(report.as_str());
-                format!("{:?}", bs.command(&case.inv(verb, report)))
+                bs.command(&case.inv(verb, report))
             })
             .collect()
     };
@@ -579,9 +636,9 @@ fn unknown_placeholders_are_refused<R: BuildSystemRig>(rig: &R) {
     ] {
         for answer in refused(case) {
             same(
-                answer.starts_with("Err(Permanent("),
+                matches!(answer, Err(SeamError::Permanent(_))),
                 true,
-                &format!("the command of a flag or value with a bad brace, got {answer}"),
+                &format!("the command of a flag or value with a bad brace, got {answer:?}"),
             );
         }
     }
@@ -687,13 +744,47 @@ fn a_build_lists_exactly_one_output<R: BuildSystemRig>(rig: &R) {
             "the label of the output",
         );
         same(located[0].path.starts_with('/'), true, "an absolute path");
+        // The path holds a space, and is the whole of what follows the label: the listing is
+        // split at the first space, not the last.
+        let listed = rig.listed_path(&world);
+        same(
+            listed.contains(' '),
+            true,
+            "the path the rig scripts holds a space",
+        );
+        same(
+            located[0].path.as_str(),
+            listed.as_str(),
+            &format!("the path of the output in {world:?}"),
+        );
         same(
             located[0].shape,
             shape,
             &format!("the shape of the output in {world:?}"),
         );
     }
+    // A listing that names another target is not the output of this one, and a path that is
+    // not absolute, climbs or holds a control character is not a path a build wrote: each is
+    // refused, whatever the line says first.
+    refused_as_build_output(rig, &BuildWorld::ListsAnotherTarget);
+    for path in HOSTILE_PATHS {
+        refused_as_build_output(
+            rig,
+            &BuildWorld::ListsAHostilePath {
+                path: path.to_owned(),
+            },
+        );
+    }
 }
+
+/// Paths a listing must not be read as: with a tab, with another control character, relative,
+/// and climbing.
+const HOSTILE_PATHS: [&str; 4] = [
+    "/out/with\ttab/out",
+    "/out/with\u{7}bell/out",
+    "out/relative/out",
+    "/out/../escape/out",
+];
 
 /// A build in `world` that must be refused as `BUILD_OUTPUT`.
 fn refused_as_build_output<R: BuildSystemRig>(rig: &R, world: &BuildWorld) {

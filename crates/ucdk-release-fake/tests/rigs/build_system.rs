@@ -147,14 +147,62 @@ pub enum Flaw {
     BaseFlagUnknownPlaceholderPasses,
     /// An unknown placeholder in a target environment value passes through as written.
     TargetEnvUnknownPlaceholderPasses,
+    /// A build runs its `Build` command twice.
+    RunsTheBuildTwice,
+    /// A build also runs the layered `Test` command.
+    BuildAlsoRunsTheTest,
+    /// A test also runs the layered `Build` command first.
+    TestRunsTheBuildFirst,
+    /// A Bazel build runs its `Query` twice.
+    RunsQueryTwice,
+    /// A Bazel build runs its `Info` twice.
+    RunsInfoTwice,
+    /// A Bazel build never runs its `Query`.
+    NeverRunsQuery,
+    /// A Bazel build never runs its `Info`.
+    NeverRunsInfo,
+    /// A constant flag stands between the base flags and the target's.
+    ConstantFlagBetweenTheAuthors,
+    /// The build number of the stamp is added as a flag nobody wrote, once it is not the one
+    /// the kit's other scenarios stamp.
+    StampLeaksWhenItChanges,
+    /// A placeholder in the binary is replaced.
+    SubstitutesTheBinary,
+    /// A placeholder in the config file is replaced.
+    SubstitutesTheConfigFile,
+    /// A placeholder in the mode is replaced.
+    SubstitutesTheMode,
+    /// A placeholder in a label is replaced.
+    SubstitutesTheLabel,
+    /// A binary with a `}` has no layering.
+    RefusesABraceInTheBinary,
+    /// A config file with a `}` has no layering.
+    RefusesABraceInTheConfigFile,
+    /// A mode with a `}` has no layering.
+    RefusesABraceInTheMode,
+    /// A label with a `}` has no layering.
+    RefusesABraceInTheLabel,
+    /// A listing that names another target is read as the output of the target built.
+    ListsTheFirstLineWhateverItsLabel,
+    /// A listing is split at its last space.
+    SplitsAtTheLastSpace,
+    /// A path with a tab in it is accepted.
+    AcceptsATab,
+    /// A path with a control character in it is accepted.
+    AcceptsAControlCharacter,
+    /// A path that is not absolute is accepted.
+    AcceptsARelativePath,
+    /// A path that climbs with `..` is accepted.
+    AcceptsAPathThatClimbs,
 }
 
 /// The time on the clock of a rig before anything moves it.
 const START_MS: u64 = 1_000_000;
 
 /// Where the fake makes the output of [`BUILD_LABEL`]: the directory spells the label with
-/// `_` as `__`, `:` as `_c` and `/` as `_s`, so `//pkg:out` is made in `/out/_s_spkg_cout`.
-const OUTPUT_PATH: &str = "/out/_s_spkg_cout/out";
+/// `_` as `__`, `:` as `_c` and `/` as `_s`, so `//pkg:out` is made in
+/// `/build out/_s_spkg_cout`, under a root that holds a space.
+const OUTPUT_PATH: &str = "/build out/_s_spkg_cout/out";
 
 pub struct FakeBuildRig {
     pub clock: ManualClock,
@@ -216,6 +264,9 @@ impl BuildSystemRig for FakeBuildRig {
                 fake.directory_output(BUILD_LABEL);
                 fake.symlink_in_output(BUILD_LABEL);
             }
+            BuildWorld::ListsAnotherTarget | BuildWorld::ListsAHostilePath { .. } => {
+                fake.lists_unreadable_output(BUILD_LABEL);
+            }
             BuildWorld::BuildFails { tail, .. } => {
                 fake.fail_at_call(1);
                 fake.failure_tail(tail);
@@ -267,6 +318,10 @@ impl BuildSystemRig for FakeBuildRig {
             "out"
         };
         vec![(path.to_owned(), text.into_bytes())]
+    }
+
+    fn listed_path(&self, _world: &BuildWorld) -> String {
+        OUTPUT_PATH.to_owned()
     }
 
     fn executed(&self, system: &Flawed) -> Vec<Command> {
@@ -351,9 +406,33 @@ fn insert_among_flags(command: &mut Command, flag: String) {
     command.argv.insert(at, flag);
 }
 
+/// Replaces `{platform}` in `value`, where `command` carries it as written.
+fn substitute(command: &mut Command, value: &str, inv: &Invocation<'_>) {
+    if value.contains("{platform}") {
+        let replaced = value.replace("{platform}", inv.platform);
+        for arg in &mut command.argv {
+            *arg = arg.replace(value, &replaced);
+        }
+    }
+}
+
 impl Flawed {
     fn is(&self, flaw: Flaw) -> bool {
         self.flaw == Some(flaw)
+    }
+
+    /// Whether `flaw` accepts the hostile path the world lists.
+    fn accepts_the_hostile_path(&self, flaw: Flaw) -> bool {
+        let BuildWorld::ListsAHostilePath { path } = &self.world else {
+            return false;
+        };
+        match flaw {
+            Flaw::AcceptsATab => path.contains('\t'),
+            Flaw::AcceptsAControlCharacter => path.contains('\u{7}'),
+            Flaw::AcceptsARelativePath => !path.starts_with('/'),
+            Flaw::AcceptsAPathThatClimbs => path.contains("/../"),
+            _ => false,
+        }
     }
 
     fn in_world(&self, flaw: Flaw, world: &BuildWorld) -> bool {
@@ -401,10 +480,47 @@ impl Flawed {
     fn sync(&mut self, inv: &Invocation<'_>) {
         let fresh: Vec<Command> = self.inner.commands()[self.synced..].to_vec();
         self.synced += fresh.len();
-        for mut command in fresh {
-            self.flaw_command(&mut command, inv);
-            self.ran.push(command);
+        // A test is one command; a build is its own and, for Bazel, the two that locate its
+        // output.
+        let verbs = if inv.verb == Verb::Build && self.inner.kind() == BuildSystemKind::Bazel {
+            vec![Verb::Build, Verb::Query, Verb::Info]
+        } else {
+            vec![inv.verb]
+        };
+        for (mut command, verb) in fresh.into_iter().zip(verbs) {
+            self.flaw_command(&mut command, &Invocation { verb, ..*inv });
+            let copies = match (self.flaw, verb) {
+                (Some(Flaw::QueryRunsOtherCommand), Verb::Query) => {
+                    command.env.push(("HOME".to_owned(), "/root".to_owned()));
+                    command.env.sort();
+                    1
+                }
+                (Some(Flaw::InfoRunsOtherCommand), Verb::Info) => {
+                    insert_among_flags(&mut command, "--extra".to_owned());
+                    1
+                }
+                (Some(Flaw::RunsTheBuildTwice), Verb::Build)
+                | (Some(Flaw::RunsQueryTwice), Verb::Query)
+                | (Some(Flaw::RunsInfoTwice), Verb::Info) => 2,
+                (Some(Flaw::NeverRunsQuery), Verb::Query)
+                | (Some(Flaw::NeverRunsInfo), Verb::Info) => 0,
+                _ => 1,
+            };
+            for _ in 0..copies {
+                self.ran.push(command.clone());
+            }
         }
+    }
+
+    /// The layered command of `verb` for `inv`, which a stub runs although it was not asked to.
+    fn layered_for(&self, inv: &Invocation<'_>, verb: Verb, report: Option<&str>) -> Command {
+        self.inner
+            .command(&Invocation {
+                verb,
+                report,
+                ..*inv
+            })
+            .expect("the fake layers the invocation")
     }
 
     /// The flaws of the layering, applied to a layered command of `inv`.
@@ -566,6 +682,24 @@ impl Flawed {
                     command.argv.insert(at, again);
                 }
             }
+            Some(Flaw::ConstantFlagBetweenTheAuthors) => {
+                let at = command.argv.iter().position(|a| a == "--target-one");
+                command
+                    .argv
+                    .insert(at.unwrap_or(command.argv.len()), "--keep-going".to_owned());
+            }
+            Some(Flaw::StampLeaksWhenItChanges) if inv.stamp.build_number != 41 => {
+                insert_among_flags(
+                    command,
+                    format!("--build-number={}", inv.stamp.build_number),
+                );
+            }
+            Some(Flaw::SubstitutesTheBinary) => substitute(command, &inv.system.binary, inv),
+            Some(Flaw::SubstitutesTheConfigFile) => {
+                substitute(command, &inv.system.config_file, inv);
+            }
+            Some(Flaw::SubstitutesTheMode) => substitute(command, &inv.system.mode, inv),
+            Some(Flaw::SubstitutesTheLabel) => substitute(command, &inv.target.label, inv),
             _ => {}
         }
     }
@@ -577,6 +711,16 @@ impl BuildSystem for Flawed {
     }
 
     fn command(&self, inv: &Invocation<'_>) -> Result<Command, SeamError> {
+        let name = match self.flaw {
+            Some(Flaw::RefusesABraceInTheBinary) => inv.system.binary.as_str(),
+            Some(Flaw::RefusesABraceInTheConfigFile) => inv.system.config_file.as_str(),
+            Some(Flaw::RefusesABraceInTheMode) => inv.system.mode.as_str(),
+            Some(Flaw::RefusesABraceInTheLabel) => inv.target.label.as_str(),
+            _ => "",
+        };
+        if name.contains('}') {
+            return Err(SeamError::Permanent(format!("a stray brace in {name}")));
+        }
         let (system, target) = self.seen(inv, false);
         let inv = Invocation {
             system: &system,
@@ -633,32 +777,15 @@ impl BuildSystem for Flawed {
             result
         };
         self.sync(inv);
-        if matches!(
-            self.flaw,
-            Some(Flaw::QueryRunsOtherCommand | Flaw::InfoRunsOtherCommand)
-        ) && self.inner.kind() == BuildSystemKind::Bazel
-            && result.is_ok()
-        {
-            let verb = if self.is(Flaw::QueryRunsOtherCommand) {
-                Verb::Query
+        if self.is(Flaw::BuildAlsoRunsTheTest) && result.is_ok() {
+            // The report is where the kit's test puts it, so the command is the one it layers.
+            let name = if self.inner.kind() == BuildSystemKind::Bazel {
+                "events.json"
             } else {
-                Verb::Info
+                "events.json-lines"
             };
-            let mut extra = self
-                .inner
-                .command(&Invocation {
-                    verb,
-                    report: None,
-                    ..*inv
-                })
-                .expect("the fake layers the invocation");
-            if verb == Verb::Query {
-                extra.env.push(("HOME".to_owned(), "/root".to_owned()));
-                extra.env.sort();
-            } else {
-                insert_among_flags(&mut extra, "--extra".to_owned());
-            }
-            self.ran.push(extra);
+            let test = self.layered_for(inv, Verb::Test, Some(&format!("/scratch/t1/{name}")));
+            self.ran.push(test);
         }
         let made = Located {
             label: BUILD_LABEL.to_owned(),
@@ -704,6 +831,23 @@ impl BuildSystem for Flawed {
             {
                 Ok(vec![made])
             }
+            (
+                Some(Flaw::ListsTheFirstLineWhateverItsLabel),
+                Err(SeamError::Refused(Reason::BuildOutput)),
+            ) if self.world == BuildWorld::ListsAnotherTarget => Ok(vec![made]),
+            (Some(Flaw::SplitsAtTheLastSpace), Ok(mut located)) => {
+                for output in &mut located {
+                    if let Some((_, last)) = output.path.rsplit_once(' ') {
+                        output.path = last.to_owned();
+                    }
+                }
+                Ok(located)
+            }
+            (Some(flaw), Err(SeamError::Refused(Reason::BuildOutput)))
+                if self.accepts_the_hostile_path(flaw) =>
+            {
+                Ok(vec![made])
+            }
             (Some(Flaw::FailureHasNoTail), Err(SeamError::Permanent(_))) => {
                 Err(SeamError::Permanent("the build failed".to_owned()))
             }
@@ -739,7 +883,12 @@ impl BuildSystem for Flawed {
         } else {
             result
         };
+        let start = self.ran.len();
         self.sync(inv);
+        if self.is(Flaw::TestRunsTheBuildFirst) && result.is_ok() {
+            let build = self.layered_for(inv, Verb::Build, None);
+            self.ran.insert(start, build);
+        }
         let passes = self.in_world(Flaw::NothingRanPasses, &BuildWorld::TestRunsNothing)
             || self.in_world(
                 Flaw::UnparseableReportPasses,

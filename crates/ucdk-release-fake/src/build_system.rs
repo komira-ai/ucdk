@@ -11,7 +11,7 @@ use ucdk_release::test_report;
 use ucdk_release_proto::v1::{BuildSystemKind, Reason};
 use ucdk_release_seams::{
     BuildSystem, Command, EntryWriter, Heartbeat, Invocation, Located, SeamError, Shape,
-    TestOutcome,
+    TestOutcome, Verb,
 };
 
 #[derive(Default)]
@@ -22,6 +22,7 @@ struct Faults {
     unstartable: bool,
     no_output: BTreeSet<String>,
     two_outputs: BTreeSet<String>,
+    unreadable_output: BTreeSet<String>,
     wrong_shape: BTreeSet<String>,
     directory_output: BTreeSet<String>,
     symlink_in_output: BTreeSet<String>,
@@ -49,14 +50,15 @@ pub struct FakeBuildSystem {
 
 /// The directory and the file name an output of `label` is made at. The directory spells the
 /// label with `_` as `__`, `:` as `_c` and `/` as `_s`: every character has one spelling and
-/// no spelling starts another, so two labels never share a directory.
+/// no spelling starts another, so two labels never share a directory. The directory is under a
+/// root that holds a space, as a real path may.
 fn output_at(label: &str, suffix: &str) -> (String, String) {
     let name = label.rsplit([':', '/']).next().unwrap_or_default();
     let dir = label
         .replace('_', "__")
         .replace(':', "_c")
         .replace('/', "_s");
-    (format!("/out/{dir}"), format!("{name}{suffix}"))
+    (format!("/build out/{dir}"), format!("{name}{suffix}"))
 }
 
 /// What a build of `label` with `command` writes: it names every argument and every
@@ -130,6 +132,12 @@ impl FakeBuildSystem {
     /// The build of `label` lists two outputs; the seam refuses it as `Refused(BUILD_OUTPUT)`.
     pub fn two_outputs(&mut self, label: &str) {
         self.faults.two_outputs.insert(label.to_owned());
+    }
+
+    /// The listing of the build of `label` names another target, or a path that is relative,
+    /// climbs or holds a control character; the seam refuses it as `Refused(BUILD_OUTPUT)`.
+    pub fn lists_unreadable_output(&mut self, label: &str) {
+        self.faults.unreadable_output.insert(label.to_owned());
     }
 
     /// The output of `label` is a directory where a file is expected.
@@ -250,6 +258,18 @@ impl BuildSystem for FakeBuildSystem {
         heartbeat: &dyn Heartbeat,
     ) -> Result<Vec<Located>, SeamError> {
         let command = self.invoke(inv, heartbeat)?;
+        // A Bazel build locates its output with two more calls, with the flags of the build.
+        // They are not counted among the invocations that faults number, and do not beat.
+        if self.kind == BuildSystemKind::Bazel {
+            let located = [Verb::Query, Verb::Info].map(|verb| {
+                self.command(&Invocation {
+                    verb,
+                    report: None,
+                    ..*inv
+                })
+            });
+            self.commands.extend(located.into_iter().flatten());
+        }
         let label = inv.target.label.as_str();
         if self.faults.symlink_in_output.contains(label) {
             return Err(SeamError::Refused(Reason::BuildOutput));
@@ -279,7 +299,10 @@ impl BuildSystem for FakeBuildSystem {
             }
         };
         // The seam refuses a listing that is not exactly one output.
-        if self.faults.no_output.contains(label) || self.faults.two_outputs.contains(label) {
+        if self.faults.no_output.contains(label)
+            || self.faults.two_outputs.contains(label)
+            || self.faults.unreadable_output.contains(label)
+        {
             return Err(SeamError::Refused(Reason::BuildOutput));
         }
         let out = located("");
