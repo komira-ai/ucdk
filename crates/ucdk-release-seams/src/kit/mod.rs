@@ -11,12 +11,18 @@
 //! so a kit reports every scenario that failed, not only the first. The kits read no clock and
 //! wait for nothing: time moves only when a scenario asks its rig to move it.
 //!
+//! A scenario may be gated: it names a thing a rig can lack (a channel that stages, a registry
+//! that can burn a number), and the runner then records it as [`Verdict::Skipped`] with the
+//! reason. A skip is a legal outcome and never a pass: [`Report::passed`] does not list it,
+//! [`Report::skipped`] does, and a rig that skips a scenario says so in its own test.
+//!
 //! - [`run_build_system_kit`], [`run_grant_source_kit`], [`run_output_files_kit`],
-//!   [`run_process_runner_kit`] and [`run_store_kit`] run a whole kit and return its [`Report`];
-//!   the kit of the other seam joins them in the part that follows.
+//!   [`run_process_runner_kit`], [`run_publisher_kit`] and [`run_store_kit`] run a whole kit and
+//!   return its [`Report`]; the second half of the publisher kit joins them in the part that
+//!   follows.
 //! - [`build_system_scenarios`], [`grant_source_scenarios`], [`output_files_scenarios`],
-//!   [`process_runner_scenarios`] and [`store_scenarios`] give the scenarios one by one, for a
-//!   test per scenario.
+//!   [`process_runner_scenarios`], [`publisher_scenarios`] and [`store_scenarios`] give the
+//!   scenarios one by one, for a test per scenario.
 
 use std::any::Any;
 use std::fmt::Debug;
@@ -35,6 +41,10 @@ mod grant_secret;
 mod grant_source;
 mod output_files;
 mod process_runner;
+mod publisher;
+mod publisher_more;
+mod publisher_rig;
+mod publisher_shapes;
 mod store;
 
 pub use build_system::{
@@ -47,6 +57,11 @@ pub use grant_source::{
 };
 pub use output_files::{Node, OutputFilesRig, output_files_scenarios, run_output_files_kit};
 pub use process_runner::{Behavior, ProcessRig, process_runner_scenarios, run_process_runner_kit};
+pub use publisher::{publisher_scenarios, run_publisher_kit};
+pub use publisher_rig::{
+    Arrangement, ChannelShape, Payload, Placement, PublisherRig, ReadStep, Sibling,
+    every_field_in_a_set_of_its_own,
+};
 pub use store::{StoreRig, run_store_kit, store_scenarios};
 
 /// A coordinate of `name`, with the channel, type, version and platform every kit uses.
@@ -111,17 +126,50 @@ fn permanent_naming(error: &SeamError, path: &str) -> bool {
 pub struct Scenario<R> {
     pub name: &'static str,
     run: fn(&R),
+    gate: Option<fn(&R) -> Option<&'static str>>,
 }
 
 impl<R> Scenario<R> {
     pub fn new(name: &'static str, run: fn(&R)) -> Self {
-        Self { name, run }
+        Self {
+            name,
+            run,
+            gate: None,
+        }
     }
 
-    /// Runs the scenario once; `Err` says what failed.
+    /// The same scenario, run only where `gate` answers `None`; an answer is the reason the rig
+    /// cannot run it, and the runner records the scenario as skipped with that reason.
+    #[must_use]
+    pub fn gated(mut self, gate: fn(&R) -> Option<&'static str>) -> Self {
+        self.gate = Some(gate);
+        self
+    }
+
+    /// Why the scenario does not run on `rig`; `None` when it does.
+    pub fn skip_reason(&self, rig: &R) -> Option<&'static str> {
+        self.gate.and_then(|gate| gate(rig))
+    }
+
+    /// Runs the scenario once, whatever its gate says; `Err` says what failed.
     pub fn run_on(&self, rig: &R) -> Result<(), String> {
         panic::catch_unwind(AssertUnwindSafe(|| (self.run)(rig)))
             .map_err(|payload| describe(&*payload))
+    }
+
+    /// Runs the scenario unless its gate skips it.
+    pub fn verdict_on(&self, rig: &R) -> Verdict {
+        // A gate may build a channel, and what a rig builds may panic: that is a failed
+        // scenario, as one that panics in its body is.
+        let gate = panic::catch_unwind(AssertUnwindSafe(|| self.skip_reason(rig)));
+        match gate {
+            Err(payload) => Verdict::Failed(describe(&*payload)),
+            Ok(Some(reason)) => Verdict::Skipped(reason),
+            Ok(None) => match self.run_on(rig) {
+                Ok(()) => Verdict::Passed,
+                Err(why) => Verdict::Failed(why),
+            },
+        }
     }
 }
 
@@ -132,11 +180,22 @@ fn describe(payload: &(dyn Any + Send)) -> String {
     )
 }
 
+/// How one scenario ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verdict {
+    Passed,
+    /// The scenario failed, for this reason.
+    Failed(String),
+    /// The rig lacks what the scenario needs, for this reason, and the scenario did not run. A
+    /// skip is not a pass.
+    Skipped(&'static str),
+}
+
 /// What one scenario came to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
     pub name: &'static str,
-    pub result: Result<(), String>,
+    pub verdict: Verdict,
 }
 
 /// What a kit found: one outcome per scenario, in the kit's order.
@@ -148,9 +207,34 @@ pub struct Report {
 impl Report {
     /// The names of the scenarios that failed.
     pub fn failed(&self) -> Vec<&'static str> {
+        self.named(|v| matches!(v, Verdict::Failed(_)))
+    }
+
+    /// The names of the scenarios that ran and passed: a skipped scenario is not among them.
+    pub fn passed(&self) -> Vec<&'static str> {
+        self.named(|v| matches!(v, Verdict::Passed))
+    }
+
+    /// The names of the scenarios the rig skipped, in order.
+    pub fn skipped(&self) -> Vec<&'static str> {
+        self.named(|v| matches!(v, Verdict::Skipped(_)))
+    }
+
+    /// Why each skipped scenario did not run, as `name: reason`.
+    pub fn skip_reasons(&self) -> Vec<String> {
         self.outcomes
             .iter()
-            .filter(|o| o.result.is_err())
+            .filter_map(|o| match o.verdict {
+                Verdict::Skipped(reason) => Some(format!("{}: {reason}", o.name)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn named(&self, keep: impl Fn(&Verdict) -> bool) -> Vec<&'static str> {
+        self.outcomes
+            .iter()
+            .filter(|o| keep(&o.verdict))
             .map(|o| o.name)
             .collect()
     }
@@ -160,16 +244,15 @@ impl Report {
         self.outcomes.iter().map(|o| o.name).collect()
     }
 
-    /// Panics, listing every failed scenario with its reason, unless all passed.
+    /// Panics, listing every failed scenario with its reason, unless none failed. A skipped
+    /// scenario does not fail the kit; a test that must know of it reads [`Report::skipped`].
     pub fn assert_conforms(&self) {
         let lines: Vec<String> = self
             .outcomes
             .iter()
-            .filter_map(|o| {
-                o.result
-                    .as_ref()
-                    .err()
-                    .map(|why| format!("{}: {why}", o.name))
+            .filter_map(|o| match &o.verdict {
+                Verdict::Failed(why) => Some(format!("{}: {why}", o.name)),
+                _ => None,
             })
             .collect();
         assert!(lines.is_empty(), "the kit failed:\n{}", lines.join("\n"));
@@ -183,7 +266,7 @@ pub fn run_scenarios<R>(rig: &R, scenarios: &[Scenario<R>]) -> Report {
             .iter()
             .map(|s| Outcome {
                 name: s.name,
-                result: s.run_on(rig),
+                verdict: s.verdict_on(rig),
             })
             .collect(),
     }
