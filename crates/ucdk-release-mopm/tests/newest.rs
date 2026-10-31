@@ -36,13 +36,16 @@ fn record(version: &str, state: &str, subdirs: &[&str]) -> Value {
     record_json("alpha", version, state, subdirs)
 }
 
-fn newest_of(fake: Fake) -> (Result<Vec<(Coordinate, Held)>, SeamError>, Registry<Fake>) {
+/// What `newest` answers: every coordinate of a package with its digest.
+type Found = Vec<(Coordinate, Held)>;
+
+fn newest_of(fake: Fake) -> (Result<Found, SeamError>, Registry<Fake>) {
     let mut reg = registry(fake, &ManualClock::at(1_000_000));
     let result = reg.newest(CHANNEL, "alpha");
     (result, reg)
 }
 
-fn entries(version: &str) -> Vec<(Coordinate, Held)> {
+fn entries(version: &str) -> Found {
     vec![
         (coordinate("alpha", version, "linux-x86_64"), held()),
         (coordinate("alpha", version, "any"), held()),
