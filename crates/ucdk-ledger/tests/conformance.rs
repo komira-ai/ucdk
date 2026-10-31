@@ -7,11 +7,16 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
+use common::release::{
+    golden_records, grant, granted, publication, put_release, read_release, refused, run, seal,
+};
 use common::{Scratch, confirmed, path, put, record};
 use ucdk_ledger::{
     Change, Fence, FileLedger, Holding, LeaseError, LeaseState, Ledger, LedgerError,
-    MAX_CLOCK_SKEW, ManualClock, MemoryLedger, State,
+    MAX_CLOCK_SKEW, ManualClock, MemoryLedger, Origin, State,
 };
+use ucdk_release::codec::{Phase, keys_of};
+use ucdk_release::transitions::Kind;
 
 /// Runs `check` on a fresh ledger of each kind.
 fn on_every_ledger(name: &str, check: impl Fn(&dyn Ledger)) {
@@ -188,4 +193,147 @@ fn every_accepted_write_moves_the_token_even_when_it_changes_nothing() {
         unique.dedup();
         assert_eq!(unique, seen);
     });
+}
+
+// ---- release records ---------------------------------------------------------------------------
+// A release record is a record of the ledger like any other: the codec fills the tag, the readable
+// name and the payload, and the ledger keeps them. Each test below writes through the helpers of
+// `common::release`, reads the file back from a handle opened afresh, and decodes it.
+
+/// Opens the ledger file again, as a later process does.
+fn reopened(scratch: &Scratch) -> FileLedger {
+    FileLedger::open(scratch.file()).expect("open again")
+}
+
+#[test]
+fn publication_record_survives_reopen() {
+    let scratch = Scratch::new("pub-reopen");
+    let intent = publication(Some(Phase::Committing));
+    let at = {
+        let ledger = FileLedger::open(scratch.file()).expect("open");
+        put_release(&ledger, &intent, Origin::Created, State::Intent)
+    };
+    let ledger = reopened(&scratch);
+    assert_eq!(
+        read_release(&ledger, &at),
+        Some((intent.clone(), Origin::Created, State::Intent)),
+        "the intent, with the phase whose effect may have landed"
+    );
+    // Confirmed once the read-back saw the bytes: the same path, no phase.
+    let confirmed = publication(None);
+    assert_eq!(
+        put_release(&ledger, &confirmed, Origin::Created, State::Confirmed),
+        at,
+        "a publication keeps one path through its states"
+    );
+    drop(ledger);
+    assert_eq!(
+        read_release(&reopened(&scratch), &at),
+        Some((confirmed, Origin::Created, State::Confirmed))
+    );
+    // And a coordinate found in a registry is kept as adopted.
+    let found = golden_records()
+        .into_iter()
+        .find(|(_, origin, _)| matches!(origin, Origin::Adopted))
+        .expect("an adopted publication");
+    let ledger = reopened(&scratch);
+    let at = put_release(&ledger, &found.0, found.1, found.2);
+    drop(ledger);
+    assert_eq!(read_release(&reopened(&scratch), &at), Some(found));
+}
+
+#[test]
+fn run_record_payload_round_trips_through_the_file_ledger() {
+    let scratch = Scratch::new("run-payload");
+    let record = run();
+    let at = {
+        let ledger = FileLedger::open(scratch.file()).expect("open");
+        put_release(&ledger, &record, Origin::Created, State::Confirmed)
+    };
+    let snapshot = reopened(&scratch).read().expect("read");
+    let held = &snapshot.records[&at];
+    assert_eq!(held.kind.as_str(), "run");
+    assert_eq!(held.name, "run-7", "the name is the run id");
+    assert!(held.physical.is_none() && held.deps.is_empty());
+    let keys: Vec<&str> = held.outputs.keys().map(String::as_str).collect();
+    let mut listed = keys_of(record.kind()).to_vec();
+    listed.sort_unstable();
+    assert_eq!(keys, listed, "every payload key of a run is on the list");
+    assert_eq!(
+        read_release(&reopened(&scratch), &at),
+        Some((record, Origin::Created, State::Confirmed))
+    );
+}
+
+#[test]
+fn a_seal_record_round_trips_through_the_file_ledger() {
+    let scratch = Scratch::new("seal");
+    let record = seal();
+    // A seal is created confirmed, in one write: the ledger never held it as an intent.
+    let ledger = FileLedger::open(scratch.file()).expect("open");
+    let before = ledger.read().expect("read").token;
+    let at = put_release(&ledger, &record, Origin::Created, State::Confirmed);
+    let after = ledger.read().expect("read");
+    assert_ne!(after.token, before);
+    assert_eq!(after.records.len(), 1);
+    assert_eq!(after.records[&at].state, State::Confirmed);
+    assert_eq!(
+        after.records[&at].name,
+        "build/linux-x86_64/0123456789abcdef"
+    );
+    drop(ledger);
+    assert_eq!(
+        read_release(&reopened(&scratch), &at),
+        Some((record, Origin::Created, State::Confirmed))
+    );
+}
+
+#[test]
+fn a_grant_record_round_trips_and_holds_no_secret_key() {
+    let scratch = Scratch::new("grant");
+    let ledger = FileLedger::open(scratch.file()).expect("open");
+    // The exchanges of one phase of one attempt: asked, granted, and a second one refused. Each
+    // is a record of its own, and the asked one is rewritten when it is answered.
+    let asked = grant(1, None);
+    let first = put_release(&ledger, &asked, Origin::Created, State::Intent);
+    let answered = grant(1, Some(granted()));
+    assert_eq!(
+        put_release(&ledger, &answered, Origin::Created, State::Confirmed),
+        first
+    );
+    let second = put_release(
+        &ledger,
+        &grant(2, Some(refused())),
+        Origin::Created,
+        State::Confirmed,
+    );
+    assert_ne!(first, second);
+    drop(ledger);
+    let ledger = reopened(&scratch);
+    assert_eq!(
+        read_release(&ledger, &first),
+        Some((answered, Origin::Created, State::Confirmed))
+    );
+    assert_eq!(
+        read_release(&ledger, &second),
+        Some((grant(2, Some(refused())), Origin::Created, State::Confirmed))
+    );
+    // The ledger is a plain text document: no key and no value of a grant is a credential.
+    let text = std::fs::read_to_string(scratch.file()).expect("the file");
+    for record in ledger.read().expect("read").records.values() {
+        for key in record.outputs.keys() {
+            let lower = key.to_ascii_lowercase();
+            for secret in ["token", "secret", "password", "credential", "jwt"] {
+                assert!(
+                    !lower.contains(secret),
+                    "the key {key} could hold a credential"
+                );
+            }
+            assert!(
+                keys_of(Kind::Grant).contains(&key.as_str()),
+                "{key} is not on the list of a grant"
+            );
+        }
+    }
+    assert!(text.contains("output coordinates "));
 }

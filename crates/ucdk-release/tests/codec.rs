@@ -11,9 +11,11 @@ use codec_records::{
     stage, stage_of, validation, written,
 };
 use ucdk_release::codec::{
-    CodecError, GrantAnswer, GrantFault, GrantPhase, Phase, Record, Seal, Stage, keys_of,
+    CodecError, GrantAnswer, GrantFault, GrantPhase, Phase, Publication, Record, Seal, Stage,
+    coordinate_text, keys_of,
 };
 use ucdk_release::transitions::Kind;
+use ucdk_release_proto::v1::{ArtifactType, Coordinate};
 
 #[test]
 fn every_record_kind_round_trips() {
@@ -440,4 +442,59 @@ fn attempt_zero_is_refused() {
             "{err:?}"
         );
     }
+}
+
+fn coordinate(channel: &str, name: &str, version: &str, platform: &str) -> Coordinate {
+    Coordinate {
+        channel: channel.to_owned(),
+        r#type: ArtifactType::File as i32,
+        name: name.to_owned(),
+        version: version.to_owned(),
+        platform: platform.to_owned(),
+    }
+}
+
+#[test]
+fn a_publication_coordinate_is_framed_so_slashes_cannot_alias() {
+    // The text is each field's length in bytes, a `:` and the field, in the order channel,
+    // type, name, version, platform: no joining character, so none can be moved from one field
+    // to the next.
+    assert_eq!(
+        coordinate_text(&coordinate(
+            "stable",
+            "tool",
+            "1.2.3+build.4",
+            "linux-x86_64"
+        )),
+        "6:stable1:14:tool13:1.2.3+build.412:linux-x86_64"
+    );
+    // Two coordinates that a `/` join would spell alike are two texts, and two records.
+    let one = coordinate("stable", "a/b", "c", "p");
+    let other = coordinate("stable", "a", "b/c", "p");
+    assert_ne!(coordinate_text(&one), coordinate_text(&other));
+    let channel_runs_on = coordinate("a/stable", "b", "c", "p");
+    let name_runs_back = coordinate("a", "stable/b", "c", "p");
+    assert_ne!(
+        coordinate_text(&channel_runs_on),
+        coordinate_text(&name_runs_back)
+    );
+    let publication = |c: &Coordinate| {
+        let Record::Publication(p) = publication(false, None) else {
+            panic!("a publication")
+        };
+        Record::Publication(Publication {
+            coordinate: coordinate_text(c),
+            ..p
+        })
+    };
+    let (a, b) = (publication(&one), publication(&other));
+    let (ea, eb) = (written(&a), written(&b));
+    assert_ne!(
+        ea.path(),
+        eb.path(),
+        "two coordinates are two ledger records"
+    );
+    // And whatever the fields hold, the record reads back the coordinate it was given.
+    assert_eq!(Record::decode(&ea), Ok(a));
+    assert_eq!(Record::decode(&eb), Ok(b));
 }

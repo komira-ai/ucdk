@@ -10,6 +10,10 @@
 //! the byte-level promise for the record lines: what this crate wrote for them is what it must
 //! keep writing, and a file with these lines must keep reading to the same records.
 //!
+//! A third, `release-records.ucdk`, holds records the release codec wrote (a run, publications,
+//! a seal and grants) and no lease: the release side adds no field and no format to the ledger,
+//! and the file is what shows it.
+//!
 //! To change them on purpose, run
 //! `cargo test -p ucdk-ledger --test golden -- --ignored write_goldens`.
 
@@ -20,6 +24,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use common::release::{golden_records, ledger_record, read_release};
 use common::{Scratch, path};
 use ucdk_core::{Locator, RecordPath, Tag};
 use ucdk_ledger::{
@@ -86,6 +91,11 @@ fn write_goldens() {
     std::fs::create_dir_all(dir()).expect("create the directory");
     std::fs::write(dir().join("leased.ucdk"), golden("write")).expect("write a golden");
     std::fs::write(dir().join("records.ucdk"), written_records("write")).expect("write a golden");
+    std::fs::write(
+        dir().join("release-records.ucdk"),
+        written_release_records("write"),
+    )
+    .expect("write a golden");
 }
 
 /// The records the second golden holds, one for each state and each origin, with every line a
@@ -205,4 +215,61 @@ fn the_records_golden_reads_back_to_the_same_records() {
         .collect();
     assert_eq!(states.len(), 3, "every state is in the golden");
     assert_eq!(origins.len(), 2, "every origin is in the golden");
+}
+
+/// What the third golden holds when this crate writes it: the records of [`golden_records`] as
+/// the release codec fills them, one write each, no lease, under the fixed clock.
+fn written_release_records(tag: &str) -> Vec<u8> {
+    let scratch = Scratch::new(&format!("golden-release-{tag}"));
+    let ledger = FileLedger::open_with_clock(scratch.file(), Arc::new(ManualClock::at(GRANTED)))
+        .expect("open");
+    for (release, origin, state) in golden_records() {
+        let token = ledger.read().expect("read").token;
+        ledger
+            .write(&token, Change::Put(ledger_record(&release, origin, state)))
+            .expect("write");
+    }
+    drop(ledger);
+    std::fs::read(scratch.file()).expect("the ledger file")
+}
+
+#[test]
+fn a_release_records_golden_is_the_file_the_codec_and_this_crate_write() {
+    let on_disk =
+        std::fs::read_to_string(dir().join("release-records.ucdk")).expect("release-records.ucdk");
+    let written = String::from_utf8(written_release_records("check")).expect("text");
+    assert_eq!(
+        on_disk, written,
+        "release-records.ucdk differs from what is written now"
+    );
+}
+
+#[test]
+fn a_release_records_golden_reads_back() {
+    let scratch = Scratch::new("golden-release-read");
+    std::fs::copy(dir().join("release-records.ucdk"), scratch.file()).expect("copy");
+    let ledger = FileLedger::open(scratch.file()).expect("open");
+    let read = ledger.read().expect("read");
+    assert!(read.lease.is_none(), "the golden holds no lease");
+    let wanted = golden_records();
+    assert_eq!(read.records.len(), wanted.len());
+    for (release, origin, state) in wanted {
+        let at = ledger_record(&release, origin, state).path;
+        assert_eq!(
+            read_release(&ledger, &at),
+            Some((release, origin, state)),
+            "{at}"
+        );
+    }
+    let kinds: BTreeSet<&str> = read.records.values().map(|r| r.kind.as_str()).collect();
+    assert_eq!(
+        kinds,
+        BTreeSet::from(["grant", "publication", "run", "seal"]),
+        "the golden holds the four kinds this change writes"
+    );
+    for record in read.records.values() {
+        let owner = record.path.as_str().split('/').next().expect("a segment");
+        assert_eq!(owner, record.kind.as_str(), "the owner is the tag");
+        assert!(record.physical.is_none() && record.deps.is_empty());
+    }
 }
