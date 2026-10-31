@@ -20,9 +20,9 @@ use ucdk_release_seams::{Backoff, Grant, GrantRequest, GrantSource, SeamError};
 
 fn pair() -> Vec<Coordinate> {
     vec![
-        coordinate("alpha", "1.2.3", "linux-64"),
-        coordinate("alpha", "1.2.3", "osx-arm64"),
-        coordinate("beta", "0.1.0", "noarch"),
+        coordinate("alpha", "1.2.3", "linux-x86_64"),
+        coordinate("alpha", "1.2.3", "darwin-aarch64"),
+        coordinate("beta", "0.1.0", "any"),
     ]
 }
 
@@ -229,17 +229,17 @@ fn a_repository_that_is_not_public_or_not_the_one_served_is_refused_before_anyth
 fn a_set_mopm_cannot_hold_is_refused_before_an_identity_token_is_asked_for() {
     let (mut source, rig) = source();
     let repo = repository();
-    let a = coordinate("alpha", "1.2.3", "linux-64");
+    let a = coordinate("alpha", "1.2.3", "linux-x86_64");
     let cases: Vec<(&str, Vec<Coordinate>, SeamError)> = vec![
         ("empty", vec![], SeamError::Refused(Reason::Channel)),
         (
             "a misspelled name",
-            vec![coordinate("Alpha", "1.2.3", "linux-64")],
+            vec![coordinate("Alpha", "1.2.3", "linux-x86_64")],
             SeamError::Refused(Reason::Channel),
         ),
         (
             "a version with a pre-release",
-            vec![coordinate("alpha", "1.2.3-rc1", "linux-64")],
+            vec![coordinate("alpha", "1.2.3-rc1", "linux-x86_64")],
             SeamError::Refused(Reason::Channel),
         ),
         (
@@ -249,7 +249,7 @@ fn a_set_mopm_cannot_hold_is_refused_before_an_identity_token_is_asked_for() {
         ),
         (
             "two versions of one name",
-            vec![a.clone(), coordinate("alpha", "1.2.4", "linux-64")],
+            vec![a.clone(), coordinate("alpha", "1.2.4", "linux-x86_64")],
             SeamError::Refused(Reason::Channel),
         ),
         (
@@ -281,7 +281,7 @@ fn a_set_mopm_cannot_hold_is_refused_before_an_identity_token_is_asked_for() {
 
 fn many(count: usize) -> Vec<Coordinate> {
     (0..count)
-        .map(|n| coordinate(&format!("pkg{n:03}"), "1.0.0", "noarch"))
+        .map(|n| coordinate(&format!("pkg{n:03}"), "1.0.0", "any"))
         .collect()
 }
 
@@ -889,7 +889,6 @@ fn neither_token_reaches_an_error_a_log_or_the_grant_beyond_its_one_place() {
 
 #[test]
 fn a_refusal_before_the_exchange_names_no_token_either() {
-    let jwt = String::from_utf8(token("j1")).unwrap();
     let repo = repository();
     let set = pair();
     let (mut source, rig) = source();

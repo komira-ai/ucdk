@@ -85,7 +85,7 @@ fn millis(duration: Duration) -> u64 {
 const EPOCH_YEAR: u64 = 1970;
 
 fn days_in_month(year: u64, month: u64) -> u64 {
-    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let leap = (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400);
     match month {
         2 if leap => 29,
         2 => 28,
