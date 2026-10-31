@@ -140,7 +140,12 @@ fn kill_self(signal: i32) -> ! {
         exit(98);
     }
     let named = Signal::from_named_raw(signal).expect("a signal");
-    kill_process(getpid(), named).expect("the signal is sent");
+    // Twice: the runtime of this program handles `SIGSEGV` by putting back the default action and
+    // returning, to let the fault that it expects happen again; a signal that is sent and not
+    // the result of a fault does not, and the second one ends the program.
+    for _ in 0..2 {
+        kill_process(getpid(), named).expect("the signal is sent");
+    }
     // It has been delivered by now: a program still running was not ended by it.
     thread::sleep(Duration::from_secs(5));
     eprintln!("signal {signal} did not end the program");
