@@ -1,0 +1,34 @@
+[package]
+name = "ucdk-release-build"
+description = "The real build side of a release: a process runner over child processes, a reader of the local files a build wrote, and the Buck2 and Bazel build systems over them."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# This crate is not marked pure: it starts processes and reads the disk.
+
+[dependencies]
+# Sends the kill signal to a child's process group. The `thread` feature is for the child that
+# the tests start (`tests/child`), which names its process so that a test can find it.
+rustix = { version = "1", default-features = false, features = ["std", "process", "thread"] }
+ucdk-release = { path = "../ucdk-release" }
+ucdk-release-proto = { path = "../ucdk-release-proto" }
+ucdk-release-seams = { path = "../ucdk-release-seams" }
+
+[dev-dependencies]
+tempfile = { version = "3", default-features = false }
+ucdk-core = { path = "../ucdk-core" }
+ucdk-release-fake = { path = "../ucdk-release-fake" }
+
+[[bin]]
+# A small program that the tests copy and run in place of a real tool: it does what the file
+# beside it says. It is built by cargo for the tests and runs nothing else.
+name = "ucdk-test-child"
+path = "tests/child/bin.rs"
+test = false
+
+[lints]
+workspace = true
