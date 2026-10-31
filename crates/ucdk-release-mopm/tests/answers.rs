@@ -194,7 +194,7 @@ fn a_create_body_with_a_wrong_or_missing_field_is_not_read() {
             .remove("put_url");
     }));
     assert!(broken(
-        &|v| v["members"][0]["files"][0]["put_url"] = json!("http://x.example/a")
+        &|v| v["members"][0]["files"][0]["put_url"] = json!("http://registry.example.com/a")
     ));
     assert!(broken(
         &|v| v["members"][0]["files"][0]["put_headers"] = json!("none")
