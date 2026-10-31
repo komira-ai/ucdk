@@ -24,7 +24,10 @@ use std::process::{Command, Stdio, exit};
 use std::thread;
 use std::time::Duration;
 
-use rustix::process::{Resource, Rlimit, Signal, getpid, kill_process, setrlimit};
+use rustix::process::{
+    DumpableBehavior, Resource, Rlimit, Signal, getpid, kill_process, set_dumpable_behavior,
+    setrlimit,
+};
 
 fn unhex(text: &str) -> Vec<u8> {
     if text == "-" {
@@ -68,7 +71,11 @@ fn report() {
         text.extend(arg.as_bytes());
         text.push(b'\n');
     }
-    let mut vars: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+    // The coverage runtime of an instrumented program adds a variable of its own to the
+    // environment it runs in, which is not one that the program was given.
+    let mut vars: Vec<(OsString, OsString)> = std::env::vars_os()
+        .filter(|(key, _)| !key.as_bytes().starts_with(b"__LLVM_PROFILE"))
+        .collect();
     vars.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
     for (key, value) in vars {
         text.extend(b"env ");
@@ -106,16 +113,38 @@ fn hold(name: &str) -> ! {
     wait_for_ever()
 }
 
+/// Whether the signal is ignored in this process: the mask is in `/proc/self/status`.
+fn ignores(signal: i32) -> bool {
+    let status = std::fs::read_to_string("/proc/self/status").expect("the process status");
+    let mask = status
+        .lines()
+        .find_map(|line| line.strip_prefix("SigIgn:"))
+        .map(|hex| u64::from_str_radix(hex.trim(), 16).expect("a mask"))
+        .expect("a mask of ignored signals");
+    mask >> (signal - 1) & 1 == 1
+}
+
 fn kill_self(signal: i32) -> ! {
-    // A signal that dumps core leaves no file.
+    // A signal that dumps core leaves no file: the limit says so for a file, and a program that
+    // may not be dumped says so for a handler that the system pipes the dump to.
     let none = Rlimit {
         current: Some(0),
         maximum: Some(0),
     };
     setrlimit(Resource::Core, none).expect("no core file");
-    let signal = Signal::from_named_raw(signal).expect("a signal");
-    kill_process(getpid(), signal).expect("the signal is sent");
-    wait_for_ever()
+    set_dumpable_behavior(DumpableBehavior::NotDumpable).expect("not dumpable");
+    // A signal that was ignored when this program was started would not end it, and the test
+    // would wait for ever; say so with an exit code of its own instead.
+    if ignores(signal) {
+        eprintln!("signal {signal} is ignored by the process that started this program");
+        exit(98);
+    }
+    let named = Signal::from_named_raw(signal).expect("a signal");
+    kill_process(getpid(), named).expect("the signal is sent");
+    // It has been delivered by now: a program still running was not ended by it.
+    thread::sleep(Duration::from_secs(5));
+    eprintln!("signal {signal} did not end the program");
+    exit(99)
 }
 
 /// The words of the line of `lines` that starts with `first` (and `second`, when given).
