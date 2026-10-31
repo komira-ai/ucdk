@@ -88,7 +88,11 @@ fn buck2_builds_copies_and_tests_through_the_real_runner_and_the_real_files() {
                 ],
             );
             let case = found_on_the_path(Case::buck2(), "buck2", &s);
-            let mut system = Buck2::new(OsProcessRunner, LocalFiles, s.clone());
+            let mut system = Buck2::new(
+                OsProcessRunner,
+                LocalFiles::within([&s]).unwrap(),
+                s.clone(),
+            );
             let located = system.build(&case.inv(Verb::Build, None), &Never).unwrap();
             assert_eq!(
                 located,
@@ -142,7 +146,11 @@ fn bazel_builds_locates_and_tests_through_the_real_runner_and_the_real_files() {
                 ],
             );
             let case = found_on_the_path(Case::bazel(), "bazel", &s);
-            let mut system = Bazel::new(OsProcessRunner, LocalFiles, s.clone());
+            let mut system = Bazel::new(
+                OsProcessRunner,
+                LocalFiles::within([&s]).unwrap(),
+                s.clone(),
+            );
             let located = system.build(&case.inv(Verb::Build, None), &Never).unwrap();
             assert_eq!(located[0].path, format!("{root}/{rel}"));
             assert_eq!(located[0].shape, Shape::File);
@@ -180,7 +188,11 @@ fn a_failing_tool_is_permanent_with_its_tail_and_a_missing_one_is_unknown() {
                 )],
             );
             let case = found_on_the_path(Case::buck2(), "buck2", &s);
-            let mut system = Buck2::new(OsProcessRunner, LocalFiles, s.clone());
+            let mut system = Buck2::new(
+                OsProcessRunner,
+                LocalFiles::within([&s]).unwrap(),
+                s.clone(),
+            );
             let SeamError::Permanent(why) = system
                 .build(&case.inv(Verb::Build, None), &Never)
                 .unwrap_err()
