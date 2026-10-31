@@ -162,6 +162,21 @@ impl Url {
         }
     }
 
+    /// This URL with the query parameter `key=value` added, both percent-encoded.
+    #[must_use]
+    pub fn with_param(&self, key: &str, value: &str) -> Url {
+        let pair = format!("{}={}", encode_segment(key), encode_segment(value));
+        let query = match &self.query {
+            Some(query) => format!("{query}&{pair}"),
+            None => pair,
+        };
+        Url {
+            origin: self.origin.clone(),
+            path: self.path.clone(),
+            query: Some(query),
+        }
+    }
+
     /// The URL with its query replaced by `<redacted>`: safe to print and to put in an error.
     pub fn redacted(&self) -> String {
         let query = if self.query.is_some() {
