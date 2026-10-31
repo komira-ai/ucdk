@@ -165,7 +165,7 @@ fn retry_after_seconds(response: &Response) -> Option<u64> {
 /// A 429: `RateLimited` for the seconds `Retry-After` states (rounded up to ticks by the seam,
 /// at least one), never more than `ceiling`; a longer wait is a refusal, because the daily file
 /// allowance can ask for up to a day and a `Pause` of that length is never the answer.
-fn rate_limited(response: &Response, ceiling: Duration) -> SeamError {
+pub(crate) fn rate_limited(response: &Response, ceiling: Duration) -> SeamError {
     let seconds = retry_after_seconds(response).unwrap_or(DEFAULT_RETRY_AFTER_SECONDS);
     if Duration::from_secs(seconds) > ceiling {
         return SeamError::Refused(Reason::Channel);
