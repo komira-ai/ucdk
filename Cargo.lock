@@ -716,6 +716,7 @@ version = "0.0.0"
 dependencies = [
  "ucdk-core",
  "ucdk-release",
+ "ucdk-release-proto",
 ]
 
 [[package]]

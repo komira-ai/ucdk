@@ -1,0 +1,94 @@
+ucdk-ledger 1.1
+version 7
+fence 0
+record grant/k545norso67hmhszcczngryniue
+kind grant
+name publish/push/commit/a1-1
+origin created
+state intent
+output audience registry
+output channel stable
+output coordinates 6666666666666666666666666666666666666666666666666666666666666666
+output phase commit
+output repository file
+output scope commit
+output subject repo:example/project:ref:refs/heads/main
+record grant/ki3l5rpw3xmmcdng2ffrmm7ibje
+kind grant
+name publish/push/commit/a1-3
+origin created
+state confirmed
+output audience registry
+output channel stable
+output coordinates 6666666666666666666666666666666666666666666666666666666666666666
+output fault denied
+output outcome refused
+output phase commit
+output repository file
+output scope commit
+output subject repo:example/project:ref:refs/heads/main
+record grant/kthggpj5jd7puala6azjg73vy3i
+kind grant
+name publish/push/commit/a1-2
+origin created
+state confirmed
+output audience registry
+output channel stable
+output coordinates 6666666666666666666666666666666666666666666666666666666666666666
+output expires_ms 1700000300000
+output outcome granted
+output phase commit
+output repository file
+output scope commit
+output subject repo:example/project:ref:refs/heads/main
+record publication/k2avluy7vx6xvrhmwijjyctcg7u
+kind publication
+name 6:stable1:14:tool13:1.2.3%2Bbuild.412:linux-x86_64
+origin created
+state intent
+output attempt 3
+output build 41
+output commit abc123
+output digest 4444444444444444444444444444444444444444444444444444444444444444
+output phase committing
+output run run-7
+output stage publish
+record publication/kxmb7smiuhbpj7jglhkhdwrp5d4
+kind publication
+name 6:stable1:14:tool5:1.2.212:linux-x86_64
+origin adopted
+state confirmed
+output attempt 3
+output build 41
+output commit abc123
+output digest 4444444444444444444444444444444444444444444444444444444444444444
+output run run-7
+output stage publish
+record run/ktmccbz657wkdfoxx4g4vad4xf4
+kind run
+name run-7
+origin created
+state confirmed
+output build 41
+output commit abc123
+output machine 1111111111111111111111111111111111111111111111111111111111111111
+output revision 0123456789abcdef
+output timestamp 1700000000000
+output version 1.2.3
+record seal/kai4lchlavr5u2gukx7ry43ljni
+kind seal
+name build/linux-x86_64/0123456789abcdef
+origin created
+state confirmed
+output attempt 2
+output build 41
+output commit abc123
+output environment build
+output generation run-7-a2
+output inputs 5555555555555555555555555555555555555555555555555555555555555555
+output machine demo
+output run run-7
+output set 2222222222222222222222222222222222222222222222222222222222222222
+output timestamp 1700000000000
+output version 1.2.3
+end 7 63ba7199559df4aa

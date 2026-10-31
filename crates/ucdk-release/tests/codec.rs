@@ -466,7 +466,7 @@ fn a_publication_coordinate_is_framed_so_slashes_cannot_alias() {
             "1.2.3+build.4",
             "linux-x86_64"
         )),
-        "6:stable1:14:tool13:1.2.3+build.410:linux-x86_64"
+        "6:stable1:14:tool13:1.2.3+build.412:linux-x86_64"
     );
     // Two coordinates that a `/` join would spell alike are two texts, and two records.
     let one = coordinate("stable", "a/b", "c", "p");

@@ -95,12 +95,25 @@ impl Encoded {
     }
 }
 
-/// The readable name of a published coordinate, as a publication record keeps it.
+/// The readable name of a published coordinate, as a publication record keeps it: its five
+/// fields in a fixed order (channel, type, name, version, platform), each as its length in
+/// bytes, a `:` and the field, the same framing the fake registry keeps its coordinates under.
+/// No character joins two fields, so a `/` in a name or a version cannot move from one field to
+/// the next, and two coordinates share a text only when every field is equal.
 pub fn coordinate_text(c: &Coordinate) -> String {
-    format!(
-        "{}/{}/{}/{}/{}",
-        c.channel, c.r#type, c.name, c.version, c.platform
-    )
+    let mut text = String::new();
+    for field in [
+        c.channel.as_str(),
+        &c.r#type.to_string(),
+        &c.name,
+        &c.version,
+        &c.platform,
+    ] {
+        text.push_str(&field.len().to_string());
+        text.push(':');
+        text.push_str(field);
+    }
+    text
 }
 
 /// The run's pinned inputs, written once by the first stage that holds a Build or Test action.

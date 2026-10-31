@@ -3,23 +3,43 @@
 //! record has, written, and read back. The codec owns the tag, the readable name and the payload;
 //! the ledger keeps them as it keeps any record, so these helpers add no field and no format.
 
+use std::collections::BTreeSet;
+
 use ucdk_core::{Hash256, RecordPath};
-use ucdk_ledger::{Ledger, Origin, Record, State};
+use ucdk_ledger::{Change, Ledger, Origin, OwnerPath, Record, State};
 use ucdk_release::codec::{
-    Grant, GrantAnswer, GrantFault, GrantPhase, Phase, Publication, Record as Release, Run, Seal,
+    Encoded, Grant, GrantAnswer, GrantFault, GrantPhase, Phase, Publication, Record as Release,
+    Run, Seal, coordinate_text,
 };
+use ucdk_release_proto::v1::{ArtifactType, Coordinate};
 
 /// The ledger record that holds `release`, in `state` and `origin`. The record's path, kind,
 /// name and payload are the codec's; it has no locator and no dependency.
 pub fn ledger_record(release: &Release, origin: Origin, state: State) -> Record {
-    let _ = (release, origin, state);
-    todo!("ledger_record")
+    let encoded = release.encode().expect("a record the codec writes");
+    let path = encoded.path().expect("a path of valid segments");
+    Record {
+        owner: OwnerPath::of(&path),
+        path,
+        kind: encoded.kind,
+        name: encoded.name,
+        origin,
+        state,
+        physical: encoded.physical,
+        deps: BTreeSet::new(),
+        outputs: encoded.outputs,
+    }
 }
 
 /// The release record a ledger record holds, read back through the codec.
 pub fn release_record(record: &Record) -> Release {
-    let _ = record;
-    todo!("release_record")
+    Release::decode(&Encoded {
+        kind: record.kind.clone(),
+        name: record.name.clone(),
+        physical: record.physical.clone(),
+        outputs: record.outputs.clone(),
+    })
+    .expect("a record the codec reads")
 }
 
 /// Writes `release` to `ledger` against the current token, and returns its path.
@@ -29,14 +49,25 @@ pub fn put_release(
     origin: Origin,
     state: State,
 ) -> RecordPath {
-    let _ = (ledger, release, origin, state);
-    todo!("put_release")
+    let record = ledger_record(release, origin, state);
+    let path = record.path.clone();
+    let token = ledger.read().expect("read").token;
+    ledger
+        .write(&token, Change::Put(record))
+        .expect("write a release record");
+    path
 }
 
 /// The release record at `path`, with the origin and state it is kept in.
 pub fn read_release(ledger: &dyn Ledger, path: &RecordPath) -> Option<(Release, Origin, State)> {
-    let _ = (ledger, path);
-    todo!("read_release")
+    let snapshot = ledger.read().expect("read");
+    let record = snapshot.records.get(path)?;
+    assert_eq!(
+        record.path,
+        ledger_record(&release_record(record), record.origin, record.state).path,
+        "a release record is kept at the path its codec gives it"
+    );
+    Some((release_record(record), record.origin, record.state))
 }
 
 fn hash(c: char) -> Hash256 {
@@ -55,9 +86,20 @@ pub fn run() -> Release {
     })
 }
 
+/// The coordinate `tool` at `version` on `stable`, as the text a publication record keeps.
+pub fn tool(version: &str) -> String {
+    coordinate_text(&Coordinate {
+        channel: "stable".to_owned(),
+        r#type: ArtifactType::File as i32,
+        name: "tool".to_owned(),
+        version: version.to_owned(),
+        platform: "linux-x86_64".to_owned(),
+    })
+}
+
 pub fn publication(phase: Option<Phase>) -> Release {
     Release::Publication(Publication {
-        coordinate: "stable/file/tool/1.2.3+build.4/linux-x86_64".to_owned(),
+        coordinate: tool("1.2.3+build.4"),
         digest: hash('4'),
         build: 41,
         commit: "abc123".to_owned(),
@@ -131,7 +173,7 @@ pub fn golden_records() -> Vec<(Release, Origin, State)> {
         (
             match publication(None) {
                 Release::Publication(p) => Release::Publication(Publication {
-                    coordinate: "stable/file/tool/1.2.2/linux-x86_64".to_owned(),
+                    coordinate: tool("1.2.2"),
                     ..p
                 }),
                 other => other,

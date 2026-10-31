@@ -13,6 +13,7 @@ ucdk-core = { path = "../ucdk-core" }
 
 [dev-dependencies]
 ucdk-release = { path = "../ucdk-release" }
+ucdk-release-proto = { path = "../ucdk-release-proto" }
 
 [lints]
 workspace = true
