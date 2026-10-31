@@ -8,18 +8,23 @@
 
 mod support;
 
+use std::cell::Cell;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 use std::process::Command as Process;
 use std::sync::{Mutex, PoisonError};
 
+use rustix::process::{Pid, Signal, WaitOptions, kill_process, waitpid};
 use support::{Never, guarded, hex, run_scenario};
 use tempfile::TempDir;
 use ucdk_release::invocation::Command;
 use ucdk_release_build::OsProcessRunner;
 use ucdk_release_seams::kit::{Behavior, ProcessRig, process_runner_scenarios};
-use ucdk_release_seams::{Exit, ProcessResult, ProcessRunner, ProcessSpec, SeamError};
+use ucdk_release_seams::{
+    Exit, Heartbeat, ProcessResult, ProcessRunner, ProcessSpec, SeamError, Stop,
+};
 
 /// The program the tests install under every name.
 const CHILD: &str = env!("CARGO_BIN_EXE_ucdk-test-child");
@@ -316,4 +321,73 @@ fn the_kit_passes_with_a_decoy_on_the_test_processs_own_path() {
     );
     // It ran the test it was asked to, and not none.
     assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+}
+
+/// A heartbeat of a caller that fails in the middle of a run: it lets the runner go on until the
+/// child and the process it started are both in the process table, and then panics.
+struct PanicOnceHeld<'a> {
+    rig: &'a Rig,
+    panicked: &'a Cell<bool>,
+}
+
+impl Heartbeat for PanicOnceHeld<'_> {
+    fn beat(&self) -> Result<(), Stop> {
+        if self.rig.alive("held") & self.rig.alive("held.group") {
+            self.panicked.set(true);
+            panic!("the caller fails while the child runs");
+        }
+        Ok(())
+    }
+}
+
+/// Ends and collects what a runner that failed its duty left running, so that a failure of the
+/// test below is not also a failure of the tests that start the same programs after it.
+fn clear_left_over() {
+    let Ok(table) = fs::read_dir("/proc") else {
+        return;
+    };
+    for entry in table.flatten() {
+        let name = fs::read_to_string(entry.path().join("comm")).unwrap_or_default();
+        let pid = entry.file_name().to_string_lossy().parse::<i32>().ok();
+        if let (Some(pid), "held" | "held.group") = (pid.and_then(Pid::from_raw), name.trim_end()) {
+            let _ = kill_process(pid, Signal::KILL);
+            let _ = waitpid(Some(pid), WaitOptions::empty());
+        }
+    }
+}
+
+#[test]
+fn a_panic_in_the_caller_while_the_child_runs_leaves_no_child_and_no_group() {
+    let _alone = ONE_HOLDER.lock().unwrap_or_else(PoisonError::into_inner);
+    guarded("a run whose caller panics", || {
+        let rig = Rig::new(None);
+        let program = format!("{}/holder", rig.scratch);
+        rig.install(
+            &mut OsProcessRunner,
+            &program,
+            Behavior::Holds {
+                name: "held".to_owned(),
+            },
+        );
+        let panicked = Cell::new(false);
+        let given = command(&[&program], &[]);
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            OsProcessRunner.run(&ProcessSpec {
+                command: &given,
+                cwd: &rig.scratch,
+                heartbeat: &PanicOnceHeld {
+                    rig: &rig,
+                    panicked: &panicked,
+                },
+                stdout_limit: 1 << 20,
+            })
+        }));
+        let (child, group) = (rig.alive("held"), rig.alive("held.group"));
+        clear_left_over();
+        // The panic came from the caller, while both processes ran, and went through the runner.
+        assert!(panicked.get(), "the heartbeat never saw the child run");
+        assert!(outcome.is_err(), "the panic did not reach the caller");
+        assert!(!child, "the child outlived the panic");
+        assert!(!group, "the process group of the child outlived the panic");
+    });
 }

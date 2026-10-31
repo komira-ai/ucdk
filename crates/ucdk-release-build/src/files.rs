@@ -14,8 +14,27 @@ use ucdk_release_seams::{DirEntry, FileKind, OutputFiles, SeamError, check_path}
 /// (a repeated slash, a trailing one) are dropped here, so that a slashed path answers as the
 /// unslashed one. The last part of a path is never followed when it is a symlink: `stat` says
 /// `Symlink`, and `list` and `read` refuse it. Nothing here writes.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct LocalFiles;
+#[derive(Debug, Clone)]
+pub struct LocalFiles {
+    #[allow(dead_code)]
+    roots: Vec<PathBuf>,
+}
+
+impl LocalFiles {
+    /// A reader confined to `roots`.
+    ///
+    /// # Errors
+    ///
+    /// `Permanent` when a root cannot be resolved.
+    pub fn within<P: AsRef<Path>>(roots: impl IntoIterator<Item = P>) -> Result<Self, SeamError> {
+        Ok(Self {
+            roots: roots
+                .into_iter()
+                .map(|r| r.as_ref().to_path_buf())
+                .collect(),
+        })
+    }
+}
 
 /// The path `given` names, without its `.` parts and empty parts; `Refused` when it is not an
 /// absolute path without a `..` part.
