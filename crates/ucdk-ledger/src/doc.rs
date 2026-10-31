@@ -55,6 +55,33 @@ impl Doc {
         }
     }
 
+    /// Whether `holder` may be granted the lease now: nobody else holds it, and no other
+    /// holder's lapse is less than the skew bound old.
+    fn free_for(&self, now: u64, holder: &str) -> Result<(), LeaseError> {
+        if let Some(held) = self.lease.as_ref().filter(|held| held.holder != holder)
+            && self.holding_of(held).state(now) != LeaseState::Lapsed
+        {
+            let free_at = held.expires_at.saturating_add(millis(MAX_CLOCK_SKEW));
+            return Err(LeaseError::Held {
+                holder: held.holder.clone(),
+                remaining: Duration::from_millis(free_at - now),
+            });
+        }
+        Ok(())
+    }
+
+    /// Records the grant: one more fence, and the lease for `ttl` from `now`.
+    fn grant(&mut self, now: u64, holder: &str, ttl: Duration) -> Lease {
+        self.fence += 1;
+        let held = Held {
+            holder: holder.to_owned(),
+            expires_at: now.saturating_add(millis(ttl)),
+        };
+        let lease = self.lease_of(&held);
+        self.lease = Some(held);
+        lease
+    }
+
     /// Grants the lease to `holder` unless another holds it, or lapsed less than the skew
     /// bound ago. The holder named in the lease takes it again at once, live or lapsed, with a
     /// new fence: a run that ended without giving the lease back (a release that failed, a
@@ -66,23 +93,26 @@ impl Doc {
         holder: &str,
         ttl: Duration,
     ) -> Result<Lease, LeaseError> {
-        if let Some(held) = self.lease.as_ref().filter(|held| held.holder != holder)
-            && self.holding_of(held).state(now) != LeaseState::Lapsed
-        {
-            let free_at = held.expires_at.saturating_add(millis(MAX_CLOCK_SKEW));
-            return Err(LeaseError::Held {
-                holder: held.holder.clone(),
-                remaining: Duration::from_millis(free_at - now),
-            });
+        self.free_for(now, holder)?;
+        Ok(self.grant(now, holder, ttl))
+    }
+
+    /// [`Doc::acquire`] with a precondition, checked in the same step as the grant: the
+    /// document is still at `expected` and the highest fence granted is still `fence`. Another
+    /// holder's lease is judged first, so it is `Held` whatever else changed.
+    pub(crate) fn acquire_if(
+        &mut self,
+        now: u64,
+        holder: &str,
+        ttl: Duration,
+        expected: &Token,
+        fence: Fence,
+    ) -> Result<Lease, LeaseError> {
+        self.free_for(now, holder)?;
+        if expected.0 != self.version || fence.0 != self.fence {
+            return Err(LeaseError::Changed);
         }
-        self.fence += 1;
-        let held = Held {
-            holder: holder.to_owned(),
-            expires_at: now.saturating_add(millis(ttl)),
-        };
-        let lease = self.lease_of(&held);
-        self.lease = Some(held);
-        Ok(lease)
+        Ok(self.grant(now, holder, ttl))
     }
 
     /// Whether `fence` is the live lease's: the current fence, not yet lapsed at `now`.

@@ -139,6 +139,10 @@ fn errors_read_as_sentences() {
         ucdk_ledger::LeaseError::ReadOnly.to_string(),
         "the ledger was opened read-only: no lease is granted"
     );
+    assert_eq!(
+        ucdk_ledger::LeaseError::Changed.to_string(),
+        "the ledger changed since it was read, or a lease was granted since: no lease is granted"
+    );
 }
 
 #[test]

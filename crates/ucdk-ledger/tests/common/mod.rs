@@ -151,6 +151,16 @@ impl Ledger for AnyLedger {
         self.inner().acquire(holder, ttl)
     }
 
+    fn acquire_if(
+        &self,
+        holder: &str,
+        ttl: Duration,
+        token: &Token,
+        fence: Fence,
+    ) -> Result<Lease, LeaseError> {
+        self.inner().acquire_if(holder, ttl, token, fence)
+    }
+
     fn renew(&self, fence: Fence, ttl: Duration) -> Result<Lease, LedgerError> {
         self.inner().renew(fence, ttl)
     }
@@ -173,6 +183,10 @@ pub struct FlakyLedger {
     fail_acquire: AtomicBool,
     lose_acquire_answer: AtomicBool,
     fail_release: AtomicBool,
+    acquire_calls: AtomicU64,
+    acquire_if_calls: AtomicU64,
+    acquire_if_error: Mutex<Option<LeaseError>>,
+    acquire_error: Mutex<Option<LeaseError>>,
 }
 
 impl FlakyLedger {
@@ -194,6 +208,10 @@ impl FlakyLedger {
             fail_acquire: AtomicBool::default(),
             lose_acquire_answer: AtomicBool::default(),
             fail_release: AtomicBool::default(),
+            acquire_calls: AtomicU64::default(),
+            acquire_if_calls: AtomicU64::default(),
+            acquire_if_error: Mutex::new(None),
+            acquire_error: Mutex::new(None),
         }
     }
 
@@ -237,6 +255,26 @@ impl FlakyLedger {
     pub fn fail_release(&self, on: bool) {
         self.fail_release.store(on, Ordering::SeqCst);
     }
+
+    /// The plain `acquire` calls made so far.
+    pub fn acquire_calls(&self) -> u64 {
+        self.acquire_calls.load(Ordering::SeqCst)
+    }
+
+    /// The conditional grants that reached the ledger so far.
+    pub fn acquire_if_calls(&self) -> u64 {
+        self.acquire_if_calls.load(Ordering::SeqCst)
+    }
+
+    /// Makes every `acquire` answer `error`, without reaching the ledger.
+    pub fn fail_acquire_with(&self, error: Option<LeaseError>) {
+        *self.acquire_error.lock().expect("lock") = error;
+    }
+
+    /// Makes every `acquire_if` answer `error`, without reaching the ledger.
+    pub fn fail_acquire_if(&self, error: Option<LeaseError>) {
+        *self.acquire_if_error.lock().expect("lock") = error;
+    }
 }
 
 impl Ledger for FlakyLedger {
@@ -263,6 +301,10 @@ impl Ledger for FlakyLedger {
     }
 
     fn acquire(&self, holder: &str, ttl: Duration) -> Result<Lease, LeaseError> {
+        self.acquire_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(error) = self.acquire_error.lock().expect("lock").clone() {
+            return Err(error);
+        }
         if self.fail_acquire.load(Ordering::SeqCst) {
             return Err(LeaseError::Unavailable("the lease is down".to_owned()));
         }
@@ -271,6 +313,20 @@ impl Ledger for FlakyLedger {
             return Err(LeaseError::Unavailable("the answer was lost".to_owned()));
         }
         Ok(lease)
+    }
+
+    fn acquire_if(
+        &self,
+        holder: &str,
+        ttl: Duration,
+        token: &Token,
+        fence: Fence,
+    ) -> Result<Lease, LeaseError> {
+        if let Some(error) = self.acquire_if_error.lock().expect("lock").clone() {
+            return Err(error);
+        }
+        self.acquire_if_calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.acquire_if(holder, ttl, token, fence)
     }
 
     fn renew(&self, fence: Fence, ttl: Duration) -> Result<Lease, LedgerError> {

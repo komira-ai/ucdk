@@ -369,6 +369,10 @@ impl Ledger for Down {
         unreachable!("a show takes no lease")
     }
 
+    fn acquire_if(&self, _: &str, _: Duration, _: &Token, _: Fence) -> Result<Lease, LeaseError> {
+        unreachable!("a show takes no lease")
+    }
+
     fn renew(&self, _: Fence, _: Duration) -> Result<Lease, LedgerError> {
         unreachable!("a show takes no lease")
     }
