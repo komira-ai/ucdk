@@ -31,6 +31,9 @@ pub const LLVM_COV: &str = "cargo-llvm-cov";
 /// addon or a package, is in Node 26; the version is pinned so that the SDK's tests do not move
 /// with the machine's Node.
 pub const NODE: &str = "node";
+/// The build tools that the confirmation job runs the adapters against.
+pub const BUCK2: &str = "buck2";
+pub const BAZEL: &str = "bazel";
 
 /// The pinned tools.
 pub fn pinned() -> Vec<Tool> {
@@ -60,6 +63,11 @@ pub fn pinned() -> Vec<Tool> {
             "node-v26.12.1-linux-x64/bin/node",
         ),
     ]
+}
+
+/// The build tools of the confirmation job, which only that job installs.
+pub fn confirmation_tools() -> Vec<Tool> {
+    Vec::new()
 }
 
 /// Where the installed tools live: the directory the checks put on `PATH`.
