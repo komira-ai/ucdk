@@ -17,7 +17,8 @@
 //!   answers into [`SeamError`](ucdk_release_seams::SeamError);
 //! - [`read_version`]: the first read, checked and then sent;
 //! - [`group_id`], the answers' readers and [`Registry`]: the group read, the version read,
-//!   `stage` and `abort` against a [`Transport`].
+//!   `stage` and `abort`, and the reads that decide nothing, `observe`, `newest` and `list`,
+//!   against a [`Transport`].
 //!
 //! The publisher itself and the HTTP adapter are not here yet.
 
@@ -26,6 +27,7 @@ mod config;
 mod errors;
 mod grammar;
 mod group_id;
+mod listing;
 mod mapping;
 mod platform;
 mod registry;
@@ -48,12 +50,13 @@ pub use grammar::{
     valid_build, valid_name, valid_reason, valid_sha256, valid_version,
 };
 pub use group_id::{group_id, valid_group_id};
+pub use listing::{Page, parse_index, parse_package, parse_page, valid_prefix};
 pub use mapping::{
     ArchiveFacts, Candidate, Key, MAX_FILE_BYTES, MAX_GROUP_BYTES, MAX_MEMBERS, Member, MemberFile,
     check_key, check_observe, check_reason, check_shape, members,
 };
 pub use platform::{SUBDIRS_V1, Subdir};
-pub use registry::{Caller, Registry, SetFile};
+pub use registry::{Caller, MAX_LIST_PAGES, Registry, SetFile};
 pub use requests::read_version;
 pub use transport::{
     Header, HeaderValue, Method, Request, Response, Secret, Transport, TransportError,
