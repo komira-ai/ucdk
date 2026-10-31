@@ -45,7 +45,9 @@ enum Event {
 /// `Refused(LEASE_LOST)`. It has no time limit: a build that never ends is ended by the
 /// heartbeat, as every build is. The call returns once the child has ended and every holder of
 /// its output has closed it, so a process the child left behind with its output open keeps the
-/// call (and the beats) going until it ends or a `Stop` comes.
+/// call (and the beats) going until it ends or a `Stop` comes. A call that does not return
+/// normally (a panic in the heartbeat, say) kills the group and collects the child as it
+/// unwinds, so no child outlives the call.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct OsProcessRunner;
 
@@ -107,6 +109,21 @@ fn stop(child: &mut Child) {
         .for_each(|_| thread::sleep(GONE_NAP));
 }
 
+/// The child of a run, killed with its group when the run is left before it ended normally.
+struct Running {
+    child: Child,
+    /// Set when the child has ended and every holder of its output has closed it.
+    finished: bool,
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        if !self.finished {
+            stop(&mut self.child);
+        }
+    }
+}
+
 impl ProcessRunner for OsProcessRunner {
     fn run(&mut self, spec: &ProcessSpec<'_>) -> Result<ProcessResult, SeamError> {
         let Command { argv, env } = spec.command;
@@ -120,7 +137,7 @@ impl ProcessRunner for OsProcessRunner {
                 "{program} is not an executable file where the child would look for it"
             )));
         };
-        let mut child = Process::new(&path)
+        let child = Process::new(&path)
             .arg0(program)
             .args(args)
             .env_clear()
@@ -134,8 +151,12 @@ impl ProcessRunner for OsProcessRunner {
             .map_err(|error| {
                 SeamError::Unknown(format!("{program} could not be started: {error}"))
             })?;
+        let mut running = Running {
+            child,
+            finished: false,
+        };
         let (events, heard) = mpsc::channel();
-        let (out, err) = (child.stdout.take(), child.stderr.take());
+        let (out, err) = (running.child.stdout.take(), running.child.stderr.take());
         pump(out.expect("stdout is piped"), events.clone(), Event::Out);
         pump(err.expect("stderr is piped"), events.clone(), Event::Err);
         let (mut stdout, mut stderr) = (VecDeque::new(), VecDeque::new());
@@ -150,13 +171,14 @@ impl ProcessRunner for OsProcessRunner {
                 Err(_) => {}
             }
             if ended.is_none() {
-                ended = child.try_wait().unwrap_or(None);
+                ended = running.child.try_wait().unwrap_or(None);
             }
             if spec.heartbeat.beat().is_err() {
-                stop(&mut child);
+                // `running` is dropped here, unfinished, and kills the group.
                 return Err(SeamError::Refused(Reason::LeaseLost));
             }
             if let (Some(status), 0) = (ended, open) {
+                running.finished = true;
                 break status;
             }
         };

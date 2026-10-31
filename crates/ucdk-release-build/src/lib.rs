@@ -7,7 +7,7 @@
 //!   processes. The child gets the argument vector and the environment it was given and nothing
 //!   else, in a process group of its own that a stop kills as a whole.
 //! - [`LocalFiles`]: an [`OutputFiles`](ucdk_release_seams::OutputFiles) over the local disk.
-//!   It only reads, and never follows a symlink.
+//!   It only reads, only below the roots it is made with, and never follows a symlink.
 //! - [`Buck2`] and [`Bazel`]: [`BuildSystem`](ucdk_release_seams::BuildSystem)s over any process
 //!   runner and any reader of output files, so the tests of their command lines and of the
 //!   output they find run over the scripted fakes and never start a build tool.
