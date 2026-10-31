@@ -126,6 +126,13 @@ impl Work {
     }
 }
 
+impl Work {
+    /// The reader of the files the tool wrote: confined to the work directory.
+    fn files(&self) -> LocalFiles {
+        LocalFiles::within([&self.root]).expect("the work directory resolves")
+    }
+}
+
 /// The environment a tool gets: the variables it cannot start without, from this process.
 fn tool_env() -> BTreeMap<String, String> {
     ["PATH", "HOME", "USER", "TMPDIR"]
@@ -134,11 +141,11 @@ fn tool_env() -> BTreeMap<String, String> {
         .collect()
 }
 
-fn authored(kind: BuildSystemKind, binary: &str) -> Authored {
+fn authored(kind: BuildSystemKind, binary: &str, config_file: &str) -> Authored {
     Authored {
         kind: kind as i32,
         binary: binary.to_owned(),
-        config_file: String::new(),
+        config_file: config_file.to_owned(),
         mode: String::new(),
         flags: Vec::new(),
         env: tool_env(),
@@ -207,7 +214,14 @@ fn record(dir: &Path, stem: &str, command: &Command, result: &ProcessResult) {
 impl ProcessRunner for Recorder {
     fn run(&mut self, spec: &ProcessSpec<'_>) -> Result<ProcessResult, SeamError> {
         self.calls += 1;
-        let verb = spec.command.argv.get(1).map_or("", String::as_str);
+        // The word of the call is the first one after the program that is not an option.
+        let verb = spec
+            .command
+            .argv
+            .iter()
+            .skip(1)
+            .find(|word| !word.starts_with('-'))
+            .map_or("", String::as_str);
         let stem = format!("{}-{:02}-{verb}", self.prefix, self.calls);
         // The command line first, so a call that never returns still leaves it behind.
         fs::write(
@@ -270,7 +284,7 @@ fn buck2_builds_the_fixture_target_and_the_adapter_finds_the_file() {
     guarded("the Buck2 confirmation", || {
         let work = Work::new("buck2");
         record_version(&work, "buck2", "buck2");
-        let system = authored(BuildSystemKind::Buck2, "buck2");
+        let system = authored(BuildSystemKind::Buck2, "buck2", "");
         let target = target(&[]);
         let stamp = stamp();
         let inv = Invocation {
@@ -284,7 +298,7 @@ fn buck2_builds_the_fixture_target_and_the_adapter_finds_the_file() {
         };
         let mut buck2 = Buck2::new(
             Recorder::new(&work.transcripts, "buck2"),
-            LocalFiles,
+            work.files(),
             work.root.clone(),
         );
         let outcome = buck2.build(&inv, &Never);
@@ -320,7 +334,15 @@ fn bazel_builds_the_fixture_target_and_the_adapter_finds_the_file() {
     guarded("the Bazel confirmation", || {
         let work = Work::new("bazel");
         record_version(&work, "bazel", "bazel");
-        let system = authored(BuildSystemKind::Bazel, "bazel");
+        // Bazel keeps its output tree under the workspace, so that the reader, which is
+        // confined to the workspace, can reach it; the configuration file of the machine says so.
+        let rc = format!("{}/confirm.bazelrc", work.root);
+        fs::write(
+            &rc,
+            format!("startup --output_user_root={}/output\n", work.root),
+        )
+        .expect("the configuration file");
+        let system = authored(BuildSystemKind::Bazel, "bazel", &rc);
         // The flag of the target goes to the build, to `cquery` and to `info` alike.
         let target = target(&["--keep_going"]);
         let stamp = stamp();
@@ -335,7 +357,7 @@ fn bazel_builds_the_fixture_target_and_the_adapter_finds_the_file() {
         };
         let mut bazel = Bazel::new(
             Recorder::new(&work.transcripts, "bazel"),
-            LocalFiles,
+            work.files(),
             work.root.clone(),
         );
         let outcome = bazel.build(&inv, &Never);
