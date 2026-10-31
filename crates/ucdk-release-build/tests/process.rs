@@ -14,13 +14,11 @@ use std::path::Path;
 use std::process::Command as Process;
 use std::sync::{Mutex, PoisonError};
 
-use support::{Never, hex, run_scenario};
+use support::{Never, guarded, hex, run_scenario};
 use tempfile::TempDir;
 use ucdk_release::invocation::Command;
 use ucdk_release_build::OsProcessRunner;
-use ucdk_release_seams::kit::{
-    Behavior, ProcessRig, process_runner_scenarios, run_process_runner_kit,
-};
+use ucdk_release_seams::kit::{Behavior, ProcessRig, process_runner_scenarios};
 use ucdk_release_seams::{Exit, ProcessResult, ProcessRunner, ProcessSpec, SeamError};
 
 /// The program the tests install under every name.
@@ -123,7 +121,10 @@ impl ProcessRig for Rig {
 }
 
 fn scenario(name: &str) {
-    run_scenario(&process_runner_scenarios(), name, &Rig::new(None));
+    let name = name.to_owned();
+    guarded(&name.clone(), move || {
+        run_scenario(&process_runner_scenarios(), &name, &Rig::new(None));
+    });
 }
 
 fn command(argv: &[&str], env: &[(&str, &str)]) -> Command {
@@ -137,11 +138,14 @@ fn command(argv: &[&str], env: &[(&str, &str)]) -> Command {
 }
 
 fn run(command: &Command, cwd: &str) -> Result<ProcessResult, SeamError> {
-    OsProcessRunner.run(&ProcessSpec {
-        command,
-        cwd,
-        heartbeat: &Never,
-        stdout_limit: 1 << 20,
+    let (command, cwd) = (command.clone(), cwd.to_owned());
+    guarded("a run of the process runner", move || {
+        OsProcessRunner.run(&ProcessSpec {
+            command: &command,
+            cwd: &cwd,
+            heartbeat: &Never,
+            stdout_limit: 1 << 20,
+        })
     })
 }
 
@@ -276,8 +280,14 @@ fn the_last_path_variable_of_the_environment_is_the_path() {
 fn the_kit_passes_with_a_decoy_on_the_test_processs_own_path() {
     if let Ok(own) = std::env::var(INNER) {
         // The copy of this binary that the test below started: the kit runs here, where the
-        // directory `own` is on the PATH of this very process.
-        run_process_runner_kit(&Rig::new(Some(own))).assert_conforms();
+        // directory `own` is on the PATH of this very process, one scenario at a time.
+        for scenario in process_runner_scenarios::<Rig>() {
+            let (name, own) = (scenario.name, own.clone());
+            eprintln!("scenario {name}");
+            guarded(name, move || {
+                run_scenario(&process_runner_scenarios(), name, &Rig::new(Some(own)));
+            });
+        }
         return;
     }
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).expect("a directory");

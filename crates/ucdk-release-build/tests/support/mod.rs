@@ -6,7 +6,11 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 use ucdk_release::invocation::{self, Command, Invocation, Verb};
 use ucdk_release_fake::{FakeOutputFiles, FakeProcessRunner};
@@ -23,6 +27,25 @@ pub mod scripted;
 pub const ROOT: &str = "/work/repo";
 /// The one target every case builds and tests.
 pub const LABEL: &str = "//pkg:out";
+
+/// How long a test that starts real processes waits for a call that should return before it
+/// reports the call as hung. It is a guard against a test that never ends, and no test depends
+/// on how long anything took.
+const HANG_GUARD: Duration = Duration::from_secs(120);
+
+/// Runs `f` on a thread of its own and answers what it answers; if it has not returned after
+/// `HANG_GUARD` the test fails and says what `what` was, instead of waiting for ever.
+pub fn guarded<T: Send + 'static>(what: &str, f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (done, finished) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = done.send(catch_unwind(AssertUnwindSafe(f)));
+    });
+    match finished.recv_timeout(HANG_GUARD) {
+        Ok(Ok(value)) => value,
+        Ok(Err(panic)) => resume_unwind(panic),
+        Err(_) => panic!("{what} did not return"),
+    }
+}
 
 /// A heartbeat that never stops anything.
 pub struct Never;
