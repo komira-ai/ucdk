@@ -112,10 +112,12 @@ pub(super) fn a_grant_names_every_field_of_the_coordinates_it_covers<R: Publishe
                 &format!("the bytes of a coordinate that differs in its {field} after the commit"),
             );
             if p.stages() {
+                let sought_blobs = sought.blobs();
+                let sought_items = sought.items(&sought_blobs);
                 denied_unsent(
                     rig,
                     &mut p,
-                    |p| p.abort(&near_stage, &sought.coords),
+                    |p| p.abort(&near_stage, &sought_items),
                     &format!("an abort of a coordinate that differs in its {field} ({shape:?})"),
                 );
                 // A commit of what is still staged, next, finds out that it stayed.
@@ -155,10 +157,12 @@ pub(super) fn an_abort_needs_the_stage_grant_that_names_it<R: PublisherRig>(rig:
     let set = Set::of(rig, &["a"]);
     stage(rig, &mut p, &set);
     let commit_grant = rig.grant(&p, GrantPhase::Commit, &set.coords);
+    let blobs = set.blobs();
+    let items = set.items(&blobs);
     denied_unsent(
         rig,
         &mut p,
-        |p| p.abort(&commit_grant, &set.coords),
+        |p| p.abort(&commit_grant, &items),
         "an abort with a commit grant",
     );
     staged_held(observed(rig, &mut p, GrantPhase::Stage, &set, 0));
@@ -237,11 +241,13 @@ pub(super) fn every_shape_refuses_a_bad_write_grant<R: PublisherRig>(rig: &R, sp
                 |p| p.stage(&stage_grant, &items),
                 &format!("a stage with a bad grant ({shape:?}, {spoiled:?})"),
             );
+            let abort_blobs = to_abort.blobs();
+            let abort_items = to_abort.items(&abort_blobs);
             refused_unsent(
                 rig,
                 &mut p,
                 &fault,
-                |p| p.abort(&stage_grant, &to_abort.coords),
+                |p| p.abort(&stage_grant, &abort_items),
                 &format!("an abort with a bad grant ({shape:?}, {spoiled:?})"),
             );
         }

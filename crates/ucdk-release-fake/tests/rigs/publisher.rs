@@ -149,6 +149,35 @@ impl Flawed {
         issue(&self.clock, &federated_repository(), phase, coordinates)
     }
 
+    /// An abort of `ks`, for the callers that arrange state and have coordinates and no items.
+    pub(super) fn abort_coordinates(
+        &mut self,
+        g: &Grant,
+        ks: &[Coordinate],
+    ) -> Result<(), SeamError> {
+        self.calls += 1;
+        if self.holds_none_of(ks) {
+            return Err(SeamError::Refused(Reason::Channel));
+        }
+        // A stub that breaks what an abort does still refuses a grant it should refuse.
+        if self.is(Flaw::AbortDoesNothing) && self.is_good_for(g, "stage", ks) {
+            return Ok(());
+        }
+        if self.is(Flaw::AbortGivesBackAllStaged) && scope_of(g) == "stage" {
+            self.inner.abort(g, ks)?;
+            let all = self.known_where(|me, c| me.inner.is_staged(c));
+            let grant = self.internal(GrantPhase::Stage, &all);
+            return self.inner.abort(&grant, &all);
+        }
+        let stranger_in =
+            self.writer_for_a_stranger(Flaw::StrangerMayAbort, g, GrantPhase::Stage, ks);
+        let g = stranger_in.as_ref().unwrap_or(g);
+        let regranted = self.regrant(g, Needs::Stage);
+        let g = regranted.as_ref().unwrap_or(g);
+        let lax = self.lax_write(g, Call::Abort, ks);
+        self.inner.abort(lax.as_ref().unwrap_or(g), ks)
+    }
+
     /// Whether one of `ks` is a coordinate the channel cannot hold.
     fn holds_none_of(&self, ks: &[Coordinate]) -> bool {
         ks.iter().any(|k| self.banned.contains(k))
@@ -580,28 +609,9 @@ impl Publisher for Flawed {
         self.inner.stage(g, items)
     }
 
-    fn abort(&mut self, g: &Grant, ks: &[Coordinate]) -> Result<(), SeamError> {
-        self.calls += 1;
-        if self.holds_none_of(ks) {
-            return Err(SeamError::Refused(Reason::Channel));
-        }
-        // A stub that breaks what an abort does still refuses a grant it should refuse.
-        if self.is(Flaw::AbortDoesNothing) && self.is_good_for(g, "stage", ks) {
-            return Ok(());
-        }
-        if self.is(Flaw::AbortGivesBackAllStaged) && scope_of(g) == "stage" {
-            self.inner.abort(g, ks)?;
-            let all = self.known_where(|me, c| me.inner.is_staged(c));
-            let grant = self.internal(GrantPhase::Stage, &all);
-            return self.inner.abort(&grant, &all);
-        }
-        let stranger_in =
-            self.writer_for_a_stranger(Flaw::StrangerMayAbort, g, GrantPhase::Stage, ks);
-        let g = stranger_in.as_ref().unwrap_or(g);
-        let regranted = self.regrant(g, Needs::Stage);
-        let g = regranted.as_ref().unwrap_or(g);
-        let lax = self.lax_write(g, Call::Abort, ks);
-        self.inner.abort(lax.as_ref().unwrap_or(g), ks)
+    fn abort(&mut self, g: &Grant, set: &[StageItem<'_>]) -> Result<(), SeamError> {
+        let ks: Vec<Coordinate> = set.iter().map(|i| i.coordinate.clone()).collect();
+        self.abort_coordinates(g, &ks)
     }
 
     fn commit(&mut self, g: &Grant, items: &[StageItem<'_>]) -> Result<CommitAnswer, SeamError> {

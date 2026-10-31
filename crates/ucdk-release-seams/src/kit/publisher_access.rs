@@ -161,11 +161,13 @@ fn every_write_refuses_a_bad_grant<R: PublisherRig>(
         None,
         &format!("the bytes after a commit with a grant {what}"),
     );
+    let abort_blobs = writes.to_abort.blobs();
+    let abort_items = writes.to_abort.items(&abort_blobs);
     refused_unsent(
         rig,
         p,
         fault,
-        |p| p.abort(stage_grant, &writes.to_abort.coords),
+        |p| p.abort(stage_grant, &abort_items),
         &format!("an abort with a grant {what}"),
     );
     staged_held(observed(rig, p, GrantPhase::Stage, &writes.to_abort, 0));
@@ -277,9 +279,11 @@ fn a_stranger_writes_nothing<R: PublisherRig>(rig: &R, shape: &ChannelShape) {
     ];
     if p.stages() {
         refusals.push(("stage", must_err(p.stage(&none, &items), "stage")));
+        let staged_blobs = staged.blobs();
+        let staged_items = staged.items(&staged_blobs);
         refusals.push((
             "abort",
-            must_err(p.abort(&none, &staged.coords), "abort of staged state"),
+            must_err(p.abort(&none, &staged_items), "abort of staged state"),
         ));
     }
     for (call, refusal) in &refusals {
@@ -364,12 +368,14 @@ fn a_grant_covers_the_coordinates_it_names_and_no_others<R: PublisherRig>(
         );
     }
     if p.stages() {
+        let trio_blobs = trio.blobs();
+        let trio_items = trio.items(&trio_blobs);
         for mask in 1..7 {
             let some = rig.grant(&p, GrantPhase::Stage, &picked(&trio, mask));
             denied_unsent(
                 rig,
                 &mut p,
-                |p| p.abort(&some, &trio.coords),
+                |p| p.abort(&some, &trio_items),
                 &format!(
                     "a stage grant that names only the coordinates {mask:03b} of three cannot abort them ({shape:?})"
                 ),

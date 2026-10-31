@@ -388,7 +388,8 @@ pub(super) fn abort_gives_staged_state_back_and_never_touches_a_committed_coordi
     stage(rig, &mut p, &c);
     let both = Set::of(rig, &["a", "b"]);
     let grant = rig.grant(&p, GrantPhase::Stage, &both.coords);
-    must(p.abort(&grant, &both.coords), "abort");
+    let blobs = both.blobs();
+    must(p.abort(&grant, &both.items(&blobs)), "abort");
     same(
         observed(rig, &mut p, GrantPhase::Stage, &b, 0),
         Presence::Absent,
