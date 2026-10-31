@@ -373,12 +373,9 @@ fn a_run_record_that_differs_is_a_pin_mismatch() {
     let outcome = rig.handle("verify", &["action:lint"]);
     assert_eq!(outcome.verdict, Verdict::Refused);
     assert_eq!(outcome.reason, Reason::PinMismatch);
-    assert!(
-        outcome.message.contains("release version, timestamp"),
-        "{}",
-        outcome.message
-    );
-    assert!(!outcome.message.contains("machine"), "{}", outcome.message);
+    let named = outcome.message.split(';').next().expect("a first part");
+    assert!(named.contains("release version, timestamp"), "{named}");
+    assert!(!named.contains("machine"), "{named}");
     assert_eq!(untouched(&rig), before, "nothing was written");
     assert_eq!(rig.build.commands().len(), 1, "nothing was run");
 
@@ -391,12 +388,9 @@ fn a_run_record_that_differs_is_a_pin_mismatch() {
     rig.machine = Checked::read(edited).expect("a machine");
     let outcome = rig.handle("verify", &["action:lint"]);
     assert_eq!(outcome.reason, Reason::PinMismatch);
+    let named = outcome.message.split(';').next().expect("a first part");
     for field in ["run id", "machine", "revision"] {
-        assert!(
-            outcome.message.contains(field),
-            "{field}: {}",
-            outcome.message
-        );
+        assert!(named.contains(field), "{field}: {named}");
     }
 }
 
