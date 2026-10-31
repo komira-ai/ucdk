@@ -228,3 +228,19 @@ fn a_file_that_cannot_be_read_is_unknown_and_a_subdirectory_that_cannot_be_liste
         Err(SeamError::Unknown(_))
     ));
 }
+
+#[test]
+fn a_path_below_a_file_is_nothing_there_and_a_link_loop_is_not() {
+    let rig = Rig::new();
+    fs::write(rig.at("file"), b"x").unwrap();
+    symlink(rig.at("loop"), rig.at("loop")).unwrap();
+    let mut files = LocalFiles;
+    // The operating system says "not a directory", which is an answer about the path.
+    assert_eq!(files.stat(&rig.at("file/below")), Ok(None));
+    assert_eq!(files.stat(&rig.at("loop")), Ok(Some(FileKind::Symlink)));
+    // Below a link that leads nowhere but back to itself the disk cannot be asked.
+    assert!(matches!(
+        files.stat(&rig.at("loop/below")),
+        Err(SeamError::Unknown(_))
+    ));
+}

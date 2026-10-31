@@ -534,3 +534,20 @@ fn the_fake_files_are_not_changed_by_a_build_or_a_copy() {
     written(&rig, &at("/out/pkg/out", Shape::File)).unwrap();
     assert_eq!(rig.files.with(|f| f.snapshot()), before);
 }
+
+#[test]
+fn a_directory_that_cannot_be_listed_is_unknown_and_not_build_output() {
+    let rig = Rig::new();
+    rig.files.with(|f| f.file("/out/dir/a", b"a"));
+    rig.script(Verb::Build, 0, "root//pkg:out /out/dir\n", "");
+    let brittle = Brittle {
+        files: rig.files.clone(),
+        faults: Faults {
+            list_fails: true,
+            ..Faults::default()
+        },
+    };
+    let mut system = Buck2::new(rig.runner.clone(), brittle, ROOT);
+    let built = system.build(&rig.case.inv(Verb::Build, None), &Beats::counting());
+    assert!(matches!(built, Err(SeamError::Unknown(_))), "{built:?}");
+}
