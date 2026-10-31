@@ -105,12 +105,68 @@ impl Envelope {
 
     /// The bytes of the grant's secret.
     pub fn encode(&self) -> Vec<u8> {
-        Vec::new()
+        let mut out = Vec::new();
+        put(&mut out, VERSION.as_bytes());
+        put(&mut out, phase_word(self.phase).as_bytes());
+        put(&mut out, if self.exceptional { b"1" } else { b"0" });
+        put(&mut out, self.registry.as_bytes());
+        put(&mut out, self.actor.as_bytes());
+        put(&mut out, self.coordinates.len().to_string().as_bytes());
+        for c in &self.coordinates {
+            put(&mut out, c.channel.as_bytes());
+            put(&mut out, c.r#type.to_string().as_bytes());
+            put(&mut out, c.name.as_bytes());
+            put(&mut out, c.version.as_bytes());
+            put(&mut out, c.platform.as_bytes());
+        }
+        put(&mut out, &self.token);
+        out
     }
 
+    /// Reads what [`Envelope::encode`] wrote. Anything else is [`Malformed`]: another version,
+    /// a phase or mark not on the list, a coordinate count that does not fit the bytes, bytes
+    /// left over, a Read envelope that carries a token, a write envelope that carries none or
+    /// one that is not header-safe.
     pub fn decode(bytes: &[u8]) -> Result<Self, Malformed> {
-        let _ = bytes;
-        Err(Malformed)
+        let mut rest = bytes;
+        if take(&mut rest)? != VERSION.as_bytes() {
+            return Err(Malformed);
+        }
+        let phase = match take(&mut rest)? {
+            b"stage" => GrantPhase::Stage,
+            b"commit" => GrantPhase::Commit,
+            b"read" => GrantPhase::Read,
+            _ => return Err(Malformed),
+        };
+        let exceptional = match take(&mut rest)? {
+            b"0" => false,
+            b"1" => true,
+            _ => return Err(Malformed),
+        };
+        let registry = take_str(&mut rest)?;
+        let actor = take_str(&mut rest)?;
+        let count: usize = take_str(&mut rest)?.parse().map_err(|_| Malformed)?;
+        let mut coordinates = Vec::new();
+        for _ in 0..count {
+            let channel = take_str(&mut rest)?;
+            let r#type: i32 = take_str(&mut rest)?.parse().map_err(|_| Malformed)?;
+            let name = take_str(&mut rest)?;
+            let version = take_str(&mut rest)?;
+            let platform = take_str(&mut rest)?;
+            coordinates.push(Coordinate {
+                channel,
+                r#type,
+                name,
+                version,
+                platform,
+            });
+        }
+        let token = take(&mut rest)?.to_vec();
+        let envelope = Self::new(phase, exceptional, registry, actor, coordinates, token);
+        let visible = envelope.token.iter().all(u8::is_ascii_graphic);
+        let carries = !envelope.token.is_empty();
+        let well_formed = rest.is_empty() && visible && (carries == (phase != GrantPhase::Read));
+        well_formed.then_some(envelope).ok_or(Malformed)
     }
 }
 
@@ -178,6 +234,31 @@ fn denied() -> SeamError {
 /// stated expiry is not after now plus `lasts_ms`. A grant with a wrong repository is `Denied`
 /// whether or not it is also expired.
 pub fn authorise(grant: &Grant, call: &Use<'_>) -> Result<Option<Envelope>, SeamError> {
-    let _ = (grant, call);
-    Err(denied())
+    let Some(expires) = grant.expires_ms() else {
+        return if call.verb.is_read() {
+            Ok(None)
+        } else {
+            Err(denied())
+        };
+    };
+    let envelope = Envelope::decode(grant.secret()).map_err(|_| denied())?;
+    if envelope.registry != call.registry {
+        return Err(denied());
+    }
+    let phase_ok = match call.verb.needs() {
+        Needs::Any => true,
+        Needs::Stage => envelope.phase == GrantPhase::Stage,
+        Needs::Commit => envelope.phase == GrantPhase::Commit,
+    };
+    let covered = call
+        .coordinates
+        .iter()
+        .all(|c| envelope.coordinates.iter().any(|held| held == *c));
+    if !phase_ok || !covered {
+        return Err(denied());
+    }
+    if expires <= call.now_ms.saturating_add(call.lasts_ms) {
+        return Err(SeamError::GrantRefused(GrantFault::Expired));
+    }
+    Ok(Some(envelope))
 }

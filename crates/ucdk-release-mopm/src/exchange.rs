@@ -310,7 +310,73 @@ impl<T: Transport, I: IdentitySource, C: Clock> MopmGrantSource<T, I, C> {
 impl<T: Transport + Send, I: IdentitySource + Send, C: Clock> GrantSource
     for MopmGrantSource<T, I, C>
 {
-    fn grant(&mut self, _req: &GrantRequest<'_>) -> Result<Grant, SeamError> {
-        Err(SeamError::Permanent("not implemented".to_owned()))
+    fn grant(&mut self, req: &GrantRequest<'_>) -> Result<Grant, SeamError> {
+        let Some(Kind::Federated(declared)) =
+            req.repository.push.as_ref().and_then(|p| p.kind.as_ref())
+        else {
+            return Ok(Grant::none());
+        };
+        if req.phase == GrantPhase::Read {
+            return Ok(Grant::none());
+        }
+        let public = req.repository.visibility == Visibility::Public as i32;
+        if !public || req.repository.location != self.setup.location {
+            return Err(refused(GrantFault::Denied));
+        }
+        if req.coordinates.len() > GRANT_LIMIT {
+            return Err(SeamError::Refused(Reason::Credential));
+        }
+        if req.coordinates.is_empty() {
+            return Err(SeamError::Refused(Reason::Channel));
+        }
+        let set: Vec<&Coordinate> = req.coordinates.iter().collect();
+        let keys = check_shape(&self.setup.config.channel, &set)?;
+        let asked: BTreeSet<(String, String)> =
+            keys.into_iter().map(|k| (k.name, k.version)).collect();
+        // A declaration that names no exceptional subject admits no exceptional run.
+        let (subject, environment) = if req.exceptional {
+            (
+                &declared.exceptional_subject,
+                &declared.exceptional_environment,
+            )
+        } else {
+            (&declared.subject, &declared.environment)
+        };
+        if req.exceptional && subject.is_empty() {
+            return Err(refused(GrantFault::Denied));
+        }
+        let token = self
+            .identity
+            .identity_token(&declared.audience)
+            .map_err(|_| refused(GrantFault::Unreachable))?;
+        let claims = token.claims().map_err(|_| refused(GrantFault::Denied))?;
+        let expected = Expected {
+            issuer: &self.setup.issuer,
+            audience: &declared.audience,
+            subject,
+            environment,
+            pinned: &declared.pinned_claims,
+        };
+        let verified = check_identity(&claims, &expected, self.clock.now_millis())
+            .map_err(|_| refused(GrantFault::Denied))?;
+        // Recorded before the request goes out: a lost answer burns the token as well.
+        if !self.spent.insert(verified.jti) {
+            return Err(refused(GrantFault::Used));
+        }
+        let actor = match self.setup.actor {
+            ActorForm::ConfiguredCi => format!("ci:gh-repo:{}", verified.repository_id),
+            ActorForm::Account(id) => format!("u:{id}"),
+        };
+        let mut minted = self.exchange(&token, &asked)?;
+        drop(token);
+        let envelope = Envelope::new(
+            req.phase,
+            req.exceptional,
+            req.repository.location.clone(),
+            actor,
+            req.coordinates.to_vec(),
+            std::mem::take(&mut minted.token.0),
+        );
+        Ok(Grant::issued(envelope.encode(), minted.expires_ms))
     }
 }
