@@ -305,9 +305,11 @@ impl Publisher for Holed {
         result
     }
 
-    fn abort(&mut self, g: &Grant, ks: &[Coordinate]) -> Result<(), SeamError> {
+    fn abort(&mut self, g: &Grant, set: &[StageItem<'_>]) -> Result<(), SeamError> {
+        let ks: Vec<Coordinate> = set.iter().map(|i| i.coordinate.clone()).collect();
+        let ks = ks.as_slice();
         let sent = self.base.sent();
-        let result = self.base.abort(g, ks);
+        let result = self.base.abort(g, set);
         if let Hole::RefusedAbortDropsStaged(whose) = self.hole
             && self.shape.group_addressed
             && Self::refused(&result)

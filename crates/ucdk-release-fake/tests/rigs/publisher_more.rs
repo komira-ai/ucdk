@@ -659,8 +659,10 @@ impl Publisher for Wrapped {
         result
     }
 
-    fn abort(&mut self, g: &Grant, ks: &[Coordinate]) -> Result<(), SeamError> {
-        let mut result = self.base.abort(g, ks);
+    fn abort(&mut self, g: &Grant, set: &[StageItem<'_>]) -> Result<(), SeamError> {
+        let ks: Vec<Coordinate> = set.iter().map(|i| i.coordinate.clone()).collect();
+        let ks = ks.as_slice();
+        let mut result = self.base.abort(g, set);
         let mut retry = self.lenient(Verb::Abort, g, ks, &result);
         if retry.is_none()
             && self.is(More::AbortTakesCommitGrant)
@@ -670,7 +672,7 @@ impl Publisher for Wrapped {
             retry = Some(self.internal(GrantPhase::Stage, ks));
         }
         if let Some(grant) = retry {
-            result = self.base.abort(&grant, ks);
+            result = self.base.abort(&grant, set);
         }
         if result.is_ok() {
             self.aborted.extend(ks.iter().cloned());
@@ -704,7 +706,7 @@ impl Publisher for Wrapped {
                     .collect();
                 if !siblings.is_empty() {
                     let grant = self.internal(GrantPhase::Stage, &siblings);
-                    let _ = self.base.abort(&grant, &siblings);
+                    let _ = self.base.abort_coordinates(&grant, &siblings);
                 }
             }
         }
@@ -751,7 +753,7 @@ impl Publisher for Wrapped {
         if let Some(replace) = redo {
             let grant = self.internal(GrantPhase::Stage, &coordinates);
             if replace {
-                let _ = self.base.abort(&grant, &coordinates);
+                let _ = self.base.abort_coordinates(&grant, &coordinates);
             }
             let _ = self.base.stage(&grant, items);
             result = self.base.commit(g, items);

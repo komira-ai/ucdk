@@ -205,7 +205,7 @@ fn a_read_grant_observes_and_can_neither_stage_nor_commit() {
     assert_eq!(w.registry.fetch(&read, &set.coords[0]), Ok(None));
     assert_eq!(w.registry.stage(&read, &items).err(), denied);
     assert_eq!(w.registry.commit(&read, &items).err(), denied);
-    assert_eq!(w.registry.abort(&read, &set.coords).err(), denied);
+    assert_eq!(w.registry.abort(&read, &items).err(), denied);
     assert_eq!(w.registry.yank(&read, &set.coords[0], "no").err(), denied);
     assert_eq!(w.registry.stage_log().len(), 1);
     assert!(w.registry.commit_log().is_empty());
@@ -408,9 +408,24 @@ fn abort_gives_staged_state_back_and_never_touches_a_committed_coordinate() {
     let (mut w, set) = staged(&["a", "b"]);
     w.registry.present_different(&set.coords[1], b"held");
     let g = w.grant(GrantPhase::Stage, &set.coords);
-    w.registry.abort(&g, &set.coords).unwrap();
+    let blobs = set.blobs();
+    w.registry.abort(&g, &set.items(&blobs)).unwrap();
     assert!(!w.registry.is_staged(&set.coords[0]));
     assert_eq!(w.registry.bytes(&set.coords[1]), Some(&b"held"[..]));
+}
+
+#[test]
+fn an_abort_of_declared_items_gives_back_those_and_an_empty_set_gives_back_nothing() {
+    let (mut w, set) = staged(&["a", "b", "c"]);
+    let g = w.grant(GrantPhase::Stage, &set.coords);
+    assert_eq!(w.registry.abort(&g, &[]), Ok(()));
+    assert!(set.coords.iter().all(|c| w.registry.is_staged(c)));
+    let blobs = set.blobs();
+    let items = set.items(&blobs);
+    assert_eq!(w.registry.abort(&g, &items[..2]), Ok(()));
+    assert!(!w.registry.is_staged(&set.coords[0]));
+    assert!(!w.registry.is_staged(&set.coords[1]));
+    assert!(w.registry.is_staged(&set.coords[2]));
 }
 
 #[test]

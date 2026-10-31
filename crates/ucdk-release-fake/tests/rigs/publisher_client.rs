@@ -119,7 +119,7 @@ impl Client {
 
     pub(super) fn abort(&mut self, g: &Grant, ks: &[Coordinate]) -> Result<(), SeamError> {
         self.check(g, Needs::Stage, ks)?;
-        self.registry.abort(g, ks)
+        self.registry.abort_by_coordinates(g, ks)
     }
 
     pub(super) fn commit(
