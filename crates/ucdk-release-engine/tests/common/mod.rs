@@ -544,6 +544,8 @@ pub struct Probe {
     pub anonymous: Vec<bool>,
     pub observes: u64,
     pub fetches: u64,
+    /// Done once, at the first observe: something happens to the world while the engine reads.
+    pub on_observe: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl Probe {
@@ -554,6 +556,7 @@ impl Probe {
             anonymous: Vec::new(),
             observes: 0,
             fetches: 0,
+            on_observe: None,
         }
     }
 }
@@ -589,6 +592,9 @@ impl Publisher for Probe {
         k: &Coordinate,
         set: &[StageItem<'_>],
     ) -> Result<Presence, SeamError> {
+        if let Some(hook) = self.on_observe.take() {
+            hook();
+        }
         self.observes += 1;
         self.anonymous.push(g.is_none());
         self.inner.observe(g, k, set)

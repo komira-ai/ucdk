@@ -470,6 +470,24 @@ fn what_the_codec_or_the_ledger_refuses_stops_the_request_as_a_ledger_failure() 
     assert_eq!(outcome.reason, Reason::Ledger);
     assert!(rig.build.commands().is_empty());
 
+    // The run is pinned already, and the intent of the next action cannot be written.
+    let mut rig = Rig::new("intent_fails");
+    assert_eq!(
+        rig.handle("verify", &["action:unit"]).verdict,
+        Verdict::Succeeded
+    );
+    rig.ledger.fail_writes(true);
+    let outcome = rig.handle("verify", &["action:lint"]);
+    assert_eq!(
+        (outcome.verdict, outcome.reason),
+        (Verdict::Failed, Reason::Ledger)
+    );
+    assert_eq!(
+        rig.build.commands().len(),
+        1,
+        "the second target was not run"
+    );
+
     // A ledger whose writes fail.
     let mut rig = Rig::new("writes_fail");
     rig.ledger.fail_writes(true);

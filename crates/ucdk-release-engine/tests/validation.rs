@@ -100,6 +100,9 @@ fn a_failed_validation_leaves_its_record_unconfirmed() {
     assert_eq!(states(report), [RowState::RowFailed, RowState::RowPassed]);
     let (_, state) = rig.ledger.validation("build", "closure").expect("record");
     assert_eq!(state, State::Intent, "a failure is not a state");
+    // It is read again, not skipped.
+    let again = rig.handle("build", &["validation:closure"]);
+    assert_eq!(again.verdict, Verdict::ValidationFailed);
 
     // A read-back of coordinates nobody published.
     let mut rig = Rig::new("readback_fails");
@@ -510,4 +513,69 @@ fn a_set_that_cannot_be_read_is_refused_by_what_is_wrong_with_it() {
         (Verdict::Refused, Reason::SetHash)
     );
     assert!(outcome.message.contains("names"), "{}", outcome.message);
+}
+
+#[test]
+fn a_validation_that_cannot_read_or_write_the_ledger_is_a_ledger_failure() {
+    // The ledger dies at the read of its records, after the lease was taken.
+    let mut rig = Rig::new("validation_reads");
+    rig.seal(None);
+    rig.ledger.crash_at(3);
+    let outcome = rig.handle("build", &["validation:closure"]);
+    assert_eq!(
+        (outcome.verdict, outcome.reason),
+        (Verdict::Failed, Reason::Ledger)
+    );
+    rig.ledger.revive();
+
+    // The intent cannot be written: nothing is evaluated.
+    rig.ledger.fail_writes(true);
+    let outcome = rig.handle("build", &["validation:closure"]);
+    assert_eq!(
+        (outcome.verdict, outcome.reason),
+        (Verdict::Failed, Reason::Ledger)
+    );
+    assert!(rig.ledger.validation("build", "closure").is_none());
+}
+
+#[test]
+fn a_validation_whose_lease_was_taken_over_while_it_read_is_not_confirmed() {
+    let mut rig = Rig::new("validation_taken_over");
+    rig.seal(None);
+    rig.publish(&["ucdk-cli", "ucdk-lib"]);
+    let (ledger, clock) = (rig.ledger.clone(), rig.clock.clone());
+    rig.registry.on_observe = Some(Box::new(move || {
+        clock.advance(common::TTL + ucdk_ledger::MAX_CLOCK_SKEW);
+        ledger
+            .inner
+            .acquire("someone-else", common::TTL)
+            .expect("taken");
+    }));
+    let outcome = rig.handle("publish", &["validation:visible"]);
+    assert_eq!(
+        (outcome.verdict, outcome.reason),
+        (Verdict::Interrupted, Reason::LeaseLost)
+    );
+    let (_, state) = rig.ledger.validation("publish", "visible").expect("record");
+    assert_eq!(
+        state,
+        State::Intent,
+        "the read passed, and nobody may record it"
+    );
+}
+
+#[test]
+fn a_validation_whose_confirmation_cannot_be_written_is_a_ledger_failure() {
+    let mut rig = Rig::new("validation_confirm");
+    rig.seal(None);
+    rig.publish(&["ucdk-cli", "ucdk-lib"]);
+    let ledger = rig.ledger.clone();
+    rig.registry.on_observe = Some(Box::new(move || ledger.fail_writes(true)));
+    let outcome = rig.handle("publish", &["validation:visible"]);
+    assert_eq!(
+        (outcome.verdict, outcome.reason),
+        (Verdict::Failed, Reason::Ledger)
+    );
+    let (_, state) = rig.ledger.validation("publish", "visible").expect("record");
+    assert_eq!(state, State::Intent);
 }

@@ -18,6 +18,8 @@
 use std::fmt;
 use std::time::Duration;
 
+use ucdk_core::millis;
+
 use crate::lease::{Fence, LeaseError};
 use crate::record::{Change, Ledger, LedgerError, Token};
 
@@ -236,7 +238,13 @@ impl<'a> LeaseGuard<'a> {
     ///
     /// As [`LeaseGuard::renew`], and [`GuardError::Ledger`] when the document cannot be read.
     pub fn renew_if_due(&mut self) -> Result<(), GuardError> {
-        self.check()
+        self.check()?;
+        let snapshot = self.ledger.read().map_err(|e| self.classify(e))?;
+        let half = millis(self.ttl) / 2;
+        let fresh = snapshot.lease.is_some_and(|held| {
+            held.fence == self.fence && held.expires_at.saturating_sub(snapshot.at) >= half
+        });
+        if fresh { Ok(()) } else { self.renew() }
     }
 
     /// Takes the lease again, under a new fence, after it lapsed, but only if the document is
@@ -255,8 +263,22 @@ impl<'a> LeaseGuard<'a> {
         token: &Token,
         fence: Fence,
     ) -> Result<(), GuardError> {
-        let _ = (token, fence);
-        Err(GuardError::Lost)
+        if self.standing == Standing::Released {
+            return Err(GuardError::NotHeld);
+        }
+        match self.ledger.acquire_if(&self.holder, self.ttl, token, fence) {
+            Ok(lease) => {
+                self.fence = lease.fence;
+                self.standing = Standing::Held;
+                Ok(())
+            }
+            Err(LeaseError::Held { .. } | LeaseError::Changed) => {
+                self.standing = Standing::Lost;
+                Err(GuardError::Lost)
+            }
+            Err(LeaseError::Unavailable(why)) => Err(GuardError::Unconfirmed { why }),
+            Err(LeaseError::ReadOnly) => Err(GuardError::Ledger(LedgerError::ReadOnly)),
+        }
     }
 
     /// Gives the lease back, so another holder may take it at once. A guard whose lease was
