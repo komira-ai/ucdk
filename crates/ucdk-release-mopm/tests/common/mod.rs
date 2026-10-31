@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use ucdk_core::ManualClock;
 use ucdk_release_mopm::{
-    ArchiveFacts, Caller, Candidate, Config, HeaderValue, Member, Method, Origin, Registry,
+    ArchiveFacts, Caller, Candidate, Config, HeaderValue, Key, Member, Method, Origin, Registry,
     Request, Response, Roots, SetFile, Subdir, Transport, TransportError, Url, group_id, members,
 };
 use ucdk_release_proto::v1::{ArtifactType, Coordinate};
@@ -156,6 +156,9 @@ pub type Reply = Result<Response, TransportError>;
 pub struct Logged {
     pub method: Method,
     pub path: String,
+    /// The whole URL, query included: the fake is a test double and holds what a real one would not
+    /// print.
+    pub url: String,
     pub query: bool,
     pub body: String,
     /// The request carried a bearer token.
@@ -207,6 +210,7 @@ impl Transport for Fake {
         self.log.push(Logged {
             method: request.method,
             path: path.clone(),
+            url: request.url.expose(),
             query: request.url.has_query(),
             body: String::from_utf8_lossy(request.body).into_owned(),
             authorized: request
@@ -451,4 +455,31 @@ pub fn stage_kind(result: &Result<StageAnswer, SeamError>) -> &'static str {
         Ok(StageAnswer::Duplicate) => "duplicate",
         Err(error) => err_kind(error),
     }
+}
+
+/// The coordinate key of `alpha 1.0.0` in `subdir`.
+pub fn key(subdir: Subdir) -> Key {
+    Key {
+        name: "alpha".to_owned(),
+        version: "1.0.0".to_owned(),
+        subdir,
+    }
+}
+
+/// The package file of the sparse index: each record on a line of its own with the record version
+/// `v`, and a newline at the end.
+pub fn index_body(records: &[Value]) -> String {
+    records
+        .iter()
+        .map(|r| {
+            let mut line = r.clone();
+            line["v"] = json!(1);
+            format!("{line}\n")
+        })
+        .collect()
+}
+
+/// A text reply.
+pub fn text_reply(status: u16, body: &str) -> Reply {
+    Ok(response(status, &[], body))
 }
