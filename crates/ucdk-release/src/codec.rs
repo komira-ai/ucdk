@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use ucdk_core::{Hash256, Locator, ModelError, RecordKey, RecordPath, Tag};
+use ucdk_release_proto::v1::Coordinate;
 
 use crate::store::is_plain;
 use crate::transitions::Kind;
@@ -92,6 +93,14 @@ impl Encoded {
             RecordKey::of_name(&self.name).segment()
         ))
     }
+}
+
+/// The readable name of a published coordinate, as a publication record keeps it.
+pub fn coordinate_text(c: &Coordinate) -> String {
+    format!(
+        "{}/{}/{}/{}/{}",
+        c.channel, c.r#type, c.name, c.version, c.platform
+    )
 }
 
 /// The run's pinned inputs, written once by the first stage that holds a Build or Test action.

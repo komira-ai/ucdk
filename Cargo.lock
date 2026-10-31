@@ -715,6 +715,7 @@ name = "ucdk-ledger"
 version = "0.0.0"
 dependencies = [
  "ucdk-core",
+ "ucdk-release",
 ]
 
 [[package]]

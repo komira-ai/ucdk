@@ -4,6 +4,8 @@
 //! records the tests write, both ledgers behind one type, a ledger that can be made to fail,
 //! and a counter with a hook that stands in for the calls a lease guards.
 
+pub mod release;
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};

@@ -11,5 +11,8 @@ publish.workspace = true
 [dependencies]
 ucdk-core = { path = "../ucdk-core" }
 
+[dev-dependencies]
+ucdk-release = { path = "../ucdk-release" }
+
 [lints]
 workspace = true
