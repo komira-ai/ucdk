@@ -745,6 +745,8 @@ version = "0.0.0"
 dependencies = [
  "rustls",
  "serde_json",
+ "sha2",
+ "ucdk-core",
  "ucdk-ledger",
  "ucdk-release",
  "ucdk-release-proto",

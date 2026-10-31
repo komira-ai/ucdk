@@ -68,7 +68,14 @@ fn rows(op: Op, table: &[(u16, &str, &str)]) {
 #[test]
 fn a_success_status_is_not_an_error() {
     for status in [200, 201, 202, 204, 299] {
-        for op in [Op::Read, Op::Create, Op::Commit, Op::Poll, Op::Yank] {
+        for op in [
+            Op::Read,
+            Op::Create,
+            Op::Commit,
+            Op::Poll,
+            Op::Yank,
+            Op::Abort,
+        ] {
             assert_eq!(map_reply(op, &response(status, &[], ""), CEILING), None);
         }
     }
@@ -335,6 +342,24 @@ fn yank_maps_every_row() {
 }
 
 #[test]
+fn abort_maps_every_row() {
+    rows(
+        Op::Abort,
+        &[
+            (404, "route_not_found", "refused"),
+            (403, "forbidden", "grant_refused"),
+            (401, "token_unknown", "grant_refused"),
+            (404, "group_not_found", "unknown"),
+            (409, "group_not_open", "unknown"),
+            (503, "unavailable", "unknown"),
+            (500, "internal_error", "unknown"),
+        ],
+    );
+    assert_eq!(map(Op::Abort, &answer(401, "token_expired")), expired());
+    assert_eq!(map(Op::Abort, &answer(429, "rate_limited")), ticks(5));
+}
+
+#[test]
 fn a_429_is_rate_limited_for_the_ticks_retry_after_states() {
     let limited =
         |retry: &str| response(429, &[("Retry-After", retry)], &error_body("rate_limited"));
@@ -399,7 +424,7 @@ fn a_transport_failure_is_unknown_where_the_request_may_have_landed() {
         TransportError::never_connected("refused"),
         TransportError::no_usable_answer("timed out"),
     ] {
-        for op in [Op::Commit, Op::Poll, Op::Yank] {
+        for op in [Op::Commit, Op::Poll, Op::Yank, Op::Abort] {
             assert!(
                 matches!(map_transport(op, &error), SeamError::Unknown(_)),
                 "{op:?}"
@@ -423,7 +448,7 @@ fn a_well_formed_answer_that_breaks_the_schema_is_permanent_only_where_nothing_l
             "{got:?}"
         );
     }
-    for op in [Op::Commit, Op::Poll, Op::Yank] {
+    for op in [Op::Commit, Op::Poll, Op::Yank, Op::Abort] {
         let got = map_schema_violation(op, "no status");
         assert!(
             matches!(&got, SeamError::Unknown(m) if m.contains("no status")),
@@ -438,7 +463,14 @@ fn nothing_but_the_status_and_the_code_reaches_an_error() {
     let body = format!(
         r#"{{"error":{{"code":"group_conflict","message":"{canary}","hint":"{canary}","reason":"{canary}"}}}}"#
     );
-    for op in [Op::Read, Op::Create, Op::Commit, Op::Poll, Op::Yank] {
+    for op in [
+        Op::Read,
+        Op::Create,
+        Op::Commit,
+        Op::Poll,
+        Op::Yank,
+        Op::Abort,
+    ] {
         for status in [400, 401, 404, 409, 500, 503] {
             let mapped = map_reply(op, &response(status, &[], &body), CEILING).unwrap();
             assert!(!format!("{mapped:?}").contains(canary), "{op:?} {status}");
