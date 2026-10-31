@@ -188,7 +188,9 @@ pub(super) fn a_read_grant_observes_committed_coordinates_and_can_neither_stage_
     ];
     if p.stages() {
         refusals.push(("stage", must_err(p.stage(&read_b, &items), "stage")));
-        refusals.push(("abort", must_err(p.abort(&read_a, &a.coords), "abort")));
+        let a_blobs = a.blobs();
+        let a_items = a.items(&a_blobs);
+        refusals.push(("abort", must_err(p.abort(&read_a, &a_items), "abort")));
     }
     for (call, refusal) in &refusals {
         same(

@@ -91,8 +91,11 @@ pub struct Listed {
 pub trait Publisher: Send {
     fn types(&self) -> &[ArtifactType];
 
-    /// True if the channel holds staged bytes that are not yet readable. False: `stage` and
-    /// `abort` are never called and `commit` carries the bytes.
+    /// True if the channel holds staged bytes that are not yet readable: the primary shape, in
+    /// which the engine stages the set, validates it and then commits it, and aborts when the
+    /// validation fails. False is the declared capability of a channel that cannot stage: `stage`
+    /// and `abort` are never called and `commit` carries the bytes. There is no default, so a
+    /// channel never inherits a claim it cannot keep.
     fn stages(&self) -> bool;
 
     fn commit_unit(&self) -> CommitUnit;
@@ -137,8 +140,11 @@ pub trait Publisher: Send {
     /// staged.
     fn stage(&mut self, g: &Grant, items: &[StageItem<'_>]) -> Result<StageAnswer, SeamError>;
 
-    /// Gives staged state back; never touches a committed coordinate.
-    fn abort(&mut self, g: &Grant, ks: &[Coordinate]) -> Result<(), SeamError>;
+    /// Gives back the staged state of the action whose declared items are `set`, the same set
+    /// `observe` and `commit` take: a registry that addresses staged state by a group derived
+    /// from the whole set, digests and sizes included, cannot find it from coordinates. Never
+    /// touches a committed coordinate. An empty `set` gives back nothing and answers `Ok`.
+    fn abort(&mut self, g: &Grant, set: &[StageItem<'_>]) -> Result<(), SeamError>;
 
     /// Makes the staged coordinates readable.
     fn commit(&mut self, g: &Grant, items: &[StageItem<'_>]) -> Result<CommitAnswer, SeamError>;

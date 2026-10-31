@@ -523,7 +523,8 @@ pub(super) fn an_abort_reaches_only_the_coordinates_it_names<R: PublisherRig>(
             stage(rig, &mut p, set);
         }
         let grant = rig.grant(&p, GrantPhase::Stage, &named.coords);
-        must(p.abort(&grant, &named.coords), "abort");
+        let blobs = named.blobs();
+        must(p.abort(&grant, &named.items(&blobs)), "abort");
         let (staged_with, at) = holder_of(&sets, &base);
         same(
             observed(rig, &mut p, GrantPhase::Stage, staged_with, at),
@@ -547,7 +548,8 @@ fn an_abort_leaves_a_committed_coordinate_it_does_not_name_alone<R: PublisherRig
     publish(rig, &mut p, &committed);
     stage(rig, &mut p, &staged);
     let grant = rig.grant(&p, GrantPhase::Stage, &staged.coords);
-    must(p.abort(&grant, &staged.coords), "abort");
+    let blobs = staged.blobs();
+    must(p.abort(&grant, &staged.items(&blobs)), "abort");
     present_held(looked(rig, shape, &mut p, &committed.coords[0]));
     same(
         fetched(rig, &mut p, &committed.coords[0]),
@@ -569,7 +571,8 @@ fn an_abort_leaves_a_committed_coordinate_it_does_not_name_alone<R: PublisherRig
         publish(rig, &mut p, &held);
         stage(rig, &mut p, &named);
         let grant = rig.grant(&p, GrantPhase::Stage, &named.coords);
-        must(p.abort(&grant, &named.coords), "abort");
+        let blobs = named.blobs();
+        must(p.abort(&grant, &named.items(&blobs)), "abort");
         present_held(looked(rig, shape, &mut p, &base));
         same(
             fetched(rig, &mut p, &base),
