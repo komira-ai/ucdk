@@ -15,13 +15,20 @@
 //!   set, which refuse before any I/O whatever mopm would answer with a 400;
 //! - [`map_reply`], [`map_transport`] and [`map_schema_violation`]: the classification of mopm's
 //!   answers into [`SeamError`](ucdk_release_seams::SeamError);
-//! - [`read_version`]: the first read, checked and then sent.
+//! - [`read_version`]: the first read, checked and then sent;
+//! - [`Envelope`], [`authorise`]: the grant's secret and the client-side checks of a grant
+//!   (registry, phase, coverage, expiry) that send nothing when they refuse;
+//! - [`MopmGrantSource`]: the exchange of the job's CI identity token for a short-lived grant,
+//!   with [`GithubIdentity`] as the source of the token.
 //!
 //! The publisher itself, the group verbs and the HTTP adapter are not here yet.
 
 mod config;
 mod errors;
+mod exchange;
 mod grammar;
+mod grants;
+mod identity;
 mod mapping;
 mod platform;
 mod requests;
@@ -33,9 +40,15 @@ pub use errors::{
     ConflictAnswer, ConflictReason, DEFAULT_RETRY_AFTER_SECONDS, Mapped, Op, error_code,
     error_reason, map_reply, map_schema_violation, map_transport,
 };
+pub use exchange::{ActorForm, GITHUB_ISSUER, GRANT_LIMIT, GrantSourceConfig, MopmGrantSource};
 pub use grammar::{
     MAX_FILE_NAME_LENGTH, MAX_REASON_UNITS, MAX_VERSION_LENGTH, build_of_file, safe_file_name,
     valid_build, valid_name, valid_reason, valid_sha256, valid_version,
+};
+pub use grants::{Envelope, Malformed, Use, Verb, authorise};
+pub use identity::{
+    Claims, Expected, GithubIdentity, IdentitySource, IdentityToken, IdentityUnavailable, Mismatch,
+    Verified, check_identity,
 };
 pub use mapping::{
     ArchiveFacts, Candidate, Key, MAX_FILE_BYTES, MAX_GROUP_BYTES, MAX_MEMBERS, Member, MemberFile,
