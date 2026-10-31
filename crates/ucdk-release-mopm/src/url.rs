@@ -162,6 +162,28 @@ impl Url {
         }
     }
 
+    /// This URL with `query` as its query. The caller encodes the query.
+    #[must_use]
+    pub fn with_query(&self, query: &str) -> Url {
+        Url {
+            origin: self.origin.clone(),
+            path: self.path.clone(),
+            query: Some(query.to_owned()),
+        }
+    }
+
+    /// The URL at the same origin whose path is `segments`, each percent-encoded as one path
+    /// segment, with no query: a location that does not hang under this URL's own path.
+    #[must_use]
+    pub fn rooted(&self, segments: &[&str]) -> Url {
+        Url {
+            origin: self.origin.clone(),
+            path: String::new(),
+            query: None,
+        }
+        .join(segments)
+    }
+
     /// The URL with its query replaced by `<redacted>`: safe to print and to put in an error.
     pub fn redacted(&self) -> String {
         let query = if self.query.is_some() {
