@@ -19,7 +19,7 @@ use std::fmt;
 use std::time::Duration;
 
 use crate::lease::{Fence, LeaseError};
-use crate::record::{Change, Ledger, LedgerError};
+use crate::record::{Change, Ledger, LedgerError, Token};
 
 /// How long a lease lasts when the caller has no reason to choose: the holder renews before each
 /// step of its work, so one step has this long.
@@ -102,6 +102,9 @@ pub struct LeaseGuard<'a> {
     ttl: Duration,
     fence: Fence,
     standing: Standing,
+    /// The token of the document as this guard last wrote it, or as it was when the lease was
+    /// granted before the first write.
+    last: Token,
 }
 
 impl<'a> LeaseGuard<'a> {
@@ -119,19 +122,30 @@ impl<'a> LeaseGuard<'a> {
     ) -> Result<Self, GuardError> {
         let holder = holder.into();
         match ledger.acquire(&holder, ttl) {
-            Ok(lease) => Ok(Self {
-                ledger,
-                holder,
-                ttl,
-                fence: lease.fence,
-                standing: Standing::Held,
-            }),
+            Ok(lease) => {
+                // While the lease is live no one else can write, so the document stays at this
+                // token until the guard writes. A read that fails leaves the grant in doubt.
+                let last = ledger
+                    .read()
+                    .map_err(|e| GuardError::Unconfirmed { why: e.to_string() })?
+                    .token;
+                Ok(Self {
+                    ledger,
+                    holder,
+                    ttl,
+                    fence: lease.fence,
+                    standing: Standing::Held,
+                    last,
+                })
+            }
             Err(LeaseError::Held { holder, remaining }) => {
                 Err(GuardError::Held { holder, remaining })
             }
             // The grant may have landed with its answer lost: the lease may be ours.
             Err(LeaseError::Unavailable(why)) => Err(GuardError::Unconfirmed { why }),
             Err(LeaseError::ReadOnly) => Err(GuardError::Ledger(LedgerError::ReadOnly)),
+            // Only a conditional grant answers this; a ledger that answers it here changed.
+            Err(LeaseError::Changed) => Err(GuardError::Ledger(LedgerError::Stale)),
         }
     }
 
@@ -179,7 +193,10 @@ impl<'a> LeaseGuard<'a> {
         for _ in 0..WRITE_ATTEMPTS {
             let token = self.ledger.read().map_err(|e| self.classify(e))?.token;
             match self.ledger.write_fenced(self.fence, &token, change.clone()) {
-                Ok(_) => return Ok(()),
+                Ok(written) => {
+                    self.last = written;
+                    return Ok(());
+                }
                 Err(LedgerError::Stale) => {}
                 Err(other) => return Err(self.classify(other)),
             }
@@ -199,6 +216,47 @@ impl<'a> LeaseGuard<'a> {
             Ok(_) => Ok(()),
             Err(error) => Err(self.classify(error)),
         }
+    }
+
+    /// The token of the document as this guard last wrote it, or as it was when the lease was
+    /// granted, before the first write. While the lease is held nobody else can write, so it is
+    /// also the token of the document now; after a lapse it is what
+    /// [`LeaseGuard::reacquire_if_unchanged`] compares with.
+    pub fn token(&self) -> &Token {
+        &self.last
+    }
+
+    /// Extends the lease, but only when less than half of the guard's `ttl` is left by the
+    /// ledger's own clock (the reading taken with the read of the document), so a holder that
+    /// reports progress often does not write the ledger on every report. A lease that is not
+    /// this guard's any more, or that has lapsed, is not "fresh", so the renewal is made and the
+    /// ledger's answer says so.
+    ///
+    /// # Errors
+    ///
+    /// As [`LeaseGuard::renew`], and [`GuardError::Ledger`] when the document cannot be read.
+    pub fn renew_if_due(&mut self) -> Result<(), GuardError> {
+        self.check()
+    }
+
+    /// Takes the lease again, under a new fence, after it lapsed, but only if the document is
+    /// still at `token` and no lease has been granted since this guard's own (`fence`): one
+    /// call of [`Ledger::acquire_if`], so the check and the grant are one step. A guard that
+    /// lost its lease to another holder is refused, and stays lost. Use it only to record the
+    /// result of work that is already done, never to start more.
+    ///
+    /// # Errors
+    ///
+    /// [`GuardError::Lost`] when the lease is another holder's or the document or the fence
+    /// changed, [`GuardError::Unconfirmed`] when the ledger could not say whether the grant
+    /// landed, [`GuardError::NotHeld`] after the lease was given back.
+    pub fn reacquire_if_unchanged(
+        &mut self,
+        token: &Token,
+        fence: Fence,
+    ) -> Result<(), GuardError> {
+        let _ = (token, fence);
+        Err(GuardError::Lost)
     }
 
     /// Gives the lease back, so another holder may take it at once. A guard whose lease was

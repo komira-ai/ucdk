@@ -69,6 +69,39 @@ fn the_release_model_crates_may_not_depend_on_the_ledger_or_the_release_engine()
 }
 
 #[test]
+fn the_ledger_may_not_depend_on_the_release_engine() {
+    let manifest = with_deps(
+        IMPURE,
+        "dependencies",
+        "ucdk-release-engine = { path = \"../ucdk-release-engine\" }",
+    );
+    let (root, names) = project(
+        "direction-ledger",
+        &[("ucdk-ledger", &manifest), ("ucdk-release-engine", IMPURE)],
+    );
+    let findings = check_direction(&root, &names);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_eq!(findings[0].rule, "dependency-direction");
+    assert_eq!(findings[0].subject, "ucdk-ledger/Cargo.toml");
+    assert!(
+        findings[0].detail.contains("ucdk-release-engine"),
+        "{}",
+        findings[0].detail
+    );
+    // The engine may depend on the ledger: it is the layer above.
+    let engine = with_deps(
+        IMPURE,
+        "dependencies",
+        "ucdk-ledger = { path = \"../ucdk-ledger\" }",
+    );
+    let (root, names) = project(
+        "direction-engine",
+        &[("ucdk-release-engine", &engine), ("ucdk-ledger", IMPURE)],
+    );
+    assert_eq!(check_direction(&root, &names), []);
+}
+
+#[test]
 fn a_lower_crate_may_not_reach_a_higher_one_through_any_section() {
     for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
         let core = with_deps(IMPURE, section, "ucdk-ledger.workspace = true");

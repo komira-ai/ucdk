@@ -729,6 +729,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucdk-release-engine"
+version = "0.0.0"
+dependencies = [
+ "sha2",
+ "ucdk-core",
+ "ucdk-ledger",
+ "ucdk-release",
+ "ucdk-release-fake",
+ "ucdk-release-proto",
+ "ucdk-release-seams",
+]
+
+[[package]]
 name = "ucdk-release-fake"
 version = "0.0.0"
 dependencies = [

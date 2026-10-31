@@ -85,6 +85,20 @@ impl Doc {
         Ok(lease)
     }
 
+    /// [`Doc::acquire`] with a precondition, checked in the same step as the grant. Not
+    /// implemented yet: it grants nothing.
+    pub(crate) fn acquire_if(
+        &mut self,
+        now: u64,
+        holder: &str,
+        ttl: Duration,
+        expected: &Token,
+        fence: Fence,
+    ) -> Result<Lease, LeaseError> {
+        let _ = (now, holder, ttl, expected, fence);
+        Err(LeaseError::Changed)
+    }
+
     /// Whether `fence` is the live lease's: the current fence, not yet lapsed at `now`.
     fn check(&self, now: u64, fence: Fence) -> Result<&Held, LedgerError> {
         match &self.lease {

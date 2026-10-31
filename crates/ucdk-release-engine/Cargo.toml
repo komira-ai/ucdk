@@ -1,0 +1,23 @@
+[package]
+name = "ucdk-release-engine"
+description = "The release engine: Test actions and validations run against the build system, the artifact store and a channel, with the run's lease kept alive on the progress the build system reports."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+sha2.workspace = true
+ucdk-core = { path = "../ucdk-core" }
+ucdk-ledger = { path = "../ucdk-ledger" }
+ucdk-release = { path = "../ucdk-release" }
+ucdk-release-proto = { path = "../ucdk-release-proto" }
+ucdk-release-seams = { path = "../ucdk-release-seams" }
+
+[dev-dependencies]
+ucdk-release-fake = { path = "../ucdk-release-fake" }
+
+[lints]
+workspace = true
