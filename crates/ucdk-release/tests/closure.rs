@@ -328,29 +328,21 @@ fn a_plain_member_the_list_leaves_out_is_a_failed_row() {
         detail,
         "does not list lib-b, lib-c, which the set holds as plain members"
     );
-    // An empty list leaves out every one.
-    let (verdict, detail) = detail_of(vec![listing("bundle", ""), leaf("lib-a", "1")], 0);
-    assert_eq!(verdict, RowState::RowFailed);
-    assert_eq!(
-        detail,
-        "does not list lib-a, which the set holds as a plain member"
-    );
 }
 
 #[test]
 fn a_name_the_list_adds_beyond_the_plain_members_is_a_failed_row() {
     let (verdict, detail) = detail_of(
         vec![
-            listing("bundle", "lib-a, ghost, other-bundle, bundle, ghost"),
+            listing("bundle", "lib-a, ghost, bundle, ghost"),
             leaf("lib-a", "1"),
-            listing("other-bundle", "lib-a"),
         ],
         0,
     );
     assert_eq!(verdict, RowState::RowFailed);
     assert_eq!(
         detail,
-        "lists ghost, other-bundle, bundle, which the set does not hold as plain members; \
+        "lists ghost, bundle, which the set does not hold as plain members; \
          lists ghost more than once"
     );
 }
@@ -405,41 +397,127 @@ fn a_list_pins_its_members_exactly_too() {
 }
 
 #[test]
-fn the_plain_members_are_those_with_a_manifest_and_no_list_of_their_own() {
-    // Two lists in one set each name the plain members and neither names the other; a member
-    // with no manifest and an image member (which has no labels) are held to the same rule.
-    let two = set(vec![
-        listing("bundle-a", "lib, image"),
-        listing("bundle-b", "image,lib"),
+fn images_and_every_member_with_a_manifest_and_no_list_are_plain_members() {
+    // An image member counts as a plain member, so a list that leaves it out is incomplete; a
+    // member with no manifest has no name and is a failed row of its own.
+    let with_image = set(vec![
+        listing("bundle", "lib, image"),
         leaf("lib", "1"),
         image("image"),
         Member { manifest: None },
     ]);
-    let rows = set_closure(&two);
+    let rows = set_closure(&with_image);
     assert_eq!(state(&rows[0]), RowState::RowPassed);
-    assert_eq!(state(&rows[1]), RowState::RowPassed);
-    assert_eq!(state(&rows[4]), RowState::RowFailed);
-    // A list that names the other list is naming a name that is not a plain member.
+    assert_eq!(state(&rows[3]), RowState::RowFailed);
     let (verdict, detail) = detail_of(
-        vec![
-            listing("bundle-a", "lib, bundle-b"),
-            listing("bundle-b", "lib"),
-            leaf("lib", "1"),
-        ],
+        vec![listing("bundle", "lib"), leaf("lib", "1"), image("image")],
         0,
     );
     assert_eq!(verdict, RowState::RowFailed);
     assert_eq!(
         detail,
-        "lists bundle-b, which the set does not hold as a plain member"
+        "does not list image, which the set holds as a plain member"
     );
-    // A list alone, with an empty list, is equal to the empty set of plain members.
-    let (verdict, detail) = detail_of(vec![listing("bundle", " , ")], 0);
-    assert_eq!(verdict, RowState::RowPassed);
+}
+
+#[test]
+fn a_set_with_no_list_makes_no_set_equality_claim() {
+    let none = set(vec![
+        leaf("lib-a", "1"),
+        leaf("lib-b", "2"),
+        requiring("app", "lib-a"),
+    ]);
+    let rows = set_closure(&none);
+    assert!(rows.iter().all(|r| state(r) == RowState::RowPassed));
+    assert!(rows.iter().all(|r| !r.detail.contains("lists")));
+}
+
+#[test]
+fn two_members_that_carry_a_list_are_each_a_failed_row_naming_both() {
+    let two = set(vec![
+        listing("bundle-a", "lib"),
+        listing("bundle-b", "lib"),
+        leaf("lib", "1"),
+    ]);
+    let rows = set_closure(&two);
+    let want = "2 members carry a members list (bundle-a, bundle-b); at most one may";
+    assert_eq!(state(&rows[0]), RowState::RowFailed);
+    assert_eq!(rows[0].detail, want);
+    assert_eq!(state(&rows[1]), RowState::RowFailed);
+    assert_eq!(rows[1].detail, want);
+    assert_eq!(state(&rows[2]), RowState::RowPassed);
+    assert_eq!(
+        account_rows(&closure_rows(&two), &rows),
+        Ok(Verdict::ValidationFailed)
+    );
+}
+
+#[test]
+fn an_empty_or_blank_list_is_a_failed_row_and_does_not_exempt_the_member() {
+    // lib-a's empty label is its own fault, and lib-a is still a plain member the real list
+    // has to name.
+    let hidden = set(vec![
+        labelled("lib-a", "1", &[(MEMBERS, "")]),
+        leaf("lib-b", "2"),
+        listing("meta", "lib-b"),
+    ]);
+    let rows = set_closure(&hidden);
+    let empty = "its members label is empty; a list names at least one member";
+    assert_eq!(state(&rows[0]), RowState::RowFailed);
+    assert_eq!(rows[0].detail, empty);
+    assert_eq!(state(&rows[1]), RowState::RowPassed);
+    assert_eq!(state(&rows[2]), RowState::RowFailed);
+    assert_eq!(
+        rows[2].detail,
+        "does not list lib-a, which the set holds as a plain member"
+    );
+    for blank in ["", " ", " , ,"] {
+        let (verdict, detail) = detail_of(vec![listing("bundle", blank), leaf("lib", "1")], 0);
+        assert_eq!(verdict, RowState::RowFailed, "{blank:?}");
+        assert_eq!(detail, empty, "{blank:?}");
+    }
+    // An empty label is not a list, so it does not count towards the one list a set may have.
+    let one = set(vec![
+        labelled("lib-a", "1", &[(MEMBERS, "")]),
+        listing("meta", "lib-a"),
+    ]);
+    assert_eq!(
+        set_closure(&one)[1].detail,
+        "lists lib-a, exactly the plain members of the set"
+    );
+}
+
+#[test]
+fn a_loose_entry_that_names_an_absent_member_is_one_fault() {
+    let (_, detail) = detail_of(vec![requiring("app", "ghost>=1")], 0);
     assert_eq!(
         detail,
-        "lists no member, exactly the plain members of the set"
+        "ghost>=1 is not a bare name or an exact name==version pin"
     );
+    let (_, detail) = detail_of(vec![listing("bundle", "ghost*")], 0);
+    assert_eq!(
+        detail,
+        "ghost* is not a bare name or an exact name==version pin"
+    );
+}
+
+#[test]
+fn a_duplicate_member_name_is_a_failed_row_of_each_and_confuses_no_pin() {
+    let dup = set(vec![
+        leaf("lib", "1"),
+        leaf("lib", "2"),
+        requiring("app", "lib==2"),
+        requiring("other", "lib==1"),
+    ]);
+    let rows = set_closure(&dup);
+    for row in &rows[..2] {
+        assert_eq!(state(row), RowState::RowFailed);
+        assert_eq!(row.detail, "its name is also the name of another member");
+    }
+    // A pin against a name two members share is not judged against either of them.
+    assert_eq!(state(&rows[2]), RowState::RowPassed);
+    assert_eq!(rows[2].detail, "requires lib==2, all members");
+    assert_eq!(state(&rows[3]), RowState::RowPassed);
 }
 
 #[test]
