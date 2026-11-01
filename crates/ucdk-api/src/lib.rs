@@ -3,12 +3,13 @@
 //! the table of exit classes.
 //!
 //! The messages are generated from `proto/ucdk/api/v1/api.proto` by `build.rs` into the build
-//! directory, in [`v1`]. A host (the command line, the C ABI) does two things with this crate:
+//! directory, in [`v1`]. A host (the command line, the C ABI) does three things with this crate:
 //!
 //! - asks for a ledger to be shown with [`ledger_show`], which answers with a [`v1::Outcome`]
 //!   that carries the exit class of the answer;
 //! - reads the exit code of a class from [`v1::ExitClass::code`], the only place the mapping
-//!   from class to code is written.
+//!   from class to code is written;
+//! - turns the verdict of a release run into its class with [`exit_class`].
 
 mod exit;
 mod ledger_show;
