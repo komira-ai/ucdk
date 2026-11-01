@@ -4,7 +4,7 @@
 
 use ucdk_api::v1::ExitClass;
 use ucdk_api::{
-    REPORT_SCHEMA, ReportError as E, default_retry, exit_class, validate_run, validate_stage,
+    ReportError as E, default_retry, exit_class, report_schema, validate_run, validate_stage,
 };
 use ucdk_release::run_identity::RunIdentityError;
 use ucdk_release_proto::v1::{
@@ -130,7 +130,7 @@ fn the_schema_version_goes_through_the_policy() {
     for version in [-1, 0, 2, 3, 100] {
         let mut report = stage();
         report.schema_version = version;
-        let want = REPORT_SCHEMA.check(version).expect_err("refused");
+        let want = report_schema().check(version).expect_err("refused");
         assert_eq!(refused(&report), E::Schema(want), "{version}");
         let run = RunReport {
             schema_version: version,
@@ -138,7 +138,7 @@ fn the_schema_version_goes_through_the_policy() {
         };
         assert_eq!(validate_run(&run), Err(E::Schema(want)), "{version}");
     }
-    assert_eq!(REPORT_SCHEMA.current(), 1);
+    assert_eq!(report_schema().current(), 1);
 }
 
 #[test]

@@ -20,7 +20,7 @@ mod report;
 
 pub use exit::exit_class;
 pub use ledger_show::{LedgerSource, ledger_show};
-pub use report::{REPORT_SCHEMA, ReportError, default_retry, validate_run, validate_stage};
+pub use report::{ReportError, default_retry, report_schema, validate_run, validate_stage};
 
 /// The generated messages of `ucdk.api.v1`.
 #[allow(clippy::all, clippy::pedantic, missing_docs)]
