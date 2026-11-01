@@ -144,7 +144,15 @@ fn a_context_key_is_a_lowercase_word_of_at_most_thirty_two_bytes() {
     assert_eq!(check(&identity("r", 1, &[("a_1", "v")])), Ok(()));
     let too_long = format!("k{}", "0".repeat(CONTEXT_KEY_MAX_BYTES));
     for key in [
-        "", "A", "1a", "_a", "a-b", "a b", "a.b", "\u{e9}", too_long.as_str(),
+        "",
+        "A",
+        "1a",
+        "_a",
+        "a-b",
+        "a b",
+        "a.b",
+        "\u{e9}",
+        too_long.as_str(),
     ] {
         assert_eq!(
             check(&identity("r", 1, &[(key, "v")])),
