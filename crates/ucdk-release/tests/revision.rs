@@ -206,3 +206,24 @@ fn stamps_compare_by_every_field() {
         assert_ne!(base, other.expect("a stamp"));
     }
 }
+
+#[test]
+fn a_refusal_message_holds_no_raw_newline_or_control_character_of_the_input() {
+    // Text bound for a log or a CI summary: a newline could start a line of its own, and an
+    // escape byte could restyle the lines after it.
+    let text = "abc\n::error::x\u{1b}[31m\r\0\u{7f}";
+    let from_revision = Revision::parse(text).expect_err("refused").to_string();
+    let from_id = BuildStamp::new(text, SRC, 1, 1)
+        .expect_err("refused")
+        .to_string();
+    let from_source = BuildStamp::new(REV, text, 1, 1)
+        .expect_err("refused")
+        .to_string();
+    for message in [from_revision, from_id, from_source] {
+        assert!(message.contains("::error::x"), "{message:?}");
+        assert!(
+            !message.chars().any(char::is_control),
+            "a control character in {message:?}"
+        );
+    }
+}
