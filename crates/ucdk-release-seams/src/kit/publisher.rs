@@ -22,8 +22,8 @@ use super::publisher_list::publisher_scenarios;
 use super::publisher_more as more;
 use super::publisher_rig::{
     Arrangement, ChannelShape, PublisherRig, Set, built, commit, fetched, held_by_another,
-    is_yanked, looked, observed, observed_as_staged, present_held, publish, stage, staged_held,
-    stranger,
+    is_yanked, looked, observed, observed_as_staged, present_held, publish, sha, stage,
+    staged_held, stranger,
 };
 use super::{Report, must, must_err, run_scenarios, same};
 use crate::{CommitAnswer, CommitUnit, Grant, ListScope, Publisher, StageAnswer};
@@ -490,13 +490,26 @@ pub(super) fn no_digest_exposed_is_refused<R: PublisherRig>(rig: &R, shape: &Cha
         set.reseeded(rig, 1).digest(0),
         &format!("the digest a coordinate of another writer is reported with ({shape:?})"),
     );
-    // The identity comparison reads that report as the bytes of another writer, never as ours and
-    // never as a report with nothing to compare.
-    let ours = ContentIdentity::of_sha256(&set.digest(0));
+    // The identity comparison reads that report as the bytes it holds and as no others, and never
+    // as a report with nothing to compare.
+    let reported = ContentIdentity::of_sha256(&held.digest);
     same(
-        identity_matches(&ours, &ContentIdentity::of_sha256(&held.digest)),
+        identity_matches(
+            &ContentIdentity::of_sha256(&set.reseeded(rig, 1).digest(0)),
+            &reported,
+        ),
+        IdentityMatch::Match,
+        &format!(
+            "the identity of the bytes of another writer against what is reported ({shape:?})"
+        ),
+    );
+    same(
+        identity_matches(
+            &ContentIdentity::of_sha256(&sha(b"bytes that nobody sent")),
+            &reported,
+        ),
         IdentityMatch::Mismatch,
-        &format!("our identity against a coordinate of another writer ({shape:?})"),
+        &format!("the identity of bytes nobody sent against what is reported ({shape:?})"),
     );
 }
 
