@@ -47,8 +47,10 @@ impl Root {
 impl LocalFiles {
     /// A reader that reads below `roots` and nowhere else: the output root the build system
     /// reports (the execution root of Bazel; the project root or `buck-out` of Buck2) and the
-    /// directory of the report files. A root is resolved when the reader is made, and a link on
-    /// the way to it is that way; only the parts below it are held to the rule about links.
+    /// directory of the report files. A root is resolved when the reader is made (a relative root
+    /// against the current directory of this process; the paths asked about are absolute either
+    /// way), and a link on the way to it is that way; only the parts below it are held to the
+    /// rule about links. A trailing slash on a root changes nothing.
     ///
     /// # Errors
     ///

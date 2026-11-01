@@ -405,6 +405,40 @@ fn a_root_reached_through_a_link_confines_paths_named_by_either_spelling() {
 }
 
 #[test]
+fn a_root_given_with_a_trailing_slash_is_the_same_root() {
+    let rig = Rig::new();
+    let (outside, near) = with_neighbours(&rig);
+    fs::write(rig.at("out/x"), b"built").unwrap();
+    let mut files = LocalFiles::within([format!("{}/", rig.at("out"))]).unwrap();
+    assert_eq!(files.read(&rig.at("out/x")), Ok(b"built".to_vec()));
+    assert_eq!(files.stat(&rig.at("out")), Ok(Some(FileKind::Directory)));
+    for path in [format!("{outside}/x"), format!("{near}/x")] {
+        assert_eq!(refused_by_all(&mut files, &path), [true; 3], "{path}");
+    }
+}
+
+#[test]
+fn a_relative_root_is_resolved_against_the_current_directory_and_confines_absolute_paths() {
+    let rig = Rig::new();
+    let (outside, _) = with_neighbours(&rig);
+    fs::write(rig.at("out/x"), b"built").unwrap();
+    // The root spelled relative to the current directory by climbing out of it, so that the
+    // test does not change the directory of the process.
+    let here = std::env::current_dir().unwrap();
+    let up = here.components().count() - 1;
+    let target = rig.at("out");
+    let relative = format!("{}{}", "../".repeat(up), target.trim_start_matches('/'));
+    assert!(Path::new(&relative).is_relative());
+    let mut files = LocalFiles::within([relative]).unwrap();
+    assert_eq!(files.read(&rig.at("out/x")), Ok(b"built".to_vec()));
+    assert_eq!(files.stat(&rig.at("out")), Ok(Some(FileKind::Directory)));
+    assert_eq!(
+        refused_by_all(&mut files, &format!("{outside}/x")),
+        [true; 3]
+    );
+}
+
+#[test]
 fn a_root_that_cannot_be_resolved_is_permanent() {
     let rig = Rig::new();
     let result = LocalFiles::within([rig.at("not-there")]);
