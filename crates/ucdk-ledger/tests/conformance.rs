@@ -8,7 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::release::{
-    golden_records, grant, granted, publication, put_release, read_release, refused, run, seal,
+    every_release_record, golden_records, grant, granted, publication, put_release, read_release,
+    refused, run, seal,
 };
 use common::{Scratch, confirmed, path, put, record};
 use ucdk_ledger::{
@@ -336,4 +337,26 @@ fn a_grant_record_round_trips_and_holds_no_secret_key() {
         }
     }
     assert!(text.contains("output coordinates "));
+}
+
+#[test]
+fn every_release_record_comes_back_identical_from_every_ledger() {
+    // Each kind the codec writes, put into a ledger record, written and read back, is the record
+    // it was, with its origin and state: on the memory ledger, and on the file ledger both on the
+    // handle that wrote it and on one opened afresh. The light form of a record is kept at the
+    // path of its full form, so each record has a ledger of its own.
+    for (n, wanted) in every_release_record().into_iter().enumerate() {
+        let (release, origin, state) = wanted.clone();
+        on_every_ledger(&format!("release-every-{n}"), |ledger| {
+            let at = put_release(ledger, &release, origin, state);
+            assert_eq!(ledger.read().expect("read").records.len(), 1);
+            assert_eq!(read_release(ledger, &at), Some(wanted.clone()), "{at}");
+        });
+        let scratch = Scratch::new(&format!("release-every-reopen-{n}"));
+        let at = {
+            let ledger = FileLedger::open(scratch.file()).expect("open");
+            put_release(&ledger, &release, origin, state)
+        };
+        assert_eq!(read_release(&reopened(&scratch), &at), Some(wanted), "{at}");
+    }
 }

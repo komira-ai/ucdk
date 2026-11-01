@@ -498,3 +498,103 @@ fn a_publication_coordinate_is_framed_so_slashes_cannot_alias() {
     assert_eq!(Record::decode(&ea), Ok(a));
     assert_eq!(Record::decode(&eb), Ok(b));
 }
+
+/// The five fields a framed text holds, read back by the framing alone: each is its length in
+/// bytes, a `:`, and that many bytes. Nothing may be left over.
+fn unframed(text: &str) -> Vec<String> {
+    let mut rest = text;
+    let mut fields = Vec::new();
+    while !rest.is_empty() {
+        let (len, tail) = rest.split_once(':').expect("a length and a colon");
+        let len: usize = len.parse().expect("a length in digits");
+        fields.push(tail[..len].to_owned());
+        rest = &tail[len..];
+    }
+    fields
+}
+
+#[test]
+fn each_of_the_five_fields_is_its_length_a_colon_and_the_field() {
+    let file = ArtifactType::File as i32;
+    for c in [
+        coordinate("stable", "tool", "1.2.3+build.4", "linux-x86_64"),
+        // Empty fields are framed too: a zero length and a colon.
+        coordinate("", "", "", ""),
+        // The length counts bytes, not characters.
+        coordinate("st\u{e9}ble", "t\u{f6}\u{f6}l", "1", "p"),
+        // A colon or digits inside a field are the field's own bytes.
+        coordinate("3:abc", "12:", "1:2", "0:"),
+        coordinate("a/b", "c/d/e", "f/", "/g"),
+    ] {
+        let text = coordinate_text(&c);
+        let fields = [
+            c.channel.clone(),
+            file.to_string(),
+            c.name.clone(),
+            c.version.clone(),
+            c.platform.clone(),
+        ];
+        let framed: String = fields.iter().map(|f| format!("{}:{f}", f.len())).collect();
+        assert_eq!(text, framed, "{c:?}");
+        assert_eq!(unframed(&text), fields, "{c:?}");
+    }
+    // The type is the artifact type's number, framed like the other fields.
+    let mut c = coordinate("s", "n", "v", "p");
+    c.r#type = ArtifactType::Oci as i32;
+    assert_eq!(
+        unframed(&coordinate_text(&c))[1],
+        (ArtifactType::Oci as i32).to_string()
+    );
+}
+
+#[test]
+fn a_slash_cannot_move_from_one_field_to_another() {
+    // For each two neighbouring text fields (channel and name, with the type between them, name
+    // and version, version and platform), a segment moved across the `/` between them, either
+    // way, spells the same `/` join and gives another framed text.
+    let base = ["stable/x", "y/tool/z", "w/1.2.3/v", "u/linux"];
+    let of = |f: &[String; 4]| {
+        coordinate_text(&Coordinate {
+            channel: f[0].clone(),
+            r#type: ArtifactType::File as i32,
+            name: f[1].clone(),
+            version: f[2].clone(),
+            platform: f[3].clone(),
+        })
+    };
+    let base = base.map(str::to_owned);
+    let original = of(&base);
+    let mut seen = std::collections::BTreeSet::from([original.clone()]);
+    for left in 0..3 {
+        let right = left + 1;
+        // The last segment of the left field moves to the start of the right one ...
+        let mut forward = base.clone();
+        let (head, tail) = base[left].rsplit_once('/').expect("a slash");
+        forward[left] = head.to_owned();
+        forward[right] = format!("{tail}/{}", base[right]);
+        // ... and the first segment of the right field moves to the end of the left one.
+        let mut back = base.clone();
+        let (head, tail) = base[right].split_once('/').expect("a slash");
+        back[left] = format!("{}/{head}", base[left]);
+        back[right] = tail.to_owned();
+        for moved in [forward, back] {
+            assert_eq!(
+                base.join("/"),
+                moved.join("/"),
+                "a `/` join spells both alike"
+            );
+            let text = of(&moved);
+            assert_ne!(text, original, "{moved:?}");
+            assert!(
+                seen.insert(text.clone()),
+                "{moved:?} spells a text seen before"
+            );
+            let fields = unframed(&text);
+            assert_eq!(
+                [&fields[0], &fields[2], &fields[3], &fields[4]],
+                [&moved[0], &moved[1], &moved[2], &moved[3]],
+                "the framing reads back the fields as they were given"
+            );
+        }
+    }
+}

@@ -8,8 +8,8 @@ use std::collections::BTreeSet;
 use ucdk_core::{Hash256, RecordPath};
 use ucdk_ledger::{Change, Ledger, Origin, OwnerPath, Record, State};
 use ucdk_release::codec::{
-    Encoded, Grant, GrantAnswer, GrantFault, GrantPhase, Phase, Publication, Record as Release,
-    Run, Seal, coordinate_text,
+    Action, Encoded, Grant, GrantAnswer, GrantFault, GrantPhase, Phase, Publication,
+    Record as Release, Run, Seal, Stage, Validation, coordinate_text,
 };
 use ucdk_release_proto::v1::{ArtifactType, Coordinate};
 
@@ -186,4 +186,50 @@ pub fn golden_records() -> Vec<(Release, Origin, State)> {
         (grant(2, Some(granted())), Origin::Created, State::Confirmed),
         (grant(3, Some(refused())), Origin::Created, State::Confirmed),
     ]
+}
+
+/// A record of every kind the codec writes, in its full form and in the lighter forms of those
+/// with optional keys, each with an origin and a state a ledger keeps it in.
+pub fn every_release_record() -> Vec<(Release, Origin, State)> {
+    let stage = |full: bool| {
+        Release::Stage(Stage {
+            stage: "build".to_owned(),
+            attempt: 2,
+            platform: full.then(|| "linux-x86_64".to_owned()),
+            set: full.then(|| hash('2')),
+            generation: full.then(|| "run-7-a2".to_owned()),
+            confirmed: full,
+        })
+    };
+    let action = |full: bool| {
+        Release::Action(Action {
+            stage: "build".to_owned(),
+            action: "compile".to_owned(),
+            input: hash('3'),
+            set: full.then(|| hash('2')),
+            generation: full.then(|| "run-7-a2".to_owned()),
+        })
+    };
+    let validation = |full: bool| {
+        Release::Validation(Validation {
+            stage: "build".to_owned(),
+            validation: "closure".to_owned(),
+            set: full.then(|| hash('2')),
+        })
+    };
+    let mut all = golden_records();
+    all.extend([
+        (stage(true), Origin::Created, State::Confirmed),
+        (stage(false), Origin::Created, State::Intent),
+        (action(true), Origin::Created, State::Confirmed),
+        (action(false), Origin::Created, State::Intent),
+        (
+            publication(Some(Phase::Staging)),
+            Origin::Created,
+            State::Intent,
+        ),
+        (validation(true), Origin::Created, State::Confirmed),
+        (validation(false), Origin::Created, State::Intent),
+    ]);
+    all
 }
