@@ -372,8 +372,14 @@ fn the_retry_advice_is_set_and_never_weaker_than_the_class() {
     assert_eq!(refused(&report), E::RetryUnspecified);
     // (class, accepted advice)
     let table: [(ExitClass, &[Retry]); 6] = [
-        (ExitClass::Done, &[Retry::Safe, Retry::NeedsHuman]),
-        (ExitClass::FailedNoEffect, &[Retry::Safe, Retry::NeedsHuman]),
+        (
+            ExitClass::Done,
+            &[Retry::Safe, Retry::Unsafe, Retry::NeedsHuman],
+        ),
+        (
+            ExitClass::FailedNoEffect,
+            &[Retry::Safe, Retry::Unsafe, Retry::NeedsHuman],
+        ),
         (
             ExitClass::FailedChanged,
             &[Retry::Unsafe, Retry::NeedsHuman],
@@ -432,7 +438,7 @@ fn the_default_advice_of_each_class() {
 }
 
 #[test]
-fn a_run_cannot_finish_before_it_started() {
+fn a_stage_cannot_finish_before_it_started() {
     let mut report = stage();
     report.started_at_ms = 20;
     report.finished_at_ms = 20;
@@ -441,12 +447,50 @@ fn a_run_cannot_finish_before_it_started() {
     assert_eq!(
         refused(&report),
         E::FinishedBeforeStarted {
+            stage: "build".to_owned(),
             started: 20,
             finished: 19
         }
     );
+}
+
+#[test]
+fn a_time_of_zero_means_unknown_and_is_not_compared() {
+    let mut report = stage();
+    report.started_at_ms = 20;
     report.finished_at_ms = 0;
-    assert!(matches!(refused(&report), E::FinishedBeforeStarted { .. }));
+    assert_eq!(validate_stage(&report), Ok(()));
+    report.started_at_ms = 0;
+    report.finished_at_ms = 5;
+    assert_eq!(validate_stage(&report), Ok(()));
+}
+
+#[test]
+fn stages_of_a_run_are_not_ordered_by_time_because_hosts_differ() {
+    let mut report = a_run_that_ended_well();
+    report.stages[0].started_at_ms = 1_000;
+    report.stages[0].finished_at_ms = 2_000;
+    report.stages[1].started_at_ms = 10;
+    report.stages[1].finished_at_ms = 20;
+    assert_eq!(validate_run(&report), Ok(()));
+}
+
+#[test]
+fn a_run_report_names_the_stage_that_finished_before_it_started() {
+    let mut report = a_run_that_ended_well();
+    report.stages[1].started_at_ms = 9;
+    report.stages[1].finished_at_ms = 8;
+    assert_eq!(
+        refused_run(&report),
+        E::Stage {
+            index: 1,
+            error: Box::new(E::FinishedBeforeStarted {
+                stage: "publish".to_owned(),
+                started: 9,
+                finished: 8
+            })
+        }
+    );
 }
 
 #[test]
@@ -724,17 +768,6 @@ fn the_run_takes_the_verdict_and_the_reason_of_the_first_stage_that_did_not_end_
             expected: Reason::PublishUpload
         }
     );
-    // A stage that stopped the run before a later one that also did not end done.
-    let mut report = a_run_that_stopped(Verdict::Refused, Reason::StageUnknown, false);
-    report.stages[0] = ended(Verdict::Failed, Reason::BuildFailed, false);
-    report.stages[0].stage = "build".to_owned();
-    assert_eq!(
-        refused_run(&report),
-        E::RunVerdictDiffers {
-            stated: Verdict::Refused,
-            expected: Verdict::Failed
-        }
-    );
 }
 
 #[test]
@@ -861,11 +894,14 @@ fn every_refusal_reads_as_a_sentence_that_names_what_it_refused() {
         ),
         (
             E::FinishedBeforeStarted {
+                stage: k("pub"),
                 started: 9,
                 finished: 8,
             },
-            "8 ms",
+            "stage 'pub' finished at 8 ms",
         ),
+        (E::StageAfterStop { index: 5 }, "after stage report 5"),
+        (E::PlanDiffers { index: 6 }, "stage report 6"),
         (E::ActionNameEmpty { index: 4 }, "action 4"),
         (E::ActionTwice { name: k("dup") }, "'dup'"),
         (E::ActionVerdictUnspecified { name: k("a1") }, "'a1'"),
@@ -929,4 +965,43 @@ fn every_refusal_reads_as_a_sentence_that_names_what_it_refused() {
     }
     let boxed: Box<dyn std::error::Error> = Box::new(E::NoStages);
     assert_eq!(boxed.to_string(), E::NoStages.to_string());
+}
+
+#[test]
+fn a_stage_that_did_not_end_done_is_the_last_stage_of_the_run() {
+    // A refusal that promises no change, then a later stage that could not tell: the run must
+    // not read as the refusal.
+    let mut report = a_run_that_ended_well();
+    report.stages[0] = ended(Verdict::Refused, Reason::StageUnknown, false);
+    report.stages[1] = StageReport {
+        stage: "publish".to_owned(),
+        ..ended(Verdict::Indeterminate, Reason::CannotTell, false)
+    };
+    report.verdict = Verdict::Refused.into();
+    report.reason = Reason::StageUnknown.into();
+    report.exit_code = 3;
+    report.retry = Retry::NeedsHuman.into();
+    assert_eq!(refused_run(&report), E::StageAfterStop { index: 0 });
+    // Even a stage that ended done does not follow a stop.
+    report.stages[1] = StageReport {
+        stage: "publish".to_owned(),
+        ..stage()
+    };
+    assert_eq!(refused_run(&report), E::StageAfterStop { index: 0 });
+    // The stop is the last stage: accepted.
+    report.stages.swap(0, 1);
+    report.stages[0].stage = "build".to_owned();
+    report.stages[1].stage = "publish".to_owned();
+    assert_eq!(validate_run(&report), Ok(()));
+}
+
+#[test]
+fn every_stage_of_a_run_is_a_dry_run_or_none_is() {
+    let mut report = a_run_that_ended_well();
+    report.stages[1].plan = true;
+    assert_eq!(refused_run(&report), E::PlanDiffers { index: 1 });
+    report.stages[0].plan = true;
+    assert_eq!(validate_run(&report), Ok(()));
+    report.stages[0].plan = false;
+    assert_eq!(refused_run(&report), E::PlanDiffers { index: 1 });
 }

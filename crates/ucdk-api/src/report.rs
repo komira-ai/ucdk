@@ -59,8 +59,12 @@ pub enum ReportError {
     RetryUnspecified,
     /// The retry advice is weaker than the exit class gives.
     RetryWeaker { stated: Retry, default: Retry },
-    /// The run finished before it started.
-    FinishedBeforeStarted { started: u64, finished: u64 },
+    /// The stage finished before it started (both times known).
+    FinishedBeforeStarted {
+        stage: String,
+        started: u64,
+        finished: u64,
+    },
     /// An action without a name.
     ActionNameEmpty { index: usize },
     /// Two actions with one name.
@@ -77,6 +81,11 @@ pub enum ReportError {
     RowUnspecified { action: String, row: String },
     /// A run report without a stage.
     NoStages,
+    /// A stage that did not end done is followed by another stage: the run stops at the first
+    /// failure, so it is the last. `index` is the stage that stopped the run.
+    StageAfterStop { index: usize },
+    /// A stage report is a dry run where the first is not, or the other way round.
+    PlanDiffers { index: usize },
     /// A stage of another run than the report.
     StageRunDiffers { index: usize },
     /// Two stages with one name.
@@ -145,6 +154,7 @@ pub fn validate_stage(report: &StageReport) -> Result<(), ReportError> {
     check_only(&report.only)?;
     if report.finished_at_ms < report.started_at_ms {
         return Err(ReportError::FinishedBeforeStarted {
+            stage: report.stage.clone(),
             started: report.started_at_ms,
             finished: report.finished_at_ms,
         });
@@ -445,9 +455,21 @@ impl fmt::Display for ReportError {
                 f,
                 "retry advice {stated:?} is weaker than {default:?}, the advice of this exit class"
             ),
-            Self::FinishedBeforeStarted { started, finished } => write!(
+            Self::FinishedBeforeStarted {
+                stage,
+                started,
+                finished,
+            } => write!(
                 f,
-                "the run finished at {finished} ms, before it started at {started} ms"
+                "stage '{stage}' finished at {finished} ms, before it started at {started} ms"
+            ),
+            Self::StageAfterStop { index } => write!(
+                f,
+                "a stage follows stage report {index}, which did not end done; a run stops at the first failure"
+            ),
+            Self::PlanDiffers { index } => write!(
+                f,
+                "stage report {index} is a dry run where the first is not, or the other way round"
             ),
             Self::ActionNameEmpty { index } => write!(f, "action {index} has no name"),
             Self::ActionTwice { name } => write!(f, "action '{name}' is listed twice"),
