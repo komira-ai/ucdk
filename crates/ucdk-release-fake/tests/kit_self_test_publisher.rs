@@ -168,6 +168,9 @@ fn own_stubs() -> Vec<(&'static str, Stub)> {
         own(SEALED, Stub::Odd(Odd::DeclaresSealsOnly)),
         own(BURNED, Stub::Flaw(F::BurnedReadsAsAbsent)),
         own(ECHO, Stub::Flaw(F::EchoesTheDeclaredDigest)),
+        own(UNDECLARED, Stub::Flaw(F::UndeclaredNamesAreAccepted)),
+        own(NEVER_TOLD, Stub::Flaw(F::AdmitsWhenNeverTold)),
+        own(PLAIN_NAMES, Stub::Flaw(F::DeclareSkipsValidation)),
         own(DECLARES, Stub::Flaw(F::GrantLimitIsZero)),
     ]
 }
@@ -262,7 +265,10 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
             Stub::Flaw(F::StrangerSeesStaged),
             &[STRANGER_STAGED, PUBLIC_READ],
         ),
-        (Stub::Flaw(F::StageGrantIsBlindToStaged), &[STAGE_GRANT]),
+        (
+            Stub::Flaw(F::StageGrantIsBlindToStaged),
+            &[STAGE_GRANT, UNDECLARED],
+        ),
         (Stub::Flaw(F::CommitGrantIsBlindToStaged), &[COMMIT_GRANT]),
         (
             Stub::Flaw(F::PresentDigestIsWrong),
@@ -276,7 +282,7 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
             Stub::Flaw(F::CommitOverOtherBytesOverwrites),
             &[COMMIT_OVER],
         ),
-        (Stub::Flaw(F::AbortDoesNothing), &[ABORT]),
+        (Stub::Flaw(F::AbortDoesNothing), &[ABORT, UNDECLARED]),
         (Stub::Flaw(F::SetCommitIsTorn), &[SET_COMMIT]),
         (
             Stub::Flaw(F::StagesLies),
@@ -307,6 +313,9 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
                 UNREPRESENTABLE,
                 BURNED,
                 ECHO,
+                UNDECLARED,
+                NEVER_TOLD,
+                PLAIN_NAMES,
                 DECLARES,
             ],
         ),
@@ -371,6 +380,7 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
                 WRITER_READS,
                 VANISHED,
                 ECHO,
+                UNDECLARED,
             ],
         ),
         (
@@ -507,7 +517,10 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
             &[SET_COMMIT, NOT_STAGING],
         ),
         (Stub::More(More::YankAbsentOk), &[YANK]),
-        (Stub::More(More::StageAfterAbortIsDuplicate), &[ABORT]),
+        (
+            Stub::More(More::StageAfterAbortIsDuplicate),
+            &[ABORT, UNDECLARED],
+        ),
         (Stub::Flaw(F::VanishedStateIsCommitted), &[VANISHED]),
         (
             Stub::Flaw(F::RetryWhileBecomingReadableIsPermanent),
@@ -535,6 +548,12 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
         (Stub::Flaw(F::BurnedReadsAsAbsent), &[BURNED]),
         (Stub::Flaw(F::BurnedCommitIsCommitted), &[BURNED]),
         (Stub::Flaw(F::EchoesTheDeclaredDigest), &[ECHO]),
+        (
+            Stub::Flaw(F::UndeclaredNamesAreAccepted),
+            &[UNDECLARED, NEVER_TOLD, PLAIN_NAMES],
+        ),
+        (Stub::Flaw(F::AdmitsWhenNeverTold), &[NEVER_TOLD]),
+        (Stub::Flaw(F::DeclareSkipsValidation), &[PLAIN_NAMES]),
         (Stub::Flaw(F::GrantLimitIsZero), &[DECLARES]),
         (
             Stub::Flaw(F::CommitUnitSaysSet),
@@ -580,11 +599,11 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
         // one coordinate: the others are not applied.
         (
             Stub::More(More::CommitPartialOnRefusal),
-            &[SET_COMMIT, PHASE, UNREPRESENTABLE],
+            &[SET_COMMIT, PHASE, UNREPRESENTABLE, UNDECLARED],
         ),
         (
             Stub::More(More::StagePartialOnRefusal),
-            &[PHASE, UNREPRESENTABLE],
+            &[PHASE, UNREPRESENTABLE, UNDECLARED],
         ),
         (Stub::More(More::YankWidensToTheCommitSet), &[YANK]),
         (Stub::More(More::YankByNamePrefix), &[YANK]),
@@ -734,7 +753,7 @@ fn each_scenario_fails_on_its_nonconforming_stub() {
 #[test]
 fn each_further_publisher_stub_fails_the_scenarios_that_hold_it() {
     let table = every_stub();
-    assert_eq!(table.len(), 419, "the number of stubs of the table");
+    assert_eq!(table.len(), 422, "the number of stubs of the table");
     further_stubs_fail_exactly(
         "publisher",
         &names(&publisher_scenarios::<FakePublisherRig>()),
@@ -840,6 +859,9 @@ fn the_stub_of_each_scenario_a_rig_of_one_call_runs() -> Vec<(&'static str, Stub
         ),
         (BURNED, Stub::Flaw(F::BurnedReadsAsAbsent)),
         (ECHO, Stub::Flaw(F::EchoesTheDeclaredDigest)),
+        (UNDECLARED, Stub::Flaw(F::UndeclaredNamesAreAccepted)),
+        (NEVER_TOLD, Stub::Flaw(F::AdmitsWhenNeverTold)),
+        (PLAIN_NAMES, Stub::Flaw(F::DeclareSkipsValidation)),
         (DECLARES, Stub::Flaw(F::GrantLimitIsZero)),
     ]
 }

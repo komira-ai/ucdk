@@ -1,0 +1,4 @@
+load("@prelude//toolchains:demo.bzl", "system_demo_toolchains")
+
+# The default toolchains of the prelude; the one target of this cell needs only the genrule's.
+system_demo_toolchains()

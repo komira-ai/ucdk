@@ -209,7 +209,7 @@ fn the_verb_runs_the_tests_on_the_pinned_nightly_and_gates_the_lcov_file() {
     assert!(log.contains("rustup toolchain install nightly-2026-10-01 --profile minimal --component llvm-tools-preview"), "{log}");
     assert!(
         log.contains(
-            "cargo +nightly-2026-10-01 llvm-cov --branch --workspace --features ucdk-capi/test-clock --locked --lcov --output-path"
+            "cargo +nightly-2026-10-01 llvm-cov --branch --workspace --no-fail-fast --features ucdk-capi/test-clock --locked --lcov --output-path"
         ),
         "{log}"
     );

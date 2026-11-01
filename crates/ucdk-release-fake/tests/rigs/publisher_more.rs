@@ -9,8 +9,8 @@ use ucdk_release_seams::kit::{
     Arrangement, ChannelShape, Payload, PublisherRig, ReadStep, Sibling, federated_repository,
 };
 use ucdk_release_seams::{
-    Backoff, CommitAnswer, CommitUnit, Grant, ListScope, Listed, Publisher, SeamError, StageAnswer,
-    StageItem, YankUnit,
+    Backoff, CommitAnswer, CommitUnit, DeclareError, Grant, ListScope, Listed, Publisher,
+    SeamError, StageAnswer, StageItem, YankUnit,
 };
 
 use super::publisher::{FakePublisherRig, Flawed};
@@ -512,6 +512,10 @@ impl Publisher for Wrapped {
 
     fn yank_unit(&self) -> YankUnit {
         self.base.yank_unit()
+    }
+
+    fn declare(&mut self, names: &[String]) -> Result<(), DeclareError> {
+        self.base.declare(names)
     }
 
     fn observe(

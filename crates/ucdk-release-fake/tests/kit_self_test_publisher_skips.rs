@@ -54,8 +54,8 @@ fn a_private_channel_addressed_by_group_runs_every_scenario_but_five() {
     ];
     assert_eq!(skipped_with_their_needs(&report), skipped);
     assert_eq!(report.passed(), all_but(&skipped));
-    assert_eq!(report.passed().len(), 41);
-    assert_eq!(report.names().len(), 46);
+    assert_eq!(report.passed().len(), 44);
+    assert_eq!(report.names().len(), 49);
 }
 
 /// A rig of one public channel that stages, is addressed by group, commits a set and yanks a
@@ -76,8 +76,8 @@ fn a_public_channel_addressed_by_group_runs_every_scenario_but_five() {
     ];
     assert_eq!(skipped_with_their_needs(&report), skipped);
     assert_eq!(report.passed(), all_but(&skipped));
-    assert_eq!(report.passed().len(), 41);
-    assert_eq!(report.names().len(), 46);
+    assert_eq!(report.passed().len(), 44);
+    assert_eq!(report.names().len(), 49);
 }
 
 fn nothing(_: &FakePublisherRig) {}

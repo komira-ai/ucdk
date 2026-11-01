@@ -18,6 +18,7 @@ fn a_failed_preflight_observe_that_promises_no_effect_is_refused_not_indetermina
         ObserveFailure::Indeterminate,
         ObserveFailure::Indeterminate,
         ObserveFailure::Indeterminate,
+        ObserveFailure::Refused(Reason::ApprovedNames),
     ];
     let got: Vec<ObserveFailure> = every_variant()
         .iter()
@@ -114,7 +115,14 @@ fn every_variant() -> Vec<SeamError> {
         SeamError::InFlight("staging".to_owned()),
         SeamError::Unknown("no answer".to_owned()),
         SeamError::GrantRefused(GrantFault::Expired),
+        undeclared(),
     ]
+}
+
+fn undeclared() -> SeamError {
+    SeamError::Undeclared {
+        name: "tool".to_owned(),
+    }
 }
 
 #[test]
@@ -123,7 +131,10 @@ fn only_refused_permanent_rate_limited_and_grant_refused_promise_no_effect() {
         .iter()
         .map(SeamError::promises_no_effect)
         .collect();
-    assert_eq!(promised, [true, true, false, true, false, false, true]);
+    assert_eq!(
+        promised,
+        [true, true, false, true, false, false, true, true]
+    );
 }
 
 #[test]
@@ -139,6 +150,7 @@ fn errors_read_as_sentences() {
             "something may be underway: staging",
             "the answer was lost: no answer",
             "the grant was refused (Expired); nothing happened",
+            "the artifact tool is not one the release declared; nothing happened",
         ]
     );
     let boxed: Box<dyn std::error::Error> = Box::new(SeamError::Permanent("x".to_owned()));

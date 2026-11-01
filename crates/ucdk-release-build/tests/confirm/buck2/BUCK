@@ -1,0 +1,6 @@
+# The one target of the confirmation job: a genrule that writes one file.
+genrule(
+    name = "hello",
+    out = "hello.txt",
+    cmd = "echo hello > $OUT",
+)
