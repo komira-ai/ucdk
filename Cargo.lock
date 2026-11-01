@@ -784,6 +784,7 @@ dependencies = [
  "ucdk-core",
  "ucdk-release",
  "ucdk-release-proto",
+ "zeroize",
 ]
 
 [[package]]

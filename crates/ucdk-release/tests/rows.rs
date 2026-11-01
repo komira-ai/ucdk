@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Accounting for the rows of a validation against the rows derived before it read anything.
 
-use ucdk_release::rows::{ExpectedRow, RowFault, account_rows};
+use ucdk_release::rows::{ExpectedRow, RowFault, account_rows, spec_fault};
 use ucdk_release_proto::v1::{Reason, Row, RowState, Verdict};
 
 fn expected(subjects: &[&str]) -> Vec<ExpectedRow> {
@@ -204,5 +204,143 @@ fn a_row_that_did_not_pass_is_never_a_success() {
     assert_eq!(
         run(&[RowPassed, RowPassed, RowPassed]),
         Ok(Verdict::Succeeded)
+    );
+}
+
+fn spec(rows: &[(&str, &str)]) -> Vec<ExpectedRow> {
+    rows.iter().map(|(s, a)| ExpectedRow::new(*s, *a)).collect()
+}
+
+#[test]
+fn a_well_formed_spec_has_no_fault() {
+    assert_eq!(spec_fault(&expected(&["a", "b", "c"])), None);
+    // The same subject under two assertions, or two subjects under one, are different rows.
+    assert_eq!(
+        spec_fault(&spec(&[
+            ("a", "it holds"),
+            ("a", "it is fast"),
+            ("b", "it holds")
+        ])),
+        None
+    );
+}
+
+#[test]
+fn an_empty_spec_is_a_fault() {
+    assert_eq!(spec_fault(&[]), Some(RowFault::NothingDerived));
+}
+
+#[test]
+fn a_blank_subject_is_a_fault_at_its_index() {
+    for blank in ["", " ", "\t\n  "] {
+        assert_eq!(
+            spec_fault(&spec(&[("a", "it holds"), (blank, "it holds")])),
+            Some(RowFault::BlankSubject { index: 1 }),
+            "{blank:?}"
+        );
+    }
+}
+
+#[test]
+fn a_blank_assertion_is_a_fault_naming_its_subject() {
+    for blank in ["", " ", "\t\n  "] {
+        assert_eq!(
+            spec_fault(&spec(&[("a", "it holds"), ("b", blank)])),
+            Some(RowFault::BlankAssertion {
+                index: 1,
+                subject: "b".to_owned()
+            }),
+            "{blank:?}"
+        );
+    }
+}
+
+#[test]
+fn a_repeated_row_name_is_a_fault_at_the_second_one() {
+    assert_eq!(
+        spec_fault(&expected(&["a", "b", "a"])),
+        Some(RowFault::DuplicateSpec {
+            index: 2,
+            name: "a: it holds".to_owned()
+        })
+    );
+}
+
+#[test]
+fn a_blank_is_reported_before_a_repeat() {
+    // The repeat is at index 1, the blank assertion at index 2: the blank still comes first.
+    assert_eq!(
+        spec_fault(&spec(&[("a", "x"), ("a", "x"), ("b", "")])),
+        Some(RowFault::BlankAssertion {
+            index: 2,
+            subject: "b".to_owned()
+        })
+    );
+}
+
+#[test]
+fn accounting_refuses_a_spec_with_a_fault_whatever_the_rows_are() {
+    let blank_subject = spec(&[("a", "it holds"), ("", "it holds")]);
+    let rows = vec![
+        Row {
+            name: blank_subject[0].name(),
+            state: RowState::RowPassed as i32,
+            detail: String::new(),
+        },
+        Row {
+            name: blank_subject[1].name(),
+            state: RowState::RowPassed as i32,
+            detail: String::new(),
+        },
+    ];
+    assert_eq!(
+        account_rows(&blank_subject, &rows),
+        Err(RowFault::BlankSubject { index: 1 })
+    );
+    let blank_assertion = spec(&[("a", "")]);
+    assert_eq!(
+        account_rows(&blank_assertion, &[]),
+        Err(RowFault::BlankAssertion {
+            index: 0,
+            subject: "a".to_owned()
+        })
+    );
+    let repeated = expected(&["a", "a"]);
+    assert_eq!(
+        account_rows(&repeated, &passed(&["a", "a"])),
+        Err(RowFault::DuplicateSpec {
+            index: 1,
+            name: "a: it holds".to_owned()
+        })
+    );
+}
+
+#[test]
+fn a_spec_fault_is_a_row_accounting_reason_and_reads_as_a_sentence() {
+    let faults = [
+        RowFault::BlankSubject { index: 3 },
+        RowFault::BlankAssertion {
+            index: 4,
+            subject: "tool".to_owned(),
+        },
+        RowFault::DuplicateSpec {
+            index: 5,
+            name: "tool: it holds".to_owned(),
+        },
+    ];
+    for fault in &faults {
+        assert_eq!(fault.reason(), Reason::RowAccounting);
+    }
+    assert_eq!(
+        faults[0].to_string(),
+        "derived row 3 has a blank subject, so it names nothing"
+    );
+    assert_eq!(
+        faults[1].to_string(),
+        "derived row 4 (\"tool\") has a blank assertion, so it asserts nothing"
+    );
+    assert_eq!(
+        faults[2].to_string(),
+        "derived row 5 \"tool: it holds\" repeats an earlier derived row"
     );
 }
