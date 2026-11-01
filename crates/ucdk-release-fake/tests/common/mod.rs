@@ -127,7 +127,9 @@ impl World {
 
     /// A world whose registry is told the names the tests publish.
     pub fn with(clock: &ManualClock, mut registry: FakeRegistry) -> Self {
-        let names: Vec<String> = ["a", "ab", "b", "c", "z"].map(str::to_owned).to_vec();
+        let names: Vec<String> = ["a", "ab", "b", "c", "z", "tool", "tool-extra", "other"]
+            .map(str::to_owned)
+            .to_vec();
         registry.declare(&names).expect("plain distinct names");
         Self::told_nothing(clock, registry)
     }

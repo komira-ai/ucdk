@@ -471,6 +471,7 @@ fn an_open_channel_admits_a_write_with_no_grant_and_a_closed_one_does_not() {
     let set = Set::of(&["a"]);
     let blobs = set.blobs();
     let mut open = FakeRegistry::new(&clock, LOCATION).without_staging().open();
+    open.declare(&["a".to_owned()]).expect("a declaration");
     assert_eq!(
         open.commit(&Grant::none(), &set.items(&blobs)),
         Ok(CommitAnswer::Committed)
@@ -806,10 +807,10 @@ mod grouped {
 }
 
 /// The standard coordinate with its name and version replaced.
-fn named(name: &str, version: &str) -> Coordinate {
+fn named(version: &str, platform: &str) -> Coordinate {
     Coordinate {
-        name: name.to_owned(),
         version: version.to_owned(),
+        platform: platform.to_owned(),
         ..coordinate("a")
     }
 }
