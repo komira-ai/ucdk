@@ -12,6 +12,7 @@
 //! - [`set_document`] and [`store`]: the stored set and the keys of a generation;
 //!   [`verify`] checks a member and the keys of a generation over an in-memory tree, reading
 //!   an OCI image layout where the member is an image.
+//! - [`identity`]: the comparison of the digests two sides expose for a file, field by field.
 //! - [`publish`] and [`supersede`]: the decision to put one coordinate, from what a registry
 //!   reports of it, and the decision to stand down for a newer build.
 //! - [`codec`] and [`transitions`]: the records a ledger holds, and which events move a record
@@ -30,6 +31,7 @@ pub mod closure;
 pub mod codec;
 pub mod flags;
 pub mod hashes;
+pub mod identity;
 pub mod invocation;
 pub mod listing;
 pub mod machine;
