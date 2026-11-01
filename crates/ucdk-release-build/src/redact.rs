@@ -31,74 +31,56 @@
 /// diagnosis made wrongly.
 pub const REDACTED: &str = "[REDACTED]";
 
-/// A name whose value is a secret.
-struct Key {
-    name: &'static str,
-    /// Matches only at the start of a word, so that `design=` is not `sig=`.
-    whole_word: bool,
-    /// The value may be preceded by an authentication scheme, which is kept.
-    scheme: bool,
-    /// The value follows the name after spaces or tabs alone, as `Bearer <value>` does.
-    bare: bool,
+/// How the value of a name is found.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// The value follows `=` or `:`, or a flag's spaces.
+    Plain,
+    /// As `Plain`, and the name matches only at the start of a word, so that `design=` is not
+    /// `sig=`.
+    Word,
+    /// As `Plain`, and the value may be preceded by an authentication scheme, which is kept.
+    Scheme,
+    /// The value may follow the name after spaces or tabs alone, as `Bearer <value>` does.
+    Bare,
 }
 
-const fn key(name: &'static str) -> Key {
-    Key {
-        name,
-        whole_word: false,
-        scheme: false,
-        bare: false,
-    }
-}
-
-const fn word(name: &'static str) -> Key {
-    Key {
-        whole_word: true,
-        ..key(name)
-    }
-}
-
-const KEYS: [Key; 13] = [
-    Key {
-        bare: true,
-        ..key("bearer")
-    },
-    Key {
-        scheme: true,
-        ..key("authorization")
-    },
-    key("token"),
-    key("password"),
-    key("passwd"),
-    key("secret"),
-    key("api_key"),
-    key("api-key"),
-    key("apikey"),
-    key("signature"),
-    key("credential"),
-    word("sig"),
-    word("auth"),
+/// The names whose value is a secret.
+const KEYS: [(&str, Kind); 13] = [
+    ("bearer", Kind::Bare),
+    ("authorization", Kind::Scheme),
+    ("token", Kind::Plain),
+    ("password", Kind::Plain),
+    ("passwd", Kind::Plain),
+    ("secret", Kind::Plain),
+    ("api_key", Kind::Plain),
+    ("api-key", Kind::Plain),
+    ("apikey", Kind::Plain),
+    ("signature", Kind::Plain),
+    ("credential", Kind::Plain),
+    ("sig", Kind::Word),
+    ("auth", Kind::Word),
 ];
 
 /// `text` with the credential-shaped runs replaced by [`REDACTED`].
 pub fn redact(text: &str) -> String {
     let mut out = text.to_owned();
-    for key in &KEYS {
-        out = redact_key(&out, key);
+    for (name, kind) in KEYS {
+        out = redact_key(&out, name, kind);
     }
     redact_userinfo(&out)
 }
 
-/// Replaces the value of each occurrence of `key` (see [`value_span`]) with [`REDACTED`], unless
+/// Replaces the value of each occurrence of `name` (see [`value_span`]) with [`REDACTED`], unless
 /// it is empty. Every cut is at an ASCII byte, so the text stays valid.
-fn redact_key(text: &str, key: &Key) -> String {
-    let (bytes, name) = (text.as_bytes(), key.name.as_bytes());
+fn redact_key(text: &str, name: &str, kind: Kind) -> String {
+    let (bytes, name) = (text.as_bytes(), name.as_bytes());
     let mut out = String::with_capacity(text.len());
     let (mut at, mut copied) = (0, 0);
     while at + name.len() <= bytes.len() {
         let named = bytes[at..at + name.len()].eq_ignore_ascii_case(name);
         let span = if named {
-            value_span(bytes, at, key)
+            value_span(bytes, at, name.len(), kind)
         } else {
             None
         };
@@ -116,26 +98,26 @@ fn redact_key(text: &str, key: &Key) -> String {
     out
 }
 
-/// The span of the value of the `key` that stands at `at`, if what follows the name is a value.
-fn value_span(bytes: &[u8], at: usize, key: &Key) -> Option<(usize, usize)> {
-    if key.whole_word && at > 0 && bytes[at - 1].is_ascii_alphanumeric() {
+/// The span of the value of the name that stands at `at`, if what follows the name is a value.
+fn value_span(bytes: &[u8], at: usize, name_len: usize, kind: Kind) -> Option<(usize, usize)> {
+    if kind == Kind::Word && at > 0 && bytes[at - 1].is_ascii_alphanumeric() {
         return None;
     }
-    let name_end = at + key.name.len();
+    let name_end = at + name_len;
     let quoted_name = usize::from(matches!(bytes.get(name_end), Some(b'"' | b'\'')));
     let blanks = skip_blanks(bytes, name_end + quoted_name);
     let start = match separator(&bytes[blanks..]) {
         Some(len) => skip_blanks(bytes, blanks + len),
         None if blanks > name_end
             && bytes.get(blanks) != Some(&b'-')
-            && (key.bare || in_flag(bytes, at)) =>
+            && (kind == Kind::Bare || in_flag(bytes, at)) =>
         {
             blanks
         }
         None => return None,
     };
     let (first, end) = run(bytes, start);
-    if key.scheme
+    if kind == Kind::Scheme
         && SCHEMES
             .iter()
             .any(|s| bytes[first..end].eq_ignore_ascii_case(s))
