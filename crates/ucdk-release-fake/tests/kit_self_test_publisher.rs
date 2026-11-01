@@ -308,6 +308,7 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
                 UNREPRESENTABLE,
                 BURNED,
                 ECHO,
+                UNDECLARED,
                 DECLARES,
             ],
         ),
@@ -582,11 +583,11 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
         // one coordinate: the others are not applied.
         (
             Stub::More(More::CommitPartialOnRefusal),
-            &[SET_COMMIT, PHASE, UNREPRESENTABLE],
+            &[SET_COMMIT, PHASE, UNREPRESENTABLE, UNDECLARED],
         ),
         (
             Stub::More(More::StagePartialOnRefusal),
-            &[PHASE, UNREPRESENTABLE],
+            &[PHASE, UNREPRESENTABLE, UNDECLARED],
         ),
         (Stub::More(More::YankWidensToTheCommitSet), &[YANK]),
         (Stub::More(More::YankByNamePrefix), &[YANK]),

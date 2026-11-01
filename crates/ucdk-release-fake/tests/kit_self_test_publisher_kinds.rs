@@ -261,6 +261,7 @@ fn fetches() -> Vec<Row> {
                 DUPLICATE_SET,
                 VANISHED,
                 BECOMING,
+                UNDECLARED,
             ],
         ),
         (
@@ -281,6 +282,7 @@ fn fetches() -> Vec<Row> {
                 VANISHED,
                 BECOMING,
                 ECHO,
+                UNDECLARED,
             ],
         ),
         (
@@ -297,6 +299,7 @@ fn fetches() -> Vec<Row> {
                 NOT_STAGING,
                 BECOMING,
                 ECHO,
+                UNDECLARED,
             ],
         ),
         (
