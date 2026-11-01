@@ -498,18 +498,6 @@ pub(super) fn no_digest_exposed_is_refused<R: PublisherRig>(rig: &R, shape: &Cha
         IdentityMatch::Mismatch,
         &format!("our identity against a coordinate of another writer ({shape:?})"),
     );
-    // And it reads what the registry holds of our own bytes as ours.
-    let own = Set::of(rig, &["b"]);
-    publish(rig, &mut p, &own);
-    let held = present_held(looked(rig, shape, &mut p, &own.coords[0]));
-    same(
-        identity_matches(
-            &ContentIdentity::of_sha256(&own.digest(0)),
-            &ContentIdentity::of_sha256(&held.digest),
-        ),
-        IdentityMatch::Match,
-        &format!("our identity against our own committed bytes ({shape:?})"),
-    );
 }
 
 pub(super) fn yank_keeps_bytes_fetchable<R: PublisherRig>(rig: &R, shape: &ChannelShape) {

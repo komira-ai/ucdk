@@ -4,6 +4,7 @@
 pub use ucdk_release_proto::v1::Held;
 use ucdk_release_proto::v1::Reason;
 
+use crate::identity::{ContentIdentity, IdentityMatch, identity_matches};
 use crate::transitions::Stand;
 
 /// What a registry reports for a coordinate, to an observer that carries a grant.
@@ -53,14 +54,14 @@ pub fn decide_publish(ours: &str, presence: &Presence) -> PublishDecision {
         Presence::Yanked(_) => PublishDecision::Refused(Reason::PublishYanked),
         Presence::Burned => PublishDecision::Refused(Reason::PublishBurned),
         Presence::Staged(held) | Presence::Present(held) => {
-            if held.digest.is_empty() {
-                PublishDecision::Refused(Reason::Channel)
-            } else if held.digest != ours {
-                PublishDecision::Refused(Reason::PublishDifferentBytes)
-            } else if matches!(presence, Presence::Staged(_)) {
-                PublishDecision::AlreadyStaged
-            } else {
-                PublishDecision::AlreadyPresent
+            let theirs = ContentIdentity::of_sha256(&held.digest);
+            match identity_matches(&ContentIdentity::of_sha256(ours), &theirs) {
+                IdentityMatch::NoCommonField => PublishDecision::Refused(Reason::Channel),
+                IdentityMatch::Mismatch => PublishDecision::Refused(Reason::PublishDifferentBytes),
+                IdentityMatch::Match if matches!(presence, Presence::Staged(_)) => {
+                    PublishDecision::AlreadyStaged
+                }
+                IdentityMatch::Match => PublishDecision::AlreadyPresent,
             }
         }
     }

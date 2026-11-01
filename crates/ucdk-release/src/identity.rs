@@ -81,6 +81,24 @@ pub enum IdentityMatch {
 
 /// Compares two identities field by field. A field exposed on one side only is ignored: it is a
 /// witness one side holds beside the other's, not a difference.
-pub fn identity_matches(_ours: &ContentIdentity, _theirs: &ContentIdentity) -> IdentityMatch {
-    IdentityMatch::Match
+pub fn identity_matches(ours: &ContentIdentity, theirs: &ContentIdentity) -> IdentityMatch {
+    let fields = [
+        (&ours.sha256, &theirs.sha256),
+        (&ours.sha512, &theirs.sha512),
+        (&ours.sha1, &theirs.sha1),
+    ];
+    let mut compared = false;
+    for (a, b) in fields {
+        if let (Some(a), Some(b)) = (a, b) {
+            if a != b {
+                return IdentityMatch::Mismatch;
+            }
+            compared = true;
+        }
+    }
+    if compared {
+        IdentityMatch::Match
+    } else {
+        IdentityMatch::NoCommonField
+    }
 }
