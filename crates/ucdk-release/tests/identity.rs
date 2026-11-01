@@ -157,3 +157,28 @@ fn the_sri_field_is_base64_and_is_compared_exactly() {
     assert_eq!(identity_matches(&ours, &folded), Mismatch);
     assert_eq!(identity_matches(&ours, &ours), Match);
 }
+
+#[test]
+fn the_sri_text_is_opaque_and_a_blank_value_is_exposed() {
+    // A sha384 SRI in the sha512 field is compared as text, not parsed.
+    let sri384 = ContentIdentity::none().with_sha512("sha384-AAAA");
+    assert_eq!(identity_matches(&sri384, &sri384.clone()), Match);
+    assert_eq!(
+        identity_matches(&sri384, &ContentIdentity::none().with_sha512(SRI)),
+        Mismatch
+    );
+    // Only "" is not exposed: a space is exposed and is not any digest.
+    let blank = ContentIdentity::of_sha256(" ");
+    assert!(!blank.exposes_nothing());
+    assert_eq!(
+        identity_matches(&blank, &ContentIdentity::of_sha256(SHA256)),
+        Mismatch
+    );
+}
+
+#[test]
+fn a_shared_sha1_alone_is_a_match() {
+    let ours = all(SHA256, SRI, SHA1);
+    let theirs = ContentIdentity::none().with_sha1(SHA1);
+    assert_eq!(identity_matches(&ours, &theirs), Match);
+}

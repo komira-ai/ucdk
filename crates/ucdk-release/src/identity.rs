@@ -12,8 +12,15 @@
 //! empty intersection "no difference found" would let a registry that exposes nothing we compute
 //! read as holding our bytes for ever.
 //!
-//! Every field is compared byte for byte, a hex field included, as [`crate::publish`] compares
-//! the identity digest.
+//! The hex fields (sha256 and sha1) are read without regard to letter case: they are stored in
+//! lower case, so `ABC...` and `abc...` are the same digest. The sha512 field is an SRI string,
+//! compared whole, byte for byte and as opaque text, because base64 is case-sensitive: a
+//! multi-hash value, a `sha384-` prefix, padding or malformed text is not parsed, and the same
+//! text with another letter case is another value.
+//!
+//! Only the empty string means "not exposed", so a value of a single space is exposed and differs
+//! from any real digest. A sha1 shared on its own is a [`IdentityMatch::Match`]: this module sets
+//! no policy against a weak hash, and refusing one would be a change of design.
 
 /// The digests one side exposes for a file. A field that is `None` is not exposed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -36,10 +43,11 @@ impl ContentIdentity {
         Self::none().with_sha256(hex)
     }
 
-    /// This identity with its sha256 set to `hex`, or not exposed if `hex` is empty.
+    /// This identity with its sha256 set to `hex` (kept in lower case), or not exposed if `hex` is
+    /// empty.
     #[must_use]
     pub fn with_sha256(mut self, hex: &str) -> Self {
-        self.sha256 = exposed(hex);
+        self.sha256 = exposed(&hex.to_ascii_lowercase());
         self
     }
 
@@ -51,10 +59,11 @@ impl ContentIdentity {
         self
     }
 
-    /// This identity with its sha1 set to `hex`, or not exposed if `hex` is empty.
+    /// This identity with its sha1 set to `hex` (kept in lower case), or not exposed if `hex` is
+    /// empty.
     #[must_use]
     pub fn with_sha1(mut self, hex: &str) -> Self {
-        self.sha1 = exposed(hex);
+        self.sha1 = exposed(&hex.to_ascii_lowercase());
         self
     }
 

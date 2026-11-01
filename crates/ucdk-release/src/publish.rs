@@ -40,7 +40,7 @@ pub enum PublishDecision {
 }
 
 /// Decides the coordinate whose bytes have the identity digest `ours`, given what the registry
-/// reports. Digests are compared byte for byte. A held coordinate, staged or published, that
+/// reports. The digest is a hex string compared without regard to letter case (see [`crate::identity`]). A held coordinate, staged or published, that
 /// exposes no digest cannot be compared, and a comparison with no common field is a refusal,
 /// never equality (`CHANNEL`). A yanked coordinate is refused whatever its bytes, and a burned
 /// one is refused with `PUBLISH_BURNED`: it is never put, never retried and never read as absent.

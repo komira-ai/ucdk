@@ -115,6 +115,18 @@ fn a_hex_digest_differing_only_in_case_is_the_same_digest_and_a_prefix_is_not() 
 }
 
 #[test]
+fn an_empty_digest_of_ours_has_no_common_field_with_a_held_one() {
+    // Nothing of ours is exposed, so nothing is compared: the channel is refused, not read as
+    // other bytes.
+    for make in [Presence::Present, Presence::Staged] {
+        assert_eq!(
+            decide_publish("", &make(held(OURS))),
+            Refused(Reason::Channel)
+        );
+    }
+}
+
+#[test]
 fn only_what_is_published_counts_as_already_present() {
     // Our bytes staged are not published: the commit is still to be made.
     assert_eq!(
