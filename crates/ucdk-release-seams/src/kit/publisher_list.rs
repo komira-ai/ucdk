@@ -387,6 +387,20 @@ pub fn publisher_scenarios<R: PublisherRig>() -> Vec<Scenario<R>> {
             },
         )
         .gated(needs_a_channel::<R>),
+        Scenario::new("a_publisher_never_told_any_names_refuses", |rig| {
+            on_each_shape(rig, declared::a_publisher_never_told_any_names_refuses::<R>);
+        })
+        .gated(needs_a_channel::<R>),
+        Scenario::new(
+            "a_declaration_that_is_not_plain_distinct_names_is_refused_and_changes_nothing",
+            |rig| {
+                on_each_shape(
+                    rig,
+                    declared::a_declaration_that_is_not_plain_distinct_names_is_refused_and_changes_nothing::<R>,
+                );
+            },
+        )
+        .gated(needs_a_channel::<R>),
         Scenario::new(
             "the_declarations_of_a_rig_hold_of_what_it_builds",
             shapes::the_declarations_of_a_rig_hold_of_what_it_builds::<R>,

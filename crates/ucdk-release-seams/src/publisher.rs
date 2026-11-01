@@ -8,7 +8,7 @@
 use ucdk_release::publish::{Held, Presence};
 use ucdk_release_proto::v1::{ArtifactType, Coordinate};
 
-use crate::{Grant, SeamError};
+use crate::{DeclareError, Grant, SeamError};
 
 /// The bytes of one member, under the name the manifest gives them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,7 +139,7 @@ pub trait Publisher: Send {
     /// case-insensitively, an empty list declares nothing and so admits nothing, and a second
     /// call replaces the first. A publisher that was never told holds no declaration to compare
     /// with.
-    fn declare(&mut self, names: &[String]);
+    fn declare(&mut self, names: &[String]) -> Result<(), DeclareError>;
 
     /// Creates the staged state, atomically and only where the coordinate is neither held nor
     /// staged. A name the release did not declare (see `declare`) is refused with

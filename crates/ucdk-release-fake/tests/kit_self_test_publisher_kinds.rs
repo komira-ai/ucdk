@@ -262,6 +262,7 @@ fn fetches() -> Vec<Row> {
                 VANISHED,
                 BECOMING,
                 UNDECLARED,
+                PLAIN_NAMES,
             ],
         ),
         (
@@ -283,6 +284,7 @@ fn fetches() -> Vec<Row> {
                 BECOMING,
                 ECHO,
                 UNDECLARED,
+                PLAIN_NAMES,
             ],
         ),
         (
@@ -300,6 +302,7 @@ fn fetches() -> Vec<Row> {
                 BECOMING,
                 ECHO,
                 UNDECLARED,
+                PLAIN_NAMES,
             ],
         ),
         (

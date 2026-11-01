@@ -169,6 +169,8 @@ fn own_stubs() -> Vec<(&'static str, Stub)> {
         own(BURNED, Stub::Flaw(F::BurnedReadsAsAbsent)),
         own(ECHO, Stub::Flaw(F::EchoesTheDeclaredDigest)),
         own(UNDECLARED, Stub::Flaw(F::UndeclaredNamesAreAccepted)),
+        own(NEVER_TOLD, Stub::Flaw(F::AdmitsWhenNeverTold)),
+        own(PLAIN_NAMES, Stub::Flaw(F::DeclareSkipsValidation)),
         own(DECLARES, Stub::Flaw(F::GrantLimitIsZero)),
     ]
 }
@@ -309,6 +311,8 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
                 BURNED,
                 ECHO,
                 UNDECLARED,
+                NEVER_TOLD,
+                PLAIN_NAMES,
                 DECLARES,
             ],
         ),
@@ -537,7 +541,12 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
         (Stub::Flaw(F::BurnedReadsAsAbsent), &[BURNED]),
         (Stub::Flaw(F::BurnedCommitIsCommitted), &[BURNED]),
         (Stub::Flaw(F::EchoesTheDeclaredDigest), &[ECHO]),
-        (Stub::Flaw(F::UndeclaredNamesAreAccepted), &[UNDECLARED]),
+        (
+            Stub::Flaw(F::UndeclaredNamesAreAccepted),
+            &[UNDECLARED, NEVER_TOLD, PLAIN_NAMES],
+        ),
+        (Stub::Flaw(F::AdmitsWhenNeverTold), &[NEVER_TOLD]),
+        (Stub::Flaw(F::DeclareSkipsValidation), &[PLAIN_NAMES]),
         (Stub::Flaw(F::GrantLimitIsZero), &[DECLARES]),
         (
             Stub::Flaw(F::CommitUnitSaysSet),
@@ -737,7 +746,7 @@ fn each_scenario_fails_on_its_nonconforming_stub() {
 #[test]
 fn each_further_publisher_stub_fails_the_scenarios_that_hold_it() {
     let table = every_stub();
-    assert_eq!(table.len(), 420, "the number of stubs of the table");
+    assert_eq!(table.len(), 422, "the number of stubs of the table");
     further_stubs_fail_exactly(
         "publisher",
         &names(&publisher_scenarios::<FakePublisherRig>()),
@@ -844,6 +853,8 @@ fn the_stub_of_each_scenario_a_rig_of_one_call_runs() -> Vec<(&'static str, Stub
         (BURNED, Stub::Flaw(F::BurnedReadsAsAbsent)),
         (ECHO, Stub::Flaw(F::EchoesTheDeclaredDigest)),
         (UNDECLARED, Stub::Flaw(F::UndeclaredNamesAreAccepted)),
+        (NEVER_TOLD, Stub::Flaw(F::AdmitsWhenNeverTold)),
+        (PLAIN_NAMES, Stub::Flaw(F::DeclareSkipsValidation)),
         (DECLARES, Stub::Flaw(F::GrantLimitIsZero)),
     ]
 }

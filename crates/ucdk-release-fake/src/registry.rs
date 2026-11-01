@@ -11,8 +11,8 @@ use ucdk_release::codec::GrantFault;
 use ucdk_release::publish::{Held, Presence};
 use ucdk_release_proto::v1::{ArtifactType, Coordinate, Reason};
 use ucdk_release_seams::{
-    Backoff, CommitAnswer, CommitUnit, Grant, ListScope, Listed, Publisher, SeamError, StageAnswer,
-    StageItem, YankUnit,
+    Backoff, CommitAnswer, CommitUnit, DeclareError, Grant, ListScope, Listed, Publisher,
+    SeamError, StageAnswer, StageItem, YankUnit, check_declaration,
 };
 
 use crate::token::{coordinate_key, decode};
@@ -589,8 +589,10 @@ impl Publisher for FakeRegistry {
         })
     }
 
-    fn declare(&mut self, names: &[String]) {
+    fn declare(&mut self, names: &[String]) -> Result<(), DeclareError> {
+        check_declaration(names)?;
         self.declared = Some(names.iter().map(|n| n.to_ascii_lowercase()).collect());
+        Ok(())
     }
 
     fn stage(&mut self, g: &Grant, items: &[StageItem<'_>]) -> Result<StageAnswer, SeamError> {

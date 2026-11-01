@@ -13,7 +13,8 @@ use ucdk_release::publish::{Held, Presence};
 use ucdk_release_fake::{FakeRegistry, Read, Scopes};
 use ucdk_release_proto::v1::{ArtifactType, Coordinate, Reason};
 use ucdk_release_seams::{
-    Blob, CommitAnswer, CommitUnit, Grant, ListScope, Publisher, SeamError, StageAnswer, StageItem,
+    Blob, CommitAnswer, CommitUnit, DeclareError, Grant, ListScope, Publisher, SeamError,
+    StageAnswer, StageItem,
 };
 
 fn sha(bytes: &[u8]) -> String {
@@ -1003,7 +1004,9 @@ fn undeclared(name: &str) -> SeamError {
 #[test]
 fn an_artifact_of_an_undeclared_name_is_refused_by_stage_and_commit_naming_it() {
     let mut w = World::new();
-    w.registry.declare(&["a".to_owned()]);
+    w.registry
+        .declare(&["a".to_owned()])
+        .expect("a declaration");
     let z = Set::of(&["z"]);
     assert_eq!(stage_of(&mut w, &z), Err(undeclared("z")));
     assert_eq!(commit(&mut w, &z), Err(undeclared("z")));
@@ -1014,7 +1017,9 @@ fn an_artifact_of_an_undeclared_name_is_refused_by_stage_and_commit_naming_it() 
 #[test]
 fn a_set_with_one_undeclared_member_is_refused_whole() {
     let mut w = World::new();
-    w.registry.declare(&["a".to_owned()]);
+    w.registry
+        .declare(&["a".to_owned()])
+        .expect("a declaration");
     let both = Set::of(&["a", "z"]);
     assert_eq!(stage_of(&mut w, &both), Err(undeclared("z")));
     assert_eq!(commit(&mut w, &both), Err(undeclared("z")));
@@ -1027,19 +1032,54 @@ fn a_set_with_one_undeclared_member_is_refused_whole() {
 #[test]
 fn declared_names_compare_ignoring_ascii_case_and_an_empty_declaration_admits_nothing() {
     let mut w = World::new();
-    w.registry.declare(&["A".to_owned()]);
+    w.registry
+        .declare(&["A".to_owned()])
+        .expect("a declaration");
     let a = Set::of(&["a"]);
     assert_eq!(stage_of(&mut w, &a), Ok(StageAnswer::Staged));
-    w.registry.declare(&[]);
+    w.registry.declare(&[]).expect("a declaration");
     assert_eq!(commit(&mut w, &a), Err(undeclared("a")));
-    w.registry.declare(&["a".to_owned()]);
+    w.registry
+        .declare(&["a".to_owned()])
+        .expect("a declaration");
     assert_eq!(commit(&mut w, &a), Ok(CommitAnswer::Committed));
 }
 
 #[test]
-fn a_registry_that_was_never_told_the_declared_names_admits_any() {
-    let mut w = World::new();
+fn a_registry_that_was_never_told_the_declared_names_refuses_every_stage_and_commit() {
+    let clock = ManualClock::at(1_000_000);
+    let mut w = World::told_nothing(&clock, FakeRegistry::new(&clock, LOCATION));
     let z = Set::of(&["z"]);
-    assert_eq!(stage_of(&mut w, &z), Ok(StageAnswer::Staged));
-    assert_eq!(commit(&mut w, &z), Ok(CommitAnswer::Committed));
+    assert_eq!(stage_of(&mut w, &z), Err(undeclared("z")));
+    assert_eq!(commit(&mut w, &z), Err(undeclared("z")));
+    assert_eq!(w.registry.bytes(&z.coords[0]), None);
+}
+
+#[test]
+fn a_declaration_that_is_not_plain_distinct_names_is_refused_naming_the_entry() {
+    let mut registry = FakeRegistry::new(&ManualClock::at(1), LOCATION);
+    let list = |names: &[&str]| names.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
+    assert_eq!(
+        registry.declare(&list(&["a", ""])),
+        Err(DeclareError::Empty { index: 1 })
+    );
+    assert_eq!(
+        registry.declare(&list(&["a b"])),
+        Err(DeclareError::Whitespace {
+            name: "a b".to_owned()
+        })
+    );
+    assert_eq!(
+        registry.declare(&list(&["a/b"])),
+        Err(DeclareError::Slash {
+            name: "a/b".to_owned()
+        })
+    );
+    assert_eq!(
+        registry.declare(&list(&["a", "A"])),
+        Err(DeclareError::Duplicate {
+            name: "A".to_owned()
+        })
+    );
+    assert_eq!(registry.declare(&list(&["a", "b"])), Ok(()));
 }

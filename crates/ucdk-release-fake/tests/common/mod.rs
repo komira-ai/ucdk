@@ -14,7 +14,7 @@ use ucdk_release_proto::v1::push_identity::Kind;
 use ucdk_release_proto::v1::{
     ArtifactType, Coordinate, Federated, PushIdentity, Repository, Stamped, Visibility,
 };
-use ucdk_release_seams::{Blob, Grant, GrantRequest, GrantSource, StageItem};
+use ucdk_release_seams::{Blob, Grant, GrantRequest, GrantSource, Publisher, StageItem};
 
 pub const LOCATION: &str = "registry/files";
 
@@ -125,7 +125,15 @@ impl World {
         Self::with(&clock, FakeRegistry::new(&clock, LOCATION))
     }
 
-    pub fn with(clock: &ManualClock, registry: FakeRegistry) -> Self {
+    /// A world whose registry is told the names the tests publish.
+    pub fn with(clock: &ManualClock, mut registry: FakeRegistry) -> Self {
+        let names: Vec<String> = ["a", "ab", "b", "c", "z"].map(str::to_owned).to_vec();
+        registry.declare(&names).expect("plain distinct names");
+        Self::told_nothing(clock, registry)
+    }
+
+    /// A world whose registry is exactly as it was given: never told any names.
+    pub fn told_nothing(clock: &ManualClock, registry: FakeRegistry) -> Self {
         Self {
             clock: clock.clone(),
             registry,
