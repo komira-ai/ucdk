@@ -4,6 +4,11 @@
 
 use ucdk_release_build::{REDACTED, redact};
 
+/// A URL built at run time, so that a sample with userinfo is not a literal URL in the source.
+fn url(scheme: &str, rest: &str) -> String {
+    format!("{scheme}://{rest}")
+}
+
 fn same(text: &str) {
     assert_eq!(redact(text), text);
 }
@@ -55,8 +60,8 @@ fn every_secret_parameter_name_is_replaced() {
         "X-Amz-Credential",
     ] {
         assert_eq!(
-            redact(&format!("https://h.example/p?{key}=PLACEHOLDER-1&n=1")),
-            format!("https://h.example/p?{key}={REDACTED}&n=1"),
+            redact(&format!("https://h.example.com/p?{key}=PLACEHOLDER-1&n=1")),
+            format!("https://h.example.com/p?{key}={REDACTED}&n=1"),
             "{key}"
         );
     }
@@ -96,7 +101,7 @@ fn a_secret_member_of_a_json_object_is_replaced() {
 
 #[test]
 fn a_secret_inside_an_error_body_is_replaced() {
-    let body = r#"{"error":{"code":"invalid_request","message":"bad url https://h.example/p?access_token=PLACEHOLDER-1 for Bearer PLACEHOLDER-2"}}"#;
+    let body = r#"{"error":{"code":"invalid_request","message":"bad url https://h.example.com/p?access_token=PLACEHOLDER-1 for Bearer PLACEHOLDER-2"}}"#;
     let out = redact(body);
     assert!(!out.contains("PLACEHOLDER"), "{out}");
     assert!(out.contains(r#""code":"invalid_request""#), "{out}");
@@ -105,30 +110,41 @@ fn a_secret_inside_an_error_body_is_replaced() {
 #[test]
 fn the_userinfo_of_a_url_is_replaced() {
     assert_eq!(
-        redact("fetch https://user:PLACEHOLDER-1@host.example/p failed"),
-        "fetch https://[REDACTED]@host.example/p failed"
+        redact(&format!(
+            "fetch {} failed",
+            url("https", "user:PLACEHOLDER-1@host.example.com/p")
+        )),
+        format!(
+            "fetch {} failed",
+            url("https", "[REDACTED]@host.example.com/p")
+        )
     );
     assert_eq!(
-        redact("git clone ssh://PLACEHOLDER-1@host.example:22/r"),
-        "git clone ssh://[REDACTED]@host.example:22/r"
+        redact(&url("ssh", "PLACEHOLDER-1@host.example.com:22/r")),
+        url("ssh", "[REDACTED]@host.example.com:22/r")
     );
 }
 
 #[test]
 fn an_at_sign_outside_the_authority_of_a_url_is_left_alone() {
-    same("https://host.example/a@b");
-    same("https://host.example/?e=a@b");
-    same("https://host.example#a@b");
-    same("mail me@host.example about https://host.example");
+    same("https://host.example.com/a@b");
+    same("https://host.example.com/?e=a@b");
+    same("https://host.example.com#a@b");
+    same("mail me@host.example.com about https://host.example.com");
 }
 
 #[test]
 fn every_url_of_a_text_is_checked() {
+    let first = url("https", "a:PLACEHOLDER-1@x.example.com");
+    let plain = url("https", "y.example.com");
+    let last = url("https", "b:PLACEHOLDER-2@z.example.com");
     assert_eq!(
-        redact(
-            "https://a:PLACEHOLDER-1@x.example https://y.example https://b:PLACEHOLDER-2@z.example"
-        ),
-        "https://[REDACTED]@x.example https://y.example https://[REDACTED]@z.example"
+        redact(&format!("{first} {plain} {last}")),
+        format!(
+            "{} {plain} {}",
+            url("https", "[REDACTED]@x.example.com"),
+            url("https", "[REDACTED]@z.example.com")
+        )
     );
 }
 
@@ -159,7 +175,10 @@ fn text_that_is_not_ascii_is_kept_whole() {
 
 #[test]
 fn redacting_twice_changes_nothing() {
-    let once =
-        redact("Bearer PLACEHOLDER-1 https://u:PLACEHOLDER-2@h.example/?token=PLACEHOLDER-3");
+    let text = format!(
+        "Bearer PLACEHOLDER-1 {}?token=PLACEHOLDER-3",
+        url("https", "u:PLACEHOLDER-2@h.example.com/")
+    );
+    let once = redact(&text);
     assert_eq!(redact(&once), once);
 }
