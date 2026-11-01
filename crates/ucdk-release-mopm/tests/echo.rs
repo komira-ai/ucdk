@@ -141,3 +141,9 @@ fn a_message_that_does_not_echo_is_kept() {
     let message = "connection reset by peer".to_owned();
     assert_eq!(withhold_if_echoes(message.clone(), &auth()), message);
 }
+
+#[test]
+fn a_credential_under_four_bytes_is_never_matched() {
+    let auth = Secret::new(b"abc".to_vec());
+    assert!(!echoes_credential(b"the value abc was refused", &auth));
+}
