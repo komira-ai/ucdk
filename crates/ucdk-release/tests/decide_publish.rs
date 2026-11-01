@@ -97,18 +97,20 @@ fn a_burned_coordinate_is_refused_as_burned_and_is_not_absent() {
 }
 
 #[test]
-fn the_comparison_is_byte_for_byte() {
-    // No case folding and no prefix: a digest that differs in any byte is another digest, for a
-    // published coordinate and for a staged one.
+fn a_hex_digest_differing_only_in_case_is_the_same_digest_and_a_prefix_is_not() {
+    // Hex digits are read without regard to case, so a registry that reports upper-case hex holds
+    // the same bytes; a prefix is another digest. This holds for a published coordinate and for a
+    // staged one.
     let upper = OURS.to_uppercase();
-    for make in [Presence::Present, Presence::Staged] {
-        for other in [upper.as_str(), &OURS[..63]] {
-            assert_eq!(
-                decide_publish(OURS, &make(held(other))),
-                Refused(Reason::PublishDifferentBytes),
-                "{other}"
-            );
-        }
+    for (make, same) in [
+        (Presence::Present as fn(Held) -> Presence, AlreadyPresent),
+        (Presence::Staged, AlreadyStaged),
+    ] {
+        assert_eq!(decide_publish(OURS, &make(held(&upper))), same);
+        assert_eq!(
+            decide_publish(OURS, &make(held(&OURS[..63]))),
+            Refused(Reason::PublishDifferentBytes)
+        );
     }
 }
 

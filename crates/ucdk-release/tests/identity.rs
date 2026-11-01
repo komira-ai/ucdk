@@ -124,8 +124,36 @@ fn one_differing_common_field_is_a_mismatch_even_when_the_others_agree() {
 }
 
 #[test]
-fn fields_are_compared_byte_for_byte_with_no_case_folding() {
-    let ours = ContentIdentity::of_sha256(SHA256);
-    let upper = ContentIdentity::of_sha256(&SHA256.to_uppercase());
-    assert_eq!(identity_matches(&ours, &upper), Mismatch);
+fn hex_fields_are_compared_without_regard_to_case() {
+    let upper256 = SHA256.to_uppercase();
+    let upper1 = SHA1.to_uppercase();
+    assert_eq!(
+        identity_matches(
+            &ContentIdentity::of_sha256(SHA256),
+            &ContentIdentity::of_sha256(&upper256)
+        ),
+        Match
+    );
+    assert_eq!(
+        identity_matches(
+            &ContentIdentity::none().with_sha1(SHA1),
+            &ContentIdentity::none().with_sha1(&upper1)
+        ),
+        Match
+    );
+    assert_eq!(
+        identity_matches(
+            &ContentIdentity::of_sha256(OTHER256),
+            &ContentIdentity::of_sha256(&upper256)
+        ),
+        Mismatch
+    );
+}
+
+#[test]
+fn the_sri_field_is_base64_and_is_compared_exactly() {
+    let ours = ContentIdentity::none().with_sha512("sha512-AbCd");
+    let folded = ContentIdentity::none().with_sha512("sha512-abcd");
+    assert_eq!(identity_matches(&ours, &folded), Mismatch);
+    assert_eq!(identity_matches(&ours, &ours), Match);
 }
