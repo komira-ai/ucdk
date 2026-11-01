@@ -13,6 +13,7 @@
 //! commits, sets and the declarations of a rig.
 
 use ucdk_release::codec::GrantPhase;
+use ucdk_release::identity::{ContentIdentity, IdentityMatch, identity_matches};
 use ucdk_release::publish::{Held, Presence};
 use ucdk_release_proto::v1::Stamped;
 
@@ -485,9 +486,29 @@ pub(super) fn no_digest_exposed_is_refused<R: PublisherRig>(rig: &R, shape: &Cha
     rig.arrange(&mut p, &held_by_another(rig, &set.coords[0]));
     let held = present_held(looked(rig, shape, &mut p, &set.coords[0]));
     same(
-        held.digest,
+        held.digest.clone(),
         set.reseeded(rig, 1).digest(0),
         &format!("the digest a coordinate of another writer is reported with ({shape:?})"),
+    );
+    // The identity comparison reads that report as the bytes of another writer, never as ours and
+    // never as a report with nothing to compare.
+    let ours = ContentIdentity::of_sha256(&set.digest(0));
+    same(
+        identity_matches(&ours, &ContentIdentity::of_sha256(&held.digest)),
+        IdentityMatch::Mismatch,
+        &format!("our identity against a coordinate of another writer ({shape:?})"),
+    );
+    // And it reads what the registry holds of our own bytes as ours.
+    let own = Set::of(rig, &["b"]);
+    publish(rig, &mut p, &own);
+    let held = present_held(looked(rig, shape, &mut p, &own.coords[0]));
+    same(
+        identity_matches(
+            &ContentIdentity::of_sha256(&own.digest(0)),
+            &ContentIdentity::of_sha256(&held.digest),
+        ),
+        IdentityMatch::Match,
+        &format!("our identity against our own committed bytes ({shape:?})"),
     );
 }
 

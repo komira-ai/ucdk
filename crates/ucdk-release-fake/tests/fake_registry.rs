@@ -9,6 +9,7 @@ use common::*;
 use sha2::{Digest as _, Sha256};
 use ucdk_core::{Hash256, ManualClock};
 use ucdk_release::codec::{GrantFault, GrantPhase};
+use ucdk_release::identity::{ContentIdentity, IdentityMatch, identity_matches};
 use ucdk_release::publish::{Held, Presence};
 use ucdk_release_fake::{FakeRegistry, Read, Scopes};
 use ucdk_release_proto::v1::{ArtifactType, Coordinate, Reason};
@@ -316,6 +317,21 @@ fn no_digest_exposed_reports_a_held_coordinate_with_no_digest() {
     let g = w.grant(GrantPhase::Read, &[]);
     let newest = w.registry.newest(&g, "stable", "a").unwrap();
     assert_eq!(newest[0].1.digest, "");
+}
+
+#[test]
+fn a_held_coordinate_with_no_digest_exposed_has_no_common_field_with_ours() {
+    let (mut w, set) = staged(&["a"]);
+    commit(&mut w, &set).unwrap();
+    w.registry.no_digest_exposed();
+    let Presence::Present(held) = stranger(&mut w, &set, 0) else {
+        panic!("held");
+    };
+    let ours = ContentIdentity::of_sha256(&sha(b"a"));
+    assert_eq!(
+        identity_matches(&ours, &ContentIdentity::of_sha256(&held.digest)),
+        IdentityMatch::NoCommonField
+    );
 }
 
 #[test]
