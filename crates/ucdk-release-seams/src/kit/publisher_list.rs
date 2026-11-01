@@ -7,6 +7,7 @@
 use super::Scenario;
 use super::publisher as base;
 use super::publisher_access as access;
+use super::publisher_declared as declared;
 use super::publisher_gates::{
     needs_a_channel, needs_a_conditional_commit, needs_a_grouped_channel, needs_a_private_channel,
     needs_a_public_channel, needs_a_registry_that_can_burn, needs_a_sealing_registry,
@@ -372,6 +373,30 @@ pub fn publisher_scenarios<R: PublisherRig>() -> Vec<Scenario<R>> {
                 on_each_shape(
                     rig,
                     shapes::a_registry_that_echoes_the_declared_digest_fails_readback::<R>,
+                );
+            },
+        )
+        .gated(needs_a_channel::<R>),
+        Scenario::new(
+            "a_publisher_refuses_to_stage_or_commit_an_artifact_the_release_did_not_declare",
+            |rig| {
+                on_each_shape(
+                    rig,
+                    declared::a_publisher_refuses_to_stage_or_commit_an_artifact_the_release_did_not_declare::<R>,
+                );
+            },
+        )
+        .gated(needs_a_channel::<R>),
+        Scenario::new("a_publisher_never_told_any_names_refuses", |rig| {
+            on_each_shape(rig, declared::a_publisher_never_told_any_names_refuses::<R>);
+        })
+        .gated(needs_a_channel::<R>),
+        Scenario::new(
+            "a_declaration_that_is_not_plain_distinct_names_is_refused_and_changes_nothing",
+            |rig| {
+                on_each_shape(
+                    rig,
+                    declared::a_declaration_that_is_not_plain_distinct_names_is_refused_and_changes_nothing::<R>,
                 );
             },
         )

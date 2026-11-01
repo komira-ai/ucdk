@@ -8,7 +8,7 @@
 use ucdk_release::publish::{Held, Presence};
 use ucdk_release_proto::v1::{ArtifactType, Coordinate};
 
-use crate::{Grant, SeamError};
+use crate::{DeclareError, Grant, SeamError};
 
 /// The bytes of one member, under the name the manifest gives them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,14 +133,34 @@ pub trait Publisher: Send {
         set: &[StageItem<'_>],
     ) -> Result<Presence, SeamError>;
 
+    /// States the names of the artifacts the release declared. `stage` and `commit` refuse a
+    /// coordinate whose name is not among them with `SeamError::Undeclared`, before anything is
+    /// sent, so a publisher fails closed: one that was never told any names declares none and
+    /// refuses every stage and commit, and so does one told an empty list. A second call replaces
+    /// the first, and it governs a commit of state staged under the first.
+    ///
+    /// The declaration is checked as a whole by `check_declaration`, and one that is refused
+    /// changes nothing: an empty name, a name that holds whitespace or a `/`, or a name that is an
+    /// earlier one again is refused with the `DeclareError` that names the entry.
+    ///
+    /// A name is compared as it was declared, ignoring ASCII case and nothing else: it is not
+    /// trimmed, non-ASCII letters are not case-folded (`\u{c9}` and `\u{e9}` are two names), and
+    /// a registry's own name normalisation is not applied (PEP 503 on a Python index, where
+    /// `my_pkg` and `my-pkg` are one project, among them). The cost is a false refusal on such a
+    /// registry, a release that declares `my_pkg` and stages `my-pkg`, and never a false
+    /// admission: two names this compares equal are the same name to every registry.
+    fn declare(&mut self, names: &[String]) -> Result<(), DeclareError>;
+
     /// Creates the staged state, atomically and only where the coordinate is neither held nor
-    /// staged.
+    /// staged. A name the release did not declare (see `declare`) is refused with
+    /// `SeamError::Undeclared` and nothing is staged.
     fn stage(&mut self, g: &Grant, items: &[StageItem<'_>]) -> Result<StageAnswer, SeamError>;
 
     /// Gives staged state back; never touches a committed coordinate.
     fn abort(&mut self, g: &Grant, ks: &[Coordinate]) -> Result<(), SeamError>;
 
-    /// Makes the staged coordinates readable.
+    /// Makes the staged coordinates readable. A name the release did not declare (see `declare`)
+    /// is refused with `SeamError::Undeclared` and nothing is committed.
     fn commit(&mut self, g: &Grant, items: &[StageItem<'_>]) -> Result<CommitAnswer, SeamError>;
 
     fn yank(&mut self, g: &Grant, k: &Coordinate, reason: &str) -> Result<(), SeamError>;
