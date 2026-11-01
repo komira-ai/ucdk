@@ -11,8 +11,8 @@ use ucdk_release::codec::GrantFault;
 use ucdk_release::publish::{Held, Presence};
 use ucdk_release_proto::v1::{ArtifactType, Coordinate, Reason};
 use ucdk_release_seams::{
-    Backoff, CommitAnswer, CommitUnit, Grant, ListScope, Listed, Publisher, SeamError, StageAnswer,
-    StageItem, YankUnit,
+    Backoff, CommitAnswer, CommitUnit, DeclareError, Grant, ListScope, Listed, Publisher,
+    SeamError, StageAnswer, StageItem, YankUnit, check_declaration,
 };
 
 use crate::token::{coordinate_key, decode};
@@ -94,6 +94,7 @@ pub struct FakeRegistry {
     private: bool,
     limit: usize,
     faults: Faults,
+    declared: BTreeSet<String>,
     committed: BTreeMap<String, Stored>,
     staged: BTreeMap<String, Staged>,
     others_staged: BTreeMap<String, Stored>,
@@ -146,6 +147,21 @@ fn group_of(items: &[StageItem<'_>]) -> String {
 }
 
 impl FakeRegistry {
+    /// Refuses a call whose items name an artifact the release did not declare. A registry that
+    /// was never told any names declares none, and refuses every call.
+    fn declared_only(&self, items: &[StageItem<'_>]) -> Result<(), SeamError> {
+        match items.iter().find(|i| {
+            !self
+                .declared
+                .contains(&i.coordinate.name.to_ascii_lowercase())
+        }) {
+            Some(item) => Err(SeamError::Undeclared {
+                name: item.coordinate.name.clone(),
+            }),
+            None => Ok(()),
+        }
+    }
+
     /// A registry at `repository` that stages, commits a set at once and is conditional, and
     /// reads time from `clock`.
     pub fn new(clock: &ManualClock, repository: &str) -> Self {
@@ -162,6 +178,7 @@ impl FakeRegistry {
             private: false,
             limit: usize::MAX,
             faults: Faults::default(),
+            declared: BTreeSet::new(),
             committed: BTreeMap::new(),
             staged: BTreeMap::new(),
             others_staged: BTreeMap::new(),
@@ -570,10 +587,17 @@ impl Publisher for FakeRegistry {
         })
     }
 
+    fn declare(&mut self, names: &[String]) -> Result<(), DeclareError> {
+        check_declaration(names)?;
+        self.declared = names.iter().map(|n| n.to_ascii_lowercase()).collect();
+        Ok(())
+    }
+
     fn stage(&mut self, g: &Grant, items: &[StageItem<'_>]) -> Result<StageAnswer, SeamError> {
         let ks = keys(items);
         self.calls.push(format!("stage {}", ks.join(",")));
         self.gate()?;
+        self.declared_only(items)?;
         if !self.staging {
             return Err(SeamError::Permanent(
                 "the channel does not stage".to_owned(),
@@ -627,6 +651,7 @@ impl Publisher for FakeRegistry {
         let ks = keys(items);
         self.calls.push(format!("commit {}", ks.join(",")));
         self.gate()?;
+        self.declared_only(items)?;
         self.commit_calls += 1;
         let n = self.commit_calls;
         self.admit(g, Need::Commit, &ks)?;

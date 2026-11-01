@@ -54,6 +54,7 @@ fn kind(mapped: &Mapped) -> &'static str {
         Mapped::Failed(SeamError::InFlight(_)) => "in_flight",
         Mapped::Failed(SeamError::Unknown(_)) => "unknown",
         Mapped::Failed(SeamError::GrantRefused(_)) => "grant_refused",
+        Mapped::Failed(SeamError::Undeclared { .. }) => "undeclared",
     }
 }
 

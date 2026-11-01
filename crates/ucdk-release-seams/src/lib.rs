@@ -17,6 +17,7 @@
 //! one call at a time) except [`Source`], whose answers are reads.
 
 mod build;
+mod declare;
 mod error;
 mod files;
 mod grant;
@@ -28,6 +29,7 @@ mod store;
 mod time;
 
 pub use build::{BuildSystem, Command, Invocation, Located, Shape, TestOutcome, Verb};
+pub use declare::{DeclareError, check_declaration};
 pub use error::{Backoff, ObserveFailure, ObserveWhen, SeamError};
 pub use files::{DirEntry, FileKind, OutputFiles, check_path, entry_path, valid_rel};
 pub use grant::{Grant, GrantRequest, GrantSource};

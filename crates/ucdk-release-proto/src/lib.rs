@@ -5,6 +5,8 @@
 //! The package is not in the list the SDK generator reads, so the generated SDKs do not carry
 //! it yet. This crate is pure: it holds the messages and nothing that acts on them.
 
+mod reason;
+
 /// The generated messages of `ucdk.release.v1`.
 #[allow(clippy::all, clippy::pedantic, missing_docs)]
 pub mod v1 {

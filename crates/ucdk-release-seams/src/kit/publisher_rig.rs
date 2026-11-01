@@ -437,13 +437,49 @@ pub(super) fn phases_of(shape: &ChannelShape) -> Vec<GrantPhase> {
     all
 }
 
-/// A fresh channel of `shape`, held to what the shape says.
-pub(super) fn built<R: PublisherRig>(rig: &R, shape: &ChannelShape) -> R::Publisher {
+/// The labels the scenarios of the publisher kit build coordinates from.
+const LABELS: [&str; 15] = [
+    "a", "ab", "b", "c", "d", "e", "h", "n", "o", "s", "t", "u", "x", "z", "zz",
+];
+
+/// The names of the artifacts a release of the kit's scenarios declares: the name of the
+/// coordinate of each label, and of each coordinate the rig cannot hold, each once ignoring ASCII
+/// case.
+pub(super) fn declared_names<R: PublisherRig>(rig: &R) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let all = LABELS
+        .iter()
+        .map(|label| rig.coordinate(label))
+        .chain(rig.unrepresentable());
+    for coordinate in all {
+        if !names
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case(&coordinate.name))
+        {
+            names.push(coordinate.name);
+        }
+    }
+    names
+}
+
+/// A fresh channel of `shape` that was never told the declared names, held to what the shape says.
+pub(super) fn built_undeclared<R: PublisherRig>(rig: &R, shape: &ChannelShape) -> R::Publisher {
     let p = rig.publisher(shape);
     same(
         p.stages(),
         shape.stages,
         &format!("stages() of the channel built for {shape:?}"),
+    );
+    p
+}
+
+/// A fresh channel of `shape`, held to what the shape says, told the names of the artifacts the
+/// scenarios publish.
+pub(super) fn built<R: PublisherRig>(rig: &R, shape: &ChannelShape) -> R::Publisher {
+    let mut p = built_undeclared(rig, shape);
+    must(
+        p.declare(&declared_names(rig)),
+        "the declaration of the names the kit publishes",
     );
     p
 }

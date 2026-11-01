@@ -6,7 +6,7 @@ use std::process::ExitCode;
 
 use crate::cmd::{Runner, System};
 use crate::event::{Event, parse_event};
-use crate::{Finding, check, coverage, fetch, sdk, workspace_root};
+use crate::{Finding, check, confirm, coverage, fetch, sdk, workspace_root};
 
 const USAGE: &str = "usage: cargo xtask <verb>
   check [--base <sha>]   fmt, clippy, deny, SPDX, run lines, purity, public lint, DCO
@@ -14,6 +14,7 @@ const USAGE: &str = "usage: cargo xtask <verb>
   fetch                  install the pinned tools
   gen-sdk                write the generated SDK sources from the protos
   sdk-test               run the Python SDK's tests
+  build-confirm          run the adapters against the pinned real Buck2 and Bazel
 ";
 
 /// The platform-set variable that names the pull-request event file.
@@ -73,6 +74,15 @@ pub fn run(
             let verdict = if findings.is_empty() { "ok" } else { "FAILED" };
             let text = format!(
                 "== sdk-test: {verdict} ({examined})\n{}",
+                findings_text(&findings)
+            );
+            (i32::from(!findings.is_empty()), text)
+        }
+        Some("build-confirm") => {
+            let (findings, printed) = confirm::run(root, runner);
+            let verdict = if findings.is_empty() { "ok" } else { "FAILED" };
+            let text = format!(
+                "== build-confirm: {verdict}\n{printed}{}",
                 findings_text(&findings)
             );
             (i32::from(!findings.is_empty()), text)

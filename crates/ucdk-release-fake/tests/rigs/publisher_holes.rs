@@ -13,8 +13,8 @@ use ucdk_release_seams::kit::{
     Arrangement, ChannelShape, Payload, PublisherRig, ReadStep, Sibling,
 };
 use ucdk_release_seams::{
-    CommitAnswer, CommitUnit, Grant, ListScope, Listed, Publisher, SeamError, StageAnswer,
-    StageItem, YankUnit,
+    CommitAnswer, CommitUnit, DeclareError, Grant, ListScope, Listed, Publisher, SeamError,
+    StageAnswer, StageItem, YankUnit,
 };
 
 use super::publisher::{FakePublisherRig, Flawed};
@@ -258,6 +258,10 @@ impl Publisher for Holed {
 
     fn yank_unit(&self) -> YankUnit {
         self.base.yank_unit()
+    }
+
+    fn declare(&mut self, names: &[String]) -> Result<(), DeclareError> {
+        self.base.declare(names)
     }
 
     fn observe(
