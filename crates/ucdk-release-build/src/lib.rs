@@ -16,9 +16,11 @@ mod bazel;
 mod buck2;
 mod files;
 mod process;
+mod redact;
 mod shared;
 
 pub use bazel::Bazel;
 pub use buck2::Buck2;
 pub use files::LocalFiles;
 pub use process::OsProcessRunner;
+pub use redact::{REDACTED, redact};
