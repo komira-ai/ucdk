@@ -12,6 +12,7 @@
 //! - [`set_document`] and [`store`]: the stored set and the keys of a generation;
 //!   [`verify`] checks a member and the keys of a generation over an in-memory tree, reading
 //!   an OCI image layout where the member is an image.
+//! - [`revision`]: the full commit id and the checks of the values a build is stamped with.
 //! - [`identity`]: the comparison of the digests two sides expose for a file, field by field.
 //! - [`publish`] and [`supersede`]: the decision to put one coordinate, from what a registry
 //!   reports of it, and the decision to stand down for a newer build.
@@ -38,6 +39,7 @@ pub mod machine;
 pub mod manifest;
 mod oci;
 pub mod publish;
+pub mod revision;
 pub mod rows;
 pub mod selection;
 pub mod set_document;

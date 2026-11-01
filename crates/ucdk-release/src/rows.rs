@@ -4,6 +4,7 @@
 //! evaluated is compared with that list index by index, because a count check alone passes a
 //! truncated run.
 
+use std::collections::BTreeSet;
 use std::fmt;
 
 use ucdk_release_proto::v1::{Reason, Row, RowState, Verdict};
@@ -48,6 +49,12 @@ pub enum RowFault {
     Duplicate { index: usize, found: String },
     /// The row at `index` is none of the derived rows.
     NotDerived { index: usize, found: String },
+    /// The derived row at `index` has a blank subject.
+    BlankSubject { index: usize },
+    /// The derived row at `index` has a blank assertion.
+    BlankAssertion { index: usize, subject: String },
+    /// The derived row at `index` has the name of an earlier derived row.
+    DuplicateSpec { index: usize, name: String },
 }
 
 impl RowFault {
@@ -82,20 +89,69 @@ impl fmt::Display for RowFault {
             RowFault::NotDerived { index, found } => {
                 write!(f, "row {index} {found:?} is none of the derived rows")
             }
+            RowFault::BlankSubject { index } => {
+                write!(
+                    f,
+                    "derived row {index} has a blank subject, so it names nothing"
+                )
+            }
+            RowFault::BlankAssertion { index, subject } => write!(
+                f,
+                "derived row {index} ({subject:?}) has a blank assertion, so it asserts nothing"
+            ),
+            RowFault::DuplicateSpec { index, name } => {
+                write!(
+                    f,
+                    "derived row {index} {name:?} repeats an earlier derived row"
+                )
+            }
         }
     }
+}
+
+/// Why the derived `expected` rows cannot be the authority for an accounting, if they cannot.
+///
+/// An accounting compares what was evaluated with what was derived, so a derived list that is
+/// itself broken makes a gate that passes. It is broken when it is empty (it accepts every run,
+/// including one that evaluated nothing), when a row has a blank subject (it can never be told
+/// from another row), when a row has a blank assertion (dropping it would remove no stated
+/// obligation, only a number), and when two rows have one name (a failure could not say which
+/// one it is about). Blank means empty or only whitespace. A blank is reported before a
+/// repeat, and the first of either, by index, is the one returned.
+pub fn spec_fault(expected: &[ExpectedRow]) -> Option<RowFault> {
+    if expected.is_empty() {
+        return Some(RowFault::NothingDerived);
+    }
+    for (index, row) in expected.iter().enumerate() {
+        if row.subject.trim().is_empty() {
+            return Some(RowFault::BlankSubject { index });
+        }
+        if row.assertion.trim().is_empty() {
+            return Some(RowFault::BlankAssertion {
+                index,
+                subject: row.subject.clone(),
+            });
+        }
+    }
+    // A `BTreeSet`, because this crate holds no `HashSet`: it makes the repeat check n log n.
+    let mut seen = BTreeSet::new();
+    expected.iter().enumerate().find_map(|(index, row)| {
+        let name = row.name();
+        (!seen.insert(name.clone())).then_some(RowFault::DuplicateSpec { index, name })
+    })
 }
 
 /// Compares the evaluated `rows` with the derived `expected` rows, index by index, and gives
 /// the verdict they come to.
 ///
-/// A fault is the first index at which the two lists differ. Otherwise the verdict is
-/// `Succeeded` only when every row passed. The first row that did not pass decides: a failed
+/// A derived list with a [`spec_fault`] is refused first, whatever the rows are. Then a fault is
+/// the first index at which the two lists differ. With none, the verdict is `Succeeded` only
+/// when every row passed. The first row that did not pass decides: a failed
 /// row, a row not run or not reached, and a row of no state are `ValidationFailed` (none of
 /// them is ever a pass), and a row that could not be read is `Indeterminate`.
 pub fn account_rows(expected: &[ExpectedRow], rows: &[Row]) -> Result<Verdict, RowFault> {
-    if expected.is_empty() {
-        return Err(RowFault::NothingDerived);
+    if let Some(fault) = spec_fault(expected) {
+        return Err(fault);
     }
     let names: Vec<String> = expected.iter().map(ExpectedRow::name).collect();
     for (index, want) in names.iter().enumerate() {
