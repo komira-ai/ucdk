@@ -3,6 +3,9 @@
 //!
 //! A writer validates a report before it writes it and a reader validates it before it trusts
 //! it, with the same function, so ucdk never writes what it would refuse to read.
+//!
+//! Assembling and writing a report belongs to this crate. The release engine sits below it and
+//! cannot call the validator, so it hands its results up and the host builds the report here.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -117,7 +120,8 @@ const CLASSES: [ExitClass; 8] = [
 
 /// The retry advice of an exit class: running again is safe after a done run and after a
 /// failure with no effect, unsafe after a failure that changed something, and for a human to
-/// decide otherwise.
+/// decide otherwise. A report may give advice at or above this one, in the order safe, unsafe,
+/// needs a human.
 pub fn default_retry(class: ExitClass) -> Retry {
     match class {
         ExitClass::Done | ExitClass::FailedNoEffect => Retry::Safe,
@@ -152,7 +156,10 @@ pub fn validate_stage(report: &StageReport) -> Result<(), ReportError> {
         });
     }
     check_only(&report.only)?;
-    if report.finished_at_ms < report.started_at_ms {
+    // A time of 0 is unknown and is not compared. Stages are not ordered by time: their clocks
+    // are those of the hosts that ran them.
+    let known = report.started_at_ms != 0 && report.finished_at_ms != 0;
+    if known && report.finished_at_ms < report.started_at_ms {
         return Err(ReportError::FinishedBeforeStarted {
             stage: report.stage.clone(),
             started: report.started_at_ms,
@@ -171,8 +178,9 @@ pub fn validate_stage(report: &StageReport) -> Result<(), ReportError> {
     )
 }
 
-/// Checks a run report and every stage report in it. Each stage is checked as a stage is and
-/// must belong to the run. The run ends as its first stage that did not end done ended, with
+/// Checks a run report and every stage report in it. Each stage is checked as a stage is, must
+/// belong to the run and must agree with the first on being a dry run. A stage that did not end
+/// done is the last stage, because a run stops at its first failure. The run ends as its first stage that did not end done ended, with
 /// that stage's verdict and reason; when every stage ended done it ends done. Its exit code
 /// counts what any stage landed, so a failure after an earlier stage published is class 6
 /// though the failing stage alone is class 4.
@@ -186,7 +194,12 @@ pub fn validate_run(report: &RunReport) -> Result<(), ReportError> {
         return Err(ReportError::NoStages);
     }
     let mut names = BTreeSet::new();
+    let first_plan = report.stages.first().is_some_and(|stage| stage.plan);
+    let mut stopped = None;
     for (index, stage) in report.stages.iter().enumerate() {
+        if let Some(index) = stopped {
+            return Err(ReportError::StageAfterStop { index });
+        }
         validate_stage(stage).map_err(|error| ReportError::Stage {
             index,
             error: Box::new(error),
@@ -194,10 +207,16 @@ pub fn validate_run(report: &RunReport) -> Result<(), ReportError> {
         if stage.run.as_ref() != run {
             return Err(ReportError::StageRunDiffers { index });
         }
+        if stage.plan != first_plan {
+            return Err(ReportError::PlanDiffers { index });
+        }
         if !names.insert(stage.stage.as_str()) {
             return Err(ReportError::StageTwice {
                 name: stage.stage.clone(),
             });
+        }
+        if !is_done(verdict_of(stage.verdict)) {
+            stopped = Some(index);
         }
     }
     let stated = verdict_of(report.verdict);
@@ -405,7 +424,8 @@ fn check_outcome(outcome: &Outcome, landed: Option<&str>) -> Result<(), ReportEr
         .filter(|retry| *retry != Retry::Unspecified)
         .ok_or(ReportError::RetryUnspecified)?;
     let default = default_retry(class);
-    if stated != default && stated != Retry::NeedsHuman {
+    // Safe < Unsafe < NeedsHuman: any advice at or above the class's is accepted.
+    if (stated as i32) < (default as i32) {
         return Err(ReportError::RetryWeaker { stated, default });
     }
     Ok(())

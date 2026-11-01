@@ -517,7 +517,8 @@ enum EffectState {
 // ---- reports ----
 
 // The advice a report gives on running the same command again. It follows from the exit class
-// of the report, and a report may only give stronger advice than the class does.
+// of the report. The order is SAFE, UNSAFE, NEEDS_HUMAN, and a report may give the advice of its
+// class or any advice after it, never one before it.
 enum Retry {
   RETRY_UNSPECIFIED = 0;
   // Running it again cannot do harm.
@@ -545,7 +546,8 @@ message StageReport {
   // A dry run: nothing built, nothing sent.
   bool plan = 7;
   Verdict verdict = 8;
-  // Required with a refusal, a failure, an indeterminate answer or a failed validation.
+  // Required with a refusal, a failure, an indeterminate answer or a failed validation. Not
+  // required with PARTIAL or INTERRUPTED: a run that was cut short may not know why.
   Reason reason = 9;
   // For a person; never parsed.
   string message = 10;

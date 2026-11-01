@@ -900,7 +900,7 @@ fn every_refusal_reads_as_a_sentence_that_names_what_it_refused() {
             },
             "stage 'pub' finished at 8 ms",
         ),
-        (E::StageAfterStop { index: 5 }, "after stage report 5"),
+        (E::StageAfterStop { index: 5 }, "follows stage report 5"),
         (E::PlanDiffers { index: 6 }, "stage report 6"),
         (E::ActionNameEmpty { index: 4 }, "action 4"),
         (E::ActionTwice { name: k("dup") }, "'dup'"),
