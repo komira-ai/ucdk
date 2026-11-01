@@ -674,6 +674,7 @@ dependencies = [
  "protox",
  "ucdk-core",
  "ucdk-ledger",
+ "ucdk-release-proto",
 ]
 
 [[package]]

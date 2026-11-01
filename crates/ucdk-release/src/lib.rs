@@ -37,6 +37,7 @@ pub mod manifest;
 mod oci;
 pub mod publish;
 pub mod rows;
+pub mod schema;
 pub mod selection;
 pub mod set_document;
 pub mod store;

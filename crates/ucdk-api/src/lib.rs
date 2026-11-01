@@ -14,6 +14,7 @@ mod exit;
 mod ledger_show;
 mod ledger_view;
 
+pub use exit::exit_class;
 pub use ledger_show::{LedgerSource, ledger_show};
 
 /// The generated messages of `ucdk.api.v1`.
