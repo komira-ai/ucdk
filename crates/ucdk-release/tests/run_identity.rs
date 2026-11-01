@@ -275,3 +275,40 @@ fn the_first_fault_is_the_run_id_then_the_attempt_then_the_context() {
         })
     );
 }
+
+#[test]
+fn every_refusal_reads_as_a_sentence_that_names_what_it_refused() {
+    let k = |s: &str| s.to_owned();
+    let cases = [
+        (E::RunIdEmpty, "empty"),
+        (E::RunIdTooLong { bytes: 70 }, "70 bytes"),
+        (E::RunIdByte { at: 3 }, "at 3"),
+        (E::AttemptMissing, "no default"),
+        (E::AttemptText { text: k("0x") }, "'0x'"),
+        (E::ContextTooMany { count: 40 }, "40 context"),
+        (E::ContextNotKeyValue { arg: k("abc") }, "'abc'"),
+        (E::ContextKey { key: k("Bad") }, "'Bad'"),
+        (E::ContextKeyTwice { key: k("dup") }, "'dup'"),
+        (
+            E::ContextValueTooLong {
+                key: k("long"),
+                bytes: 300,
+            },
+            "300 bytes",
+        ),
+        (
+            E::ContextValueByte {
+                key: k("odd"),
+                at: 5,
+            },
+            "at 5",
+        ),
+    ];
+    for (error, want) in cases {
+        let text = error.to_string();
+        assert!(text.contains(want), "{text:?} lacks {want:?}");
+        assert!(!text.contains('\n'), "{text:?}");
+    }
+    let boxed: Box<dyn std::error::Error> = Box::new(E::RunIdEmpty);
+    assert_eq!(boxed.to_string(), E::RunIdEmpty.to_string());
+}

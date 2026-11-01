@@ -790,3 +790,143 @@ fn the_run_retry_advice_follows_the_run_class() {
     report.retry = Retry::Unspecified.into();
     assert_eq!(refused_run(&report), E::RetryUnspecified);
 }
+
+#[test]
+fn a_reason_number_this_reader_does_not_know_is_refused() {
+    let mut report = stage();
+    report.reason = 9_999;
+    assert_eq!(refused(&report), E::ReasonUnknown { number: 9_999 });
+}
+
+#[test]
+fn every_refusal_reads_as_a_sentence_that_names_what_it_refused() {
+    let k = |s: &str| s.to_owned();
+    let stage_refusal = E::Stage {
+        index: 2,
+        error: Box::new(E::StageNameEmpty),
+    };
+    let cases = [
+        (
+            E::Schema(report_schema().check(0).expect_err("refused")),
+            "schema_version",
+        ),
+        (E::RunMissing, "no run"),
+        (E::Run(RunIdentityError::RunIdEmpty), "run id is empty"),
+        (E::StageNameEmpty, "no name"),
+        (E::Revision { text: k("main") }, "'main'"),
+        (E::OnlyMalformed { text: k("x") }, "'x'"),
+        (
+            E::OnlyTwice {
+                text: k("action:a"),
+            },
+            "'action:a'",
+        ),
+        (E::SetHash { text: k("ab") }, "'ab'"),
+        (E::VerdictUnspecified, "verdict"),
+        (E::ReasonUnknown { number: 77 }, "77"),
+        (
+            E::ReasonRequired {
+                verdict: Verdict::Failed,
+            },
+            "Failed",
+        ),
+        (
+            E::ReasonOnSuccess {
+                verdict: Verdict::Noop,
+                reason: Reason::Channel,
+            },
+            "Channel",
+        ),
+        (
+            E::ExitCode {
+                stated: 3,
+                expected: 6,
+            },
+            "exit code 3 is not 6",
+        ),
+        (
+            E::PromisesNoEffect {
+                exit_code: 4,
+                effect: k("conda/pkg"),
+            },
+            "'conda/pkg'",
+        ),
+        (E::RetryUnspecified, "retry"),
+        (
+            E::RetryWeaker {
+                stated: Retry::Safe,
+                default: Retry::Unsafe,
+            },
+            "Unsafe",
+        ),
+        (
+            E::FinishedBeforeStarted {
+                started: 9,
+                finished: 8,
+            },
+            "8 ms",
+        ),
+        (E::ActionNameEmpty { index: 4 }, "action 4"),
+        (E::ActionTwice { name: k("dup") }, "'dup'"),
+        (E::ActionVerdictUnspecified { name: k("a1") }, "'a1'"),
+        (
+            E::EffectUnspecified {
+                action: k("a2"),
+                subject: k("s2"),
+            },
+            "'s2'",
+        ),
+        (
+            E::EffectInPlan {
+                action: k("a3"),
+                subject: k("s3"),
+            },
+            "dry run",
+        ),
+        (
+            E::WouldOutsidePlan {
+                action: k("a4"),
+                subject: k("s4"),
+            },
+            "real run",
+        ),
+        (
+            E::RowUnspecified {
+                action: k("a5"),
+                row: k("r5"),
+            },
+            "'r5'",
+        ),
+        (E::NoStages, "no stage"),
+        (E::StageRunDiffers { index: 3 }, "another run"),
+        (E::StageTwice { name: k("build") }, "'build'"),
+        (stage_refusal, "stage report 2: the stage has no name"),
+        (
+            E::RunVerdictDiffers {
+                stated: Verdict::Succeeded,
+                expected: Verdict::Failed,
+            },
+            "Failed",
+        ),
+        (
+            E::RunReasonDiffers {
+                stated: Reason::Channel,
+                expected: Reason::Credential,
+            },
+            "Credential",
+        ),
+        (
+            E::RunNotDone {
+                stated: Verdict::Failed,
+            },
+            "every stage ended done",
+        ),
+    ];
+    for (error, want) in cases {
+        let text = error.to_string();
+        assert!(text.contains(want), "{text:?} lacks {want:?}");
+        assert!(!text.contains('\n'), "{text:?}");
+    }
+    let boxed: Box<dyn std::error::Error> = Box::new(E::NoStages);
+    assert_eq!(boxed.to_string(), E::NoStages.to_string());
+}

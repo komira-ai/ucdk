@@ -210,7 +210,7 @@ fn every_enum_has_a_zero_value_named_unspecified() {
         seen += 1;
     }
     assert_eq!(
-        seen, 11,
+        seen, 12,
         "an enum was added or removed; this count and fields.txt say so"
     );
 }
