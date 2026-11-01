@@ -107,6 +107,9 @@ fn copy_tree(from: &Path, to: &Path) {
 /// transcripts of the tool go to (empty).
 struct Work {
     root: String,
+    /// A directory beside the workspace for the tool's own state, which a tool may not keep in
+    /// the workspace it builds.
+    state: String,
     transcripts: PathBuf,
 }
 
@@ -118,18 +121,27 @@ impl Work {
         let _ = fs::remove_dir_all(&work);
         copy_tree(&fixture(tool), &work);
         fs::create_dir_all(&transcripts).expect("transcripts");
-        let root = fs::canonicalize(&work).expect("the work directory");
+        let state = base.join("work").join(format!("{tool}-state"));
+        let _ = fs::remove_dir_all(&state);
+        fs::create_dir_all(&state).expect("the state directory");
+        let path = |dir: &Path| {
+            fs::canonicalize(dir)
+                .expect("a directory")
+                .to_string_lossy()
+                .into_owned()
+        };
         Self {
-            root: root.to_string_lossy().into_owned(),
+            root: path(&work),
+            state: path(&state),
             transcripts,
         }
     }
 }
 
 impl Work {
-    /// The reader of the files the tool wrote: confined to the work directory.
+    /// The reader of the files the tool wrote: confined to the workspace and the state directory.
     fn files(&self) -> LocalFiles {
-        LocalFiles::within([&self.root]).expect("the work directory resolves")
+        LocalFiles::within([&self.root, &self.state]).expect("the directories resolve")
     }
 }
 
@@ -334,12 +346,12 @@ fn bazel_builds_the_fixture_target_and_the_adapter_finds_the_file() {
     guarded("the Bazel confirmation", || {
         let work = Work::new("bazel");
         record_version(&work, "bazel", "bazel");
-        // Bazel keeps its output tree under the workspace, so that the reader, which is
-        // confined to the workspace, can reach it; the configuration file of the machine says so.
+        // Bazel keeps its output tree in the state directory, which the reader may read and the
+        // workspace does not hold; the configuration file of the machine says so.
         let rc = format!("{}/confirm.bazelrc", work.root);
         fs::write(
             &rc,
-            format!("startup --output_user_root={}/output\n", work.root),
+            format!("startup --output_user_root={}/output\n", work.state),
         )
         .expect("the configuration file");
         let system = authored(BuildSystemKind::Bazel, "bazel", &rc);
