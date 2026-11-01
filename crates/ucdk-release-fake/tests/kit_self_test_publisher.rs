@@ -265,7 +265,10 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
             Stub::Flaw(F::StrangerSeesStaged),
             &[STRANGER_STAGED, PUBLIC_READ],
         ),
-        (Stub::Flaw(F::StageGrantIsBlindToStaged), &[STAGE_GRANT]),
+        (
+            Stub::Flaw(F::StageGrantIsBlindToStaged),
+            &[STAGE_GRANT, UNDECLARED],
+        ),
         (Stub::Flaw(F::CommitGrantIsBlindToStaged), &[COMMIT_GRANT]),
         (
             Stub::Flaw(F::PresentDigestIsWrong),
@@ -279,7 +282,7 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
             Stub::Flaw(F::CommitOverOtherBytesOverwrites),
             &[COMMIT_OVER],
         ),
-        (Stub::Flaw(F::AbortDoesNothing), &[ABORT]),
+        (Stub::Flaw(F::AbortDoesNothing), &[ABORT, UNDECLARED]),
         (Stub::Flaw(F::SetCommitIsTorn), &[SET_COMMIT]),
         (
             Stub::Flaw(F::StagesLies),
@@ -377,6 +380,7 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
                 WRITER_READS,
                 VANISHED,
                 ECHO,
+                UNDECLARED,
             ],
         ),
         (
@@ -513,7 +517,10 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
             &[SET_COMMIT, NOT_STAGING],
         ),
         (Stub::More(More::YankAbsentOk), &[YANK]),
-        (Stub::More(More::StageAfterAbortIsDuplicate), &[ABORT]),
+        (
+            Stub::More(More::StageAfterAbortIsDuplicate),
+            &[ABORT, UNDECLARED],
+        ),
         (Stub::Flaw(F::VanishedStateIsCommitted), &[VANISHED]),
         (
             Stub::Flaw(F::RetryWhileBecomingReadableIsPermanent),

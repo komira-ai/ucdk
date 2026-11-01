@@ -65,7 +65,11 @@ fn table() -> Vec<Row> {
             staging,
             &[DUP_OTHER],
         ),
-        (Wrong::Flaw(F::AbortDoesNothing), staging, &[ABORT]),
+        (
+            Wrong::Flaw(F::AbortDoesNothing),
+            staging,
+            &[ABORT, UNDECLARED],
+        ),
         // A yank by version yanks one platform, every platform of every version, or ignores the
         // grant; a yanked coordinate cannot be fetched.
         (

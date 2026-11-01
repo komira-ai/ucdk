@@ -94,7 +94,7 @@ pub struct FakeRegistry {
     private: bool,
     limit: usize,
     faults: Faults,
-    declared: Option<BTreeSet<String>>,
+    declared: BTreeSet<String>,
     committed: BTreeMap<String, Stored>,
     staged: BTreeMap<String, Staged>,
     others_staged: BTreeMap<String, Stored>,
@@ -147,16 +147,14 @@ fn group_of(items: &[StageItem<'_>]) -> String {
 }
 
 impl FakeRegistry {
-    /// Refuses a call whose items name an artifact the release did not declare, if the registry
-    /// was told the declared names.
+    /// Refuses a call whose items name an artifact the release did not declare. A registry that
+    /// was never told any names declares none, and refuses every call.
     fn declared_only(&self, items: &[StageItem<'_>]) -> Result<(), SeamError> {
-        let Some(declared) = &self.declared else {
-            return Ok(());
-        };
-        match items
-            .iter()
-            .find(|i| !declared.contains(&i.coordinate.name.to_ascii_lowercase()))
-        {
+        match items.iter().find(|i| {
+            !self
+                .declared
+                .contains(&i.coordinate.name.to_ascii_lowercase())
+        }) {
             Some(item) => Err(SeamError::Undeclared {
                 name: item.coordinate.name.clone(),
             }),
@@ -180,7 +178,7 @@ impl FakeRegistry {
             private: false,
             limit: usize::MAX,
             faults: Faults::default(),
-            declared: None,
+            declared: BTreeSet::new(),
             committed: BTreeMap::new(),
             staged: BTreeMap::new(),
             others_staged: BTreeMap::new(),
@@ -591,7 +589,7 @@ impl Publisher for FakeRegistry {
 
     fn declare(&mut self, names: &[String]) -> Result<(), DeclareError> {
         check_declaration(names)?;
-        self.declared = Some(names.iter().map(|n| n.to_ascii_lowercase()).collect());
+        self.declared = names.iter().map(|n| n.to_ascii_lowercase()).collect();
         Ok(())
     }
 
