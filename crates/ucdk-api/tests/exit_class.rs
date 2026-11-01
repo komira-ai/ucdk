@@ -170,3 +170,18 @@ fn usage_and_leaks_have_no_producer() {
         }
     }
 }
+
+#[test]
+fn a_succeeded_verdict_with_a_lost_lease_is_done_and_producers_never_emit_the_pair() {
+    // The done verdict wins, so the class is 0. The pair is a contradiction a producer must
+    // not emit; the function still answers it rather than panic.
+    for reason in [Reason::LeaseLost, Reason::LeaseUnconfirmed] {
+        for verdict in [Verdict::Succeeded, Verdict::Noop, Verdict::Superseded] {
+            for landed in [false, true] {
+                let class = exit_class(verdict, reason, landed);
+                assert_eq!(class, ExitClass::Done, "{verdict:?} {reason:?} {landed}");
+                assert_eq!(class.code(), 0);
+            }
+        }
+    }
+}

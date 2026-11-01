@@ -33,12 +33,19 @@ pub enum SchemaRefusal {
 }
 
 impl SchemaPolicy {
-    /// A policy that writes `current` and reads every major from `oldest_read` to `current`.
-    pub const fn new(current: i32, oldest_read: i32) -> Self {
-        Self {
+    /// A policy that writes `current` and reads every major from `oldest_read` to `current`;
+    /// refused unless `1 <= oldest_read <= current`.
+    pub fn new(current: i32, oldest_read: i32) -> Result<Self, PolicyError> {
+        if !(1..=current).contains(&oldest_read) {
+            return Err(PolicyError {
+                current,
+                oldest_read,
+            });
+        }
+        Ok(Self {
             current,
             oldest_read,
-        }
+        })
     }
 
     /// The major a writer states.
@@ -96,5 +103,22 @@ impl fmt::Display for SchemaRefusal {
                 "schema_version {found} is no longer read (this ucdk reads major {oldest_read}..{current})"
             ),
         }
+    }
+}
+
+/// A range of majors that is not `1 <= oldest_read <= current`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PolicyError {
+    pub current: i32,
+    pub oldest_read: i32,
+}
+
+impl fmt::Display for PolicyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "a policy needs 1 <= oldest read <= current, and this one has oldest read {} and current {}",
+            self.oldest_read, self.current
+        )
     }
 }
