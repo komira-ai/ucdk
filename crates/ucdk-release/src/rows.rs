@@ -4,6 +4,7 @@
 //! evaluated is compared with that list index by index, because a count check alone passes a
 //! truncated run.
 
+use std::collections::BTreeSet;
 use std::fmt;
 
 use ucdk_release_proto::v1::{Reason, Row, RowState, Verdict};
@@ -132,15 +133,12 @@ pub fn spec_fault(expected: &[ExpectedRow]) -> Option<RowFault> {
             });
         }
     }
-    let names: Vec<String> = expected.iter().map(ExpectedRow::name).collect();
-    names
-        .iter()
-        .enumerate()
-        .find(|(index, name)| names[..*index].contains(name))
-        .map(|(index, name)| RowFault::DuplicateSpec {
-            index,
-            name: name.clone(),
-        })
+    // A `BTreeSet`, because this crate holds no `HashSet`: it makes the repeat check n log n.
+    let mut seen = BTreeSet::new();
+    expected.iter().enumerate().find_map(|(index, row)| {
+        let name = row.name();
+        (!seen.insert(name.clone())).then_some(RowFault::DuplicateSpec { index, name })
+    })
 }
 
 /// Compares the evaluated `rows` with the derived `expected` rows, index by index, and gives

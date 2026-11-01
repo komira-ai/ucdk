@@ -6,16 +6,27 @@
 //!
 //! - `requires`: the members it needs. A requirement that names no member of the set is a failed
 //!   row naming it.
-//! - `members`: the members it brings in. Its presence makes the member a list, and the names
-//!   must be exactly the plain members of the set, the members that have a manifest and no
-//!   `members` label of their own. A plain member the list leaves out, a name that is not a
-//!   plain member, and a name listed twice are each a failed row naming them.
+//! - `members`: the members it brings in. A member with a non-empty `members` label is a list.
+//!   At most one member of a set may be a list; two or more are each a failed row naming them
+//!   all. With one, its names must be exactly the plain members of the set, the members that have
+//!   a manifest and are not a list. A plain member the list leaves out, a name that is not a plain
+//!   member, and a name listed twice are each a failed row naming them. A set with no list makes
+//!   no claim of this kind, because a set need not have an aggregating member. An empty or blank
+//!   `members` label is a failed row, and the member is then not a list and stays a plain member,
+//!   so an empty label never exempts a member from the list.
+//!
+//! Images count as plain members. The set records no kind that tells a library from anything
+//! else, and an aggregate that left an image out would not bring it in, so every member is held
+//! to be listed. Two members with one name are each a failed row, and a pin against that name is
+//! not judged against either of them.
 //!
 //! An entry of either list is a bare name or an exact pin, `name==version`. A pin holds only
 //! when the named member's manifest `version` is, byte for byte, the pinned one: a prefix of it,
-//! an extension of it and a member with no version do not match. Any other use of a comparison
-//! character (`<`, `>`, `=`, `~`, `!`, `*`) is a range, a wildcard or a loose match and is a
-//! failed row naming the entry.
+//! an extension of it and a member with no version do not match. A pin compares the version and
+//! nothing else; the build number and the digest of a member are covered by the set hash. Any
+//! other use of a comparison character (`<`, `>`, `=`, `~`, `!`, `*`) is a range, a wildcard or
+//! a loose match and is a failed row naming the entry, and only that fault: the name before the
+//! character is not also checked against the set.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -112,9 +123,12 @@ struct Resolved<'a> {
     repeated: Vec<&'a str>,
 }
 
-/// Sets the `entries` of a list, introduced by `verb` in its sentences, against `versions`: the
-/// members it may name, with the version of each.
-fn resolve<'a>(verb: &str, list: &[&'a str], versions: &BTreeMap<&str, &str>) -> Resolved<'a> {
+/// The members a list may name, each with its version; `None` for a name two members share,
+/// which no pin is judged against.
+type Versions<'a> = BTreeMap<&'a str, Option<&'a str>>;
+
+/// Sets the `entries` of a list, introduced by `verb` in its sentences, against `versions`.
+fn resolve<'a>(verb: &str, list: &[&'a str], versions: &Versions<'_>) -> Resolved<'a> {
     let mut resolved = Resolved::default();
     for entry in list {
         let (name, pin) = match parse(entry) {
@@ -124,7 +138,10 @@ fn resolve<'a>(verb: &str, list: &[&'a str], versions: &BTreeMap<&str, &str>) ->
                 resolved.loose.push(format!(
                     "{entry} is not a bare name or an exact name==version pin"
                 ));
-                (name, None)
+                if !name.is_empty() {
+                    resolved.listed.insert(name);
+                }
+                continue;
             }
         };
         if name.is_empty() {
@@ -140,10 +157,10 @@ fn resolve<'a>(verb: &str, list: &[&'a str], versions: &BTreeMap<&str, &str>) ->
             }
             continue;
         };
-        if let Some(want) = pin
-            && want != *have
+        if let (Some(want), Some(have)) = (pin, *have)
+            && want != have
         {
-            let at = if have.is_empty() { "no version" } else { *have };
+            let at = if have.is_empty() { "no version" } else { have };
             resolved
                 .mismatched
                 .push(format!("{verb} {name}=={want}, but {name} is at {at}"));
@@ -161,16 +178,31 @@ fn plain_members(count: usize) -> &'static str {
     }
 }
 
+/// The members of a set, as `judge` needs to see them.
+struct Members<'a> {
+    /// Every member with a manifest.
+    all: Versions<'a>,
+    /// The members with a manifest that are not a list.
+    plain: Versions<'a>,
+    /// The names of the members that are a list, in the order of the set.
+    lists: Vec<&'a str>,
+}
+
+/// The entries of a non-empty `members` label: the manifest is a list when this is `Some`.
+fn list_of(manifest: &Manifest) -> Option<Vec<&str>> {
+    entries(manifest, MEMBERS).filter(|list| !list.is_empty())
+}
+
 /// What is wrong with a manifest's lists, one sentence each, and what is right with them when
-/// nothing is wrong. `all` holds every member with a manifest and `plain` those that carry no
-/// `members` label, each with its version.
-fn judge(
-    manifest: &Manifest,
-    all: &BTreeMap<&str, &str>,
-    plain: &BTreeMap<&str, &str>,
-) -> (RowState, String) {
+/// nothing is wrong. `shared` is whether another member has the name of this one.
+fn judge(manifest: &Manifest, shared: bool, members: &Members<'_>) -> (RowState, String) {
+    let (all, plain) = (&members.all, &members.plain);
     let mut problems = Vec::new();
     let mut facts = Vec::new();
+
+    if shared {
+        problems.push("its name is also the name of another member".to_owned());
+    }
 
     let required = entries(manifest, REQUIRES).unwrap_or_default();
     let requires = resolve("requires", &required, all);
@@ -186,7 +218,17 @@ fn judge(
         facts.push(format!("requires {}, all members", required.join(", ")));
     }
 
-    if let Some(listed) = entries(manifest, MEMBERS) {
+    if entries(manifest, MEMBERS).is_some_and(|list| list.is_empty()) {
+        problems.push("its members label is empty; a list names at least one member".to_owned());
+    }
+    if let Some(listed) = list_of(manifest) {
+        if members.lists.len() > 1 {
+            problems.push(format!(
+                "{} members carry a members list ({}); at most one may",
+                members.lists.len(),
+                members.lists.join(", ")
+            ));
+        }
         let lists = resolve("lists", &listed, plain);
         if !lists.unknown.is_empty() {
             problems.push(format!(
@@ -215,14 +257,10 @@ fn judge(
                 plain_members(missing.len())
             ));
         }
-        facts.push(if listed.is_empty() {
-            "lists no member, exactly the plain members of the set".to_owned()
-        } else {
-            format!(
-                "lists {}, exactly the plain members of the set",
-                listed.join(", ")
-            )
-        });
+        facts.push(format!(
+            "lists {}, exactly the plain members of the set",
+            listed.join(", ")
+        ));
     }
 
     if !problems.is_empty() {
@@ -237,18 +275,29 @@ fn judge(
     }
 }
 
+/// Records `name` at `version`, or as shared (`None`) when it is already there.
+fn place<'a>(versions: &mut Versions<'a>, name: &'a str, version: &'a str) {
+    let seen = versions.contains_key(name);
+    versions.insert(name, if seen { None } else { Some(version) });
+}
+
 /// Evaluates the closure of `set`: the rows of [`closure_rows`], each `ROW_PASSED` or
 /// `ROW_FAILED`, with what it checked or what is wrong.
 pub fn set_closure(set: &ReleaseSet) -> Vec<Row> {
-    let mut all = BTreeMap::new();
-    let mut plain = BTreeMap::new();
+    let mut members = Members {
+        all: BTreeMap::new(),
+        plain: BTreeMap::new(),
+        lists: Vec::new(),
+    };
     for manifest in set.members.iter().filter_map(|m| m.manifest.as_ref()) {
-        all.entry(manifest.name.as_str())
-            .or_insert(manifest.version.as_str());
-        if entries(manifest, MEMBERS).is_none() {
-            plain
-                .entry(manifest.name.as_str())
-                .or_insert(manifest.version.as_str());
+        let (name, version) = (manifest.name.as_str(), manifest.version.as_str());
+        let is_list = list_of(manifest).is_some();
+        if is_list {
+            members.lists.push(name);
+        }
+        place(&mut members.all, name, version);
+        if !is_list {
+            place(&mut members.plain, name, version);
         }
     }
     set.members
@@ -258,7 +307,10 @@ pub fn set_closure(set: &ReleaseSet) -> Vec<Row> {
             let name = ExpectedRow::new(subject(at, member), ASSERTION).name();
             let (state, detail) = member.manifest.as_ref().map_or_else(
                 || (RowState::RowFailed, "the member has no manifest".to_owned()),
-                |manifest| judge(manifest, &all, &plain),
+                |manifest| {
+                    let shared = members.all.get(manifest.name.as_str()) == Some(&None);
+                    judge(manifest, shared, &members)
+                },
             );
             Row {
                 name,

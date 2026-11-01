@@ -49,6 +49,8 @@ impl Grant {
 }
 
 // The secret is held in `Zeroizing`, which wipes it on drop, so the grant is wiped on drop too.
+// This marker is a promise the compiler does not check: every field of `Grant` that holds a
+// secret must be `Zeroizing`, or be wiped by a `Drop` of its own, before it is added.
 impl ZeroizeOnDrop for Grant {}
 
 /// What a grant must cover.
