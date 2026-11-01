@@ -62,7 +62,7 @@ fn text_that_is_not_a_full_lowercase_id_is_refused_and_named() {
     for (what, text) in not_full_ids() {
         let err = Revision::parse(&text).expect_err(what);
         assert_eq!(err, RevisionError { text: text.clone() }, "{what}");
-        assert_eq!(err.to_string(), format!("'{text}' {WHY}"), "{what}");
+        assert_eq!(err.to_string(), format!("{text:?} {WHY}"), "{what}");
     }
 }
 
@@ -121,7 +121,7 @@ fn a_revision_id_that_is_not_full_is_refused_by_field() {
         );
         assert_eq!(
             err.to_string(),
-            format!("revision_id '{text}' {WHY}"),
+            format!("revision_id {text:?} {WHY}"),
             "{what}"
         );
     }
@@ -141,7 +141,7 @@ fn a_source_commit_that_is_not_full_is_refused_by_field() {
         );
         assert_eq!(
             err.to_string(),
-            format!("source_commit '{text}' {WHY}"),
+            format!("source_commit {text:?} {WHY}"),
             "{what}"
         );
     }

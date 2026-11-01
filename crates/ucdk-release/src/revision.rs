@@ -3,6 +3,10 @@
 //! An abbreviated id names a commit only while no other commit shares its prefix, so none is
 //! accepted. A build stamp is the git-derived values a build is stamped with: the revision it
 //! builds, the commit its sources come from, a build number and a commit time.
+//!
+//! The numbers are taken as `i64` and stored as `u64`, so that a negative one is a refusal
+//! rather than a value that cannot be written. There is no serde here, so every value is made
+//! through [`Revision::parse`] or [`BuildStamp::new`].
 
 use std::fmt;
 
@@ -11,7 +15,8 @@ use std::fmt;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Revision(String);
 
-/// Text that is not a full commit id.
+/// Text that is not a full commit id. The message shows the text escaped (as `{:?}` does), so
+/// text with a newline or another control character cannot add a line to a log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevisionError {
     pub text: String,
@@ -21,7 +26,7 @@ impl fmt::Display for RevisionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "'{}' is not a full commit id (exactly 40 lowercase hex digits; an abbreviated id is refused)",
+            "{:?} is not a full commit id (exactly 40 lowercase hex digits; an abbreviated id is refused)",
             self.text
         )
     }
