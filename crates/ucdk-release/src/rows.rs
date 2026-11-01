@@ -48,6 +48,12 @@ pub enum RowFault {
     Duplicate { index: usize, found: String },
     /// The row at `index` is none of the derived rows.
     NotDerived { index: usize, found: String },
+    /// The derived row at `index` has a blank subject.
+    BlankSubject { index: usize },
+    /// The derived row at `index` has a blank assertion.
+    BlankAssertion { index: usize, subject: String },
+    /// The derived row at `index` has the name of an earlier derived row.
+    DuplicateSpec { index: usize, name: String },
 }
 
 impl RowFault {
@@ -82,8 +88,30 @@ impl fmt::Display for RowFault {
             RowFault::NotDerived { index, found } => {
                 write!(f, "row {index} {found:?} is none of the derived rows")
             }
+            RowFault::BlankSubject { index } => {
+                write!(
+                    f,
+                    "derived row {index} has a blank subject, so it names nothing"
+                )
+            }
+            RowFault::BlankAssertion { index, subject } => write!(
+                f,
+                "derived row {index} ({subject:?}) has a blank assertion, so it asserts nothing"
+            ),
+            RowFault::DuplicateSpec { index, name } => {
+                write!(
+                    f,
+                    "derived row {index} {name:?} repeats an earlier derived row"
+                )
+            }
         }
     }
+}
+
+/// Why the derived `expected` rows cannot be the authority for an accounting, if they cannot.
+/// STUB.
+pub fn spec_fault(_expected: &[ExpectedRow]) -> Option<RowFault> {
+    None
 }
 
 /// Compares the evaluated `rows` with the derived `expected` rows, index by index, and gives

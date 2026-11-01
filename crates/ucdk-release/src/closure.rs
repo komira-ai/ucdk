@@ -13,6 +13,9 @@ use crate::rows::ExpectedRow;
 /// The label that lists a member's requirements.
 pub const REQUIRES: &str = "requires";
 
+/// The label that lists the members a member brings in. STUB.
+pub const MEMBERS: &str = "members";
+
 /// What every row of the closure asserts.
 pub const ASSERTION: &str = "every requirement names a member of the set";
 
