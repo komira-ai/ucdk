@@ -17,8 +17,12 @@ export const ExitClass = {
   REFUSED: 3,
   /** Failed, and nothing was changed: safe to run again. */
   FAILED_NO_EFFECT: 4,
+  /** Could not tell whether the end state holds, and nothing was changed: never a pass. */
+  INDETERMINATE: 5,
   /** Failed after changing something: look again before running again. */
   FAILED_CHANGED: 6,
+  /** A validation or a test target did not pass. */
+  VALIDATION_FAILED: 7,
   /** A sweep found objects that the ledger does not account for. */
   LEAKS: 8,
 } as const;

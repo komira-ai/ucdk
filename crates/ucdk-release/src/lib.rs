@@ -21,6 +21,7 @@
 //! - [`invocation`]: the argument vector and environment of one call of the build system,
 //!   layered from the machine's base flags and environment, the target's and the flags ucdk
 //!   owns; [`listing`] and [`test_report`] read what the build system printed and wrote.
+//! - [`schema`]: which majors of a document a reader accepts.
 //! - [`manifest`], [`closure`] and [`rows`]: the manifest the engine composes for a member, the
 //!   `SET_CLOSURE` validation of a set, and the accounting of evaluated rows against derived
 //!   ones.
@@ -41,6 +42,7 @@ mod oci;
 pub mod publish;
 pub mod revision;
 pub mod rows;
+pub mod schema;
 pub mod selection;
 pub mod set_document;
 pub mod store;
