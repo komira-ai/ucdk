@@ -8,8 +8,10 @@
 //! of at least [`ECHO_WINDOW_BYTES`] is matched by any run of that length, which also catches an
 //! echo that the server cut short; a shorter one (of four bytes or more) is matched whole.
 //!
-//! Not held: an echo shorter than the window, and one re-encoded (percent-encoded, escaped in
-//! JSON) so that no run of the window length is left whole. A body is checked whole before it is
+//! Not held: a credential, or the part of it after its scheme, shorter than four bytes (it would
+//! match ordinary text; no real credential is that short), an echo shorter than the window, and
+//! one re-encoded (percent-encoded, escaped in JSON) so that no run of the
+//! window length is left whole. A body is checked whole before it is
 //! cut to an excerpt, so that the bound never leaves a prefix of an echo to quote.
 
 use std::collections::HashSet;
