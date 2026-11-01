@@ -111,7 +111,8 @@ fn generated(name: &str, bytes: &[u8]) -> Vec<u8> {
         Machine, BuildSystem, Target, Stage, Action, Build, Test, Publish, Smoke, Validation,
         ArtifactDecl, Channel, Repository, PushIdentity, Anonymous, Federated, Manifest, Stamped,
         FileMeta, OciMeta, Member, ReleaseSet, Producer, ProducedBy, BuildStamp, Coordinate,
-        Held, RunIdentity, SourceFacts, Row, ValidationReport, ActionReport, Effect,
+        Held, RunIdentity, SourceFacts, Row, ValidationReport, ActionReport, Effect, StageReport,
+        RunReport,
     )
 }
 
@@ -124,7 +125,7 @@ fn every_field_round_trips() {
         .collect();
     assert_eq!(
         messages.len(),
-        33,
+        35,
         "a message was added or removed; list it here and in `generated`"
     );
     for desc in messages {

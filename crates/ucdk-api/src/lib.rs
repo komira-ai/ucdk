@@ -3,20 +3,24 @@
 //! the table of exit classes.
 //!
 //! The messages are generated from `proto/ucdk/api/v1/api.proto` by `build.rs` into the build
-//! directory, in [`v1`]. A host (the command line, the C ABI) does three things with this crate:
+//! directory, in [`v1`]. A host (the command line, the C ABI) does four things with this crate:
 //!
 //! - asks for a ledger to be shown with [`ledger_show`], which answers with a [`v1::Outcome`]
 //!   that carries the exit class of the answer;
 //! - reads the exit code of a class from [`v1::ExitClass::code`], the only place the mapping
 //!   from class to code is written;
-//! - turns the verdict of a release run into its class with [`exit_class`].
+//! - turns the verdict of a release run into its class with [`exit_class`];
+//! - checks a stage report or a run report, before writing it and before trusting it, with
+//!   [`validate_stage`] and [`validate_run`].
 
 mod exit;
 mod ledger_show;
 mod ledger_view;
+mod report;
 
 pub use exit::exit_class;
 pub use ledger_show::{LedgerSource, ledger_show};
+pub use report::{REPORT_SCHEMA, ReportError, default_retry, validate_run, validate_stage};
 
 /// The generated messages of `ucdk.api.v1`.
 #[allow(clippy::all, clippy::pedantic, missing_docs)]

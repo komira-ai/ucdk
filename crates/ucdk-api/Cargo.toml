@@ -12,6 +12,7 @@ publish.workspace = true
 prost.workspace = true
 ucdk-core = { path = "../ucdk-core" }
 ucdk-ledger = { path = "../ucdk-ledger" }
+ucdk-release = { path = "../ucdk-release" }
 ucdk-release-proto = { path = "../ucdk-release-proto" }
 
 [build-dependencies]
