@@ -8,10 +8,6 @@ name: build-confirm
 
 on:
   workflow_dispatch:
-  # Temporary: lets the pull request that adds this workflow run it once.
-  pull_request:
-    paths:
-      - .github/workflows/build-confirm.yml
 
 permissions: {}
 
