@@ -142,13 +142,15 @@ pub trait Publisher: Send {
     fn declare(&mut self, names: &[String]);
 
     /// Creates the staged state, atomically and only where the coordinate is neither held nor
-    /// staged.
+    /// staged. A name the release did not declare (see `declare`) is refused with
+    /// `SeamError::Undeclared` and nothing is staged.
     fn stage(&mut self, g: &Grant, items: &[StageItem<'_>]) -> Result<StageAnswer, SeamError>;
 
     /// Gives staged state back; never touches a committed coordinate.
     fn abort(&mut self, g: &Grant, ks: &[Coordinate]) -> Result<(), SeamError>;
 
-    /// Makes the staged coordinates readable.
+    /// Makes the staged coordinates readable. A name the release did not declare (see `declare`)
+    /// is refused with `SeamError::Undeclared` and nothing is committed.
     fn commit(&mut self, g: &Grant, items: &[StageItem<'_>]) -> Result<CommitAnswer, SeamError>;
 
     fn yank(&mut self, g: &Grant, k: &Coordinate, reason: &str) -> Result<(), SeamError>;

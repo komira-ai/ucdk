@@ -85,7 +85,7 @@ fn the_whole_kit_passes_on_the_fake() {
 }
 
 /// The conforming fake does not seal a version, so it skips the scenario about one, says why, and
-/// passes the other forty-five.
+/// passes the other forty-six.
 #[test]
 fn the_fake_that_does_not_seal_a_version_skips_that_scenario_and_passes_the_rest() {
     let report = run_publisher_kit(&FakePublisherRig::conforming());
@@ -99,7 +99,7 @@ fn the_fake_that_does_not_seal_a_version_skips_that_scenario_and_passes_the_rest
 
 /// A rig that takes every default of the kit's hooks has the literal coordinates and bytes of the
 /// kit, holds every coordinate, seals no version and burns no number, so the three scenarios
-/// about those are skipped for it, with the reason, and it passes the other forty-three.
+/// about those are skipped for it, with the reason, and it passes the other forty-four.
 #[test]
 fn a_rig_that_takes_the_default_of_every_hook_passes_what_it_can_run() {
     let report = run_publisher_kit(&PlainRig::new());
