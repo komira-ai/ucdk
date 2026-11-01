@@ -513,3 +513,61 @@ enum EffectState {
   TESTED = 9;
   WOULD_TEST = 10;
 }
+
+// ---- reports ----
+
+// The advice a report gives on running the same command again. It follows from the exit class
+// of the report, and a report may only give stronger advice than the class does.
+enum Retry {
+  RETRY_UNSPECIFIED = 0;
+  // Running it again cannot do harm.
+  SAFE = 1;
+  // An effect may have landed: look before running again.
+  UNSAFE = 2;
+  // Running it again gives the same answer until someone changes something.
+  NEEDS_HUMAN = 3;
+}
+
+// What one run of one stage reports. A writer validates a report before it writes it and a
+// reader validates it before it trusts it, with the same function.
+message StageReport {
+  // The major of this document; the reader's policy says which majors it reads.
+  int32 schema_version = 1;
+  RunIdentity run = 2;
+  string stage = 3;
+  // The stage's platform; empty when unknown.
+  string platform = 4;
+  // The full commit id the run was asked to act on, 40 lowercase hex; empty when none was given.
+  string revision = 5;
+  // The `--only` selectors as given. A run with none is a full run, so a selective run can
+  // never read as a full one.
+  repeated string only = 6;
+  // A dry run: nothing built, nothing sent.
+  bool plan = 7;
+  Verdict verdict = 8;
+  // Required with a refusal, a failure, an indeterminate answer or a failed validation.
+  Reason reason = 9;
+  // For a person; never parsed.
+  string message = 10;
+  // The exit code of the class the verdict, the reason and the effects give.
+  uint32 exit_code = 11;
+  Retry retry = 12;
+  // In the order the stage ran them.
+  repeated ActionReport actions = 13;
+  // The set hash the run built or consumed; empty when it has none.
+  string set_hash = 14;
+  uint64 started_at_ms = 15;
+  uint64 finished_at_ms = 16;
+}
+
+// What one run reports: the stages it ran, in order, and how it ended.
+message RunReport {
+  int32 schema_version = 1;
+  RunIdentity run = 2;
+  repeated StageReport stages = 3;
+  // The verdict and the reason of the first stage that did not end done, else a done verdict.
+  Verdict verdict = 4;
+  Reason reason = 5;
+  uint32 exit_code = 6;
+  Retry retry = 7;
+}
