@@ -49,6 +49,9 @@ pub enum SeamError {
     Unknown(String),
     /// The grant presented was refused before the call ran.
     GrantRefused(GrantFault),
+    /// The artifact is not one the release declared: refused before anything was sent, and the
+    /// error names the artifact.
+    Undeclared { name: String },
 }
 
 /// What a failed `observe` makes of the action that called it.
@@ -97,7 +100,8 @@ impl SeamError {
             | SeamError::RateLimited(_)
             | SeamError::InFlight(_)
             | SeamError::Unknown(_)
-            | SeamError::GrantRefused(_) => ObserveFailure::Indeterminate,
+            | SeamError::GrantRefused(_)
+            | SeamError::Undeclared { .. } => ObserveFailure::Indeterminate,
         }
     }
 
@@ -127,6 +131,7 @@ impl fmt::Display for SeamError {
             SeamError::GrantRefused(fault) => {
                 write!(f, "the grant was refused ({fault:?}); nothing happened")
             }
+            SeamError::Undeclared { name } => write!(f, "undeclared {name}"),
         }
     }
 }

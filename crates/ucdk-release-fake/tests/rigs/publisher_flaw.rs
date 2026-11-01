@@ -178,6 +178,8 @@ pub enum Flaw {
     BurnedCommitIsCommitted,
     /// An `observe` reports the digest the writer declared when there is one.
     EchoesTheDeclaredDigest,
+    /// The names the release declared are never passed on, so every artifact is accepted.
+    UndeclaredNamesAreAccepted,
     /// The channel says no grant may cover any coordinate.
     GrantLimitIsZero,
     /// A channel that commits each coordinate on its own says it commits a set.

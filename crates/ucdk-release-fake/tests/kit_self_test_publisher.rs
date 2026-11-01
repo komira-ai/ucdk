@@ -168,6 +168,7 @@ fn own_stubs() -> Vec<(&'static str, Stub)> {
         own(SEALED, Stub::Odd(Odd::DeclaresSealsOnly)),
         own(BURNED, Stub::Flaw(F::BurnedReadsAsAbsent)),
         own(ECHO, Stub::Flaw(F::EchoesTheDeclaredDigest)),
+        own(UNDECLARED, Stub::Flaw(F::UndeclaredNamesAreAccepted)),
         own(DECLARES, Stub::Flaw(F::GrantLimitIsZero)),
     ]
 }
@@ -535,6 +536,7 @@ fn every_stub() -> Vec<(Stub, &'static [&'static str])> {
         (Stub::Flaw(F::BurnedReadsAsAbsent), &[BURNED]),
         (Stub::Flaw(F::BurnedCommitIsCommitted), &[BURNED]),
         (Stub::Flaw(F::EchoesTheDeclaredDigest), &[ECHO]),
+        (Stub::Flaw(F::UndeclaredNamesAreAccepted), &[UNDECLARED]),
         (Stub::Flaw(F::GrantLimitIsZero), &[DECLARES]),
         (
             Stub::Flaw(F::CommitUnitSaysSet),
@@ -840,6 +842,7 @@ fn the_stub_of_each_scenario_a_rig_of_one_call_runs() -> Vec<(&'static str, Stub
         ),
         (BURNED, Stub::Flaw(F::BurnedReadsAsAbsent)),
         (ECHO, Stub::Flaw(F::EchoesTheDeclaredDigest)),
+        (UNDECLARED, Stub::Flaw(F::UndeclaredNamesAreAccepted)),
         (DECLARES, Stub::Flaw(F::GrantLimitIsZero)),
     ]
 }

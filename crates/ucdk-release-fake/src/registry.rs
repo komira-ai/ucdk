@@ -570,6 +570,8 @@ impl Publisher for FakeRegistry {
         })
     }
 
+    fn declare(&mut self, _names: &[String]) {}
+
     fn stage(&mut self, g: &Grant, items: &[StageItem<'_>]) -> Result<StageAnswer, SeamError> {
         let ks = keys(items);
         self.calls.push(format!("stage {}", ks.join(",")));

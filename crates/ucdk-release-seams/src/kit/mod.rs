@@ -42,6 +42,7 @@ mod output_files;
 mod process_runner;
 mod publisher;
 mod publisher_access;
+mod publisher_declared;
 mod publisher_gates;
 mod publisher_grants;
 mod publisher_list;

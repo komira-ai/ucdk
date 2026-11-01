@@ -133,6 +133,14 @@ pub trait Publisher: Send {
         set: &[StageItem<'_>],
     ) -> Result<Presence, SeamError>;
 
+    /// States the names of the artifacts the release declared. A publisher that has been told
+    /// them refuses `stage` and `commit` of a coordinate whose name is not among them with
+    /// `SeamError::Undeclared`, before anything is sent. The names are compared ASCII
+    /// case-insensitively, an empty list declares nothing and so admits nothing, and a second
+    /// call replaces the first. A publisher that was never told holds no declaration to compare
+    /// with.
+    fn declare(&mut self, names: &[String]);
+
     /// Creates the staged state, atomically and only where the coordinate is neither held nor
     /// staged.
     fn stage(&mut self, g: &Grant, items: &[StageItem<'_>]) -> Result<StageAnswer, SeamError>;

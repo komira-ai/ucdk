@@ -987,3 +987,59 @@ fn a_burned_committed_coordinate_is_no_longer_readable_listable_or_yankable() {
     assert!(matches!(stranger(&mut w, &set, 1), Presence::Present(_)));
     assert_eq!(w.registry.bytes(&set.coords[1]), Some(&b"b"[..]));
 }
+
+fn stage_of(w: &mut World, set: &Set) -> Result<StageAnswer, SeamError> {
+    let (blobs, g) = (set.blobs(), w.grant(GrantPhase::Stage, &set.coords));
+    let items = set.items(&blobs);
+    w.registry.stage(&g, &items)
+}
+
+fn undeclared(name: &str) -> SeamError {
+    SeamError::Undeclared {
+        name: name.to_owned(),
+    }
+}
+
+#[test]
+fn an_artifact_of_an_undeclared_name_is_refused_by_stage_and_commit_naming_it() {
+    let mut w = World::new();
+    w.registry.declare(&["a".to_owned()]);
+    let z = Set::of(&["z"]);
+    assert_eq!(stage_of(&mut w, &z), Err(undeclared("z")));
+    assert_eq!(commit(&mut w, &z), Err(undeclared("z")));
+    assert_eq!(stranger(&mut w, &z, 0), Presence::Absent);
+    assert_eq!(w.registry.bytes(&z.coords[0]), None);
+}
+
+#[test]
+fn a_set_with_one_undeclared_member_is_refused_whole() {
+    let mut w = World::new();
+    w.registry.declare(&["a".to_owned()]);
+    let both = Set::of(&["a", "z"]);
+    assert_eq!(stage_of(&mut w, &both), Err(undeclared("z")));
+    assert_eq!(commit(&mut w, &both), Err(undeclared("z")));
+    let a = Set::of(&["a"]);
+    assert_eq!(stage_of(&mut w, &a), Ok(StageAnswer::Staged));
+    assert_eq!(commit(&mut w, &a), Ok(CommitAnswer::Committed));
+    assert_eq!(w.registry.bytes(&a.coords[0]), Some(&b"a"[..]));
+}
+
+#[test]
+fn declared_names_compare_ignoring_ascii_case_and_an_empty_declaration_admits_nothing() {
+    let mut w = World::new();
+    w.registry.declare(&["A".to_owned()]);
+    let a = Set::of(&["a"]);
+    assert_eq!(stage_of(&mut w, &a), Ok(StageAnswer::Staged));
+    w.registry.declare(&[]);
+    assert_eq!(commit(&mut w, &a), Err(undeclared("a")));
+    w.registry.declare(&["a".to_owned()]);
+    assert_eq!(commit(&mut w, &a), Ok(CommitAnswer::Committed));
+}
+
+#[test]
+fn a_registry_that_was_never_told_the_declared_names_admits_any() {
+    let mut w = World::new();
+    let z = Set::of(&["z"]);
+    assert_eq!(stage_of(&mut w, &z), Ok(StageAnswer::Staged));
+    assert_eq!(commit(&mut w, &z), Ok(CommitAnswer::Committed));
+}

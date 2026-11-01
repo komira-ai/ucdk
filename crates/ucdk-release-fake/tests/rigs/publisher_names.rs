@@ -54,4 +54,6 @@ pub const UNREPRESENTABLE: &str =
 pub const SEALED: &str = "a_sealed_version_refuses_a_later_platform_and_observes_it_absent";
 pub const BURNED: &str = "a_burned_coordinate_is_neither_absent_nor_present_nor_committable";
 pub const ECHO: &str = "a_registry_that_echoes_the_declared_digest_fails_readback";
+pub const UNDECLARED: &str =
+    "a_publisher_refuses_to_stage_or_commit_an_artifact_the_release_did_not_declare";
 pub const DECLARES: &str = "the_declarations_of_a_rig_hold_of_what_it_builds";

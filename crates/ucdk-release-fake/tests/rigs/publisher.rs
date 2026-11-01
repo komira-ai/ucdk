@@ -342,6 +342,12 @@ impl Publisher for Flawed {
         }
     }
 
+    fn declare(&mut self, names: &[String]) {
+        if !self.is(Flaw::UndeclaredNamesAreAccepted) {
+            self.inner.declare(names);
+        }
+    }
+
     fn observe(
         &mut self,
         g: &Grant,

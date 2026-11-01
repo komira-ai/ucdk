@@ -260,6 +260,10 @@ impl Publisher for Holed {
         self.base.yank_unit()
     }
 
+    fn declare(&mut self, names: &[String]) {
+        self.base.declare(names);
+    }
+
     fn observe(
         &mut self,
         g: &Grant,
