@@ -10,8 +10,11 @@ use ucdk_release_proto::v1::{Reason, Retry, RunReport, StageReport, Verdict};
 
 use crate::v1::ExitClass;
 
-/// The majors of a stage report and of a run report that this ucdk writes and reads.
-pub const REPORT_SCHEMA: SchemaPolicy = SchemaPolicy::new(1, 1);
+/// The policy for the schema version of a stage report and of a run report: this ucdk writes
+/// and reads major 1.
+pub fn report_schema() -> SchemaPolicy {
+    SchemaPolicy::new(1, 1).expect("1 <= 1 <= 1")
+}
 
 /// Why a report is refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
