@@ -359,6 +359,12 @@ fn a_name_listed_twice_is_a_failed_row_even_when_the_set_is_otherwise_equal() {
     );
     assert_eq!(verdict, RowState::RowFailed);
     assert_eq!(detail, "lists lib-a more than once");
+    // A name listed three times is reported once.
+    let (_, detail) = detail_of(
+        vec![listing("bundle", "lib-a, lib-a, lib-a"), leaf("lib-a", "1")],
+        0,
+    );
+    assert_eq!(detail, "lists lib-a more than once");
 }
 
 #[test]

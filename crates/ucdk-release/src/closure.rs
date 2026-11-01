@@ -144,9 +144,6 @@ fn resolve<'a>(verb: &str, list: &[&'a str], versions: &Versions<'_>) -> Resolve
                 continue;
             }
         };
-        if name.is_empty() {
-            continue;
-        }
         let first = resolved.listed.insert(name);
         if !first && !resolved.repeated.contains(&name) {
             resolved.repeated.push(name);
