@@ -109,21 +109,51 @@ impl fmt::Display for RowFault {
 }
 
 /// Why the derived `expected` rows cannot be the authority for an accounting, if they cannot.
-/// STUB.
-pub fn spec_fault(_expected: &[ExpectedRow]) -> Option<RowFault> {
-    None
+///
+/// An accounting compares what was evaluated with what was derived, so a derived list that is
+/// itself broken makes a gate that passes. It is broken when it is empty (it accepts every run,
+/// including one that evaluated nothing), when a row has a blank subject (it can never be told
+/// from another row), when a row has a blank assertion (dropping it would remove no stated
+/// obligation, only a number), and when two rows have one name (a failure could not say which
+/// one it is about). Blank means empty or only whitespace. A blank is reported before a
+/// repeat, and the first of either, by index, is the one returned.
+pub fn spec_fault(expected: &[ExpectedRow]) -> Option<RowFault> {
+    if expected.is_empty() {
+        return Some(RowFault::NothingDerived);
+    }
+    for (index, row) in expected.iter().enumerate() {
+        if row.subject.trim().is_empty() {
+            return Some(RowFault::BlankSubject { index });
+        }
+        if row.assertion.trim().is_empty() {
+            return Some(RowFault::BlankAssertion {
+                index,
+                subject: row.subject.clone(),
+            });
+        }
+    }
+    let names: Vec<String> = expected.iter().map(ExpectedRow::name).collect();
+    names
+        .iter()
+        .enumerate()
+        .find(|(index, name)| names[..*index].contains(name))
+        .map(|(index, name)| RowFault::DuplicateSpec {
+            index,
+            name: name.clone(),
+        })
 }
 
 /// Compares the evaluated `rows` with the derived `expected` rows, index by index, and gives
 /// the verdict they come to.
 ///
-/// A fault is the first index at which the two lists differ. Otherwise the verdict is
-/// `Succeeded` only when every row passed. The first row that did not pass decides: a failed
+/// A derived list with a [`spec_fault`] is refused first, whatever the rows are. Then a fault is
+/// the first index at which the two lists differ. With none, the verdict is `Succeeded` only
+/// when every row passed. The first row that did not pass decides: a failed
 /// row, a row not run or not reached, and a row of no state are `ValidationFailed` (none of
 /// them is ever a pass), and a row that could not be read is `Indeterminate`.
 pub fn account_rows(expected: &[ExpectedRow], rows: &[Row]) -> Result<Verdict, RowFault> {
-    if expected.is_empty() {
-        return Err(RowFault::NothingDerived);
+    if let Some(fault) = spec_fault(expected) {
+        return Err(fault);
     }
     let names: Vec<String> = expected.iter().map(ExpectedRow::name).collect();
     for (index, want) in names.iter().enumerate() {

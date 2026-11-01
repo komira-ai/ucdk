@@ -3,14 +3,16 @@
 
 use ucdk_release::codec::GrantPhase;
 use ucdk_release_proto::v1::{Coordinate, Repository};
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 use crate::SeamError;
 
 /// What a registry call carries. It is opaque: neither `Debug` nor `Display`, not `Clone`, and
-/// its secret is overwritten when it is dropped. It carries only the secret and the expiry the
-/// issuer stated; [`Grant::none`] is the anonymous grant of a read that needs none.
+/// its secret is overwritten with zeros by the `zeroize` crate when it is dropped. It carries
+/// only the secret and the expiry the issuer stated; [`Grant::none`] is the anonymous grant of a
+/// read that needs none.
 pub struct Grant {
-    secret: Vec<u8>,
+    secret: Zeroizing<Vec<u8>>,
     expires_ms: Option<u64>,
 }
 
@@ -18,7 +20,7 @@ impl Grant {
     /// No grant: an anonymous read, or a write to a channel that asks for none.
     pub fn none() -> Self {
         Self {
-            secret: Vec::new(),
+            secret: Zeroizing::new(Vec::new()),
             expires_ms: None,
         }
     }
@@ -26,7 +28,7 @@ impl Grant {
     /// A grant the issuer states is good until `expires_ms`.
     pub fn issued(secret: Vec<u8>, expires_ms: u64) -> Self {
         Self {
-            secret,
+            secret: Zeroizing::new(secret),
             expires_ms: Some(expires_ms),
         }
     }
@@ -46,11 +48,8 @@ impl Grant {
     }
 }
 
-impl Drop for Grant {
-    fn drop(&mut self) {
-        self.secret.fill(0);
-    }
-}
+// The secret is held in `Zeroizing`, which wipes it on drop, so the grant is wiped on drop too.
+impl ZeroizeOnDrop for Grant {}
 
 /// What a grant must cover.
 pub struct GrantRequest<'a> {
