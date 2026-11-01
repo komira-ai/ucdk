@@ -729,6 +729,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucdk-release-build"
+version = "0.0.0"
+dependencies = [
+ "rustix",
+ "tempfile",
+ "ucdk-core",
+ "ucdk-release",
+ "ucdk-release-fake",
+ "ucdk-release-proto",
+ "ucdk-release-seams",
+]
+
+[[package]]
 name = "ucdk-release-fake"
 version = "0.0.0"
 dependencies = [
