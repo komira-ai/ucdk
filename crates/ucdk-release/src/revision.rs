@@ -19,13 +19,24 @@ pub struct RevisionError {
 
 impl fmt::Display for RevisionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("")
+        write!(
+            f,
+            "'{}' is not a full commit id (exactly 40 lowercase hex digits; an abbreviated id is refused)",
+            self.text
+        )
     }
 }
 
 impl Revision {
     pub fn parse(text: &str) -> Result<Self, RevisionError> {
-        Ok(Self(text.to_owned()))
+        let full = text.len() == 40 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+        if full {
+            Ok(Self(text.to_owned()))
+        } else {
+            Err(RevisionError {
+                text: text.to_owned(),
+            })
+        }
     }
 
     pub fn as_str(&self) -> &str {
@@ -35,7 +46,7 @@ impl Revision {
 
 impl fmt::Display for Revision {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("")
+        f.write_str(&self.0)
     }
 }
 
@@ -56,7 +67,11 @@ pub enum StampError {
 
 impl fmt::Display for StampError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("")
+        match self {
+            StampError::Revision { field, error } => write!(f, "{field} {error}"),
+            StampError::BuildNumber(n) => write!(f, "build_number {n} is not positive"),
+            StampError::TimestampMs(n) => write!(f, "timestamp_ms {n} is not positive"),
+        }
     }
 }
 
@@ -77,19 +92,19 @@ impl BuildStamp {
         build_number: i64,
         timestamp_ms: i64,
     ) -> Result<Self, StampError> {
+        let id = |field, text| {
+            Revision::parse(text).map_err(|error| StampError::Revision { field, error })
+        };
+        let positive = |n: i64| u64::try_from(n).ok().filter(|n| *n > 0);
+        let revision = id("revision_id", revision)?;
+        let source_commit = id("source_commit", source_commit)?;
+        let build_number = positive(build_number).ok_or(StampError::BuildNumber(build_number))?;
+        let timestamp_ms = positive(timestamp_ms).ok_or(StampError::TimestampMs(timestamp_ms))?;
         Ok(Self {
-            revision: Revision::parse(revision).map_err(|error| StampError::Revision {
-                field: "revision_id",
-                error,
-            })?,
-            source_commit: Revision::parse(source_commit).map_err(|error| {
-                StampError::Revision {
-                    field: "source_commit",
-                    error,
-                }
-            })?,
-            build_number: u64::try_from(build_number).unwrap_or(0),
-            timestamp_ms: u64::try_from(timestamp_ms).unwrap_or(0),
+            revision,
+            source_commit,
+            build_number,
+            timestamp_ms,
         })
     }
 
