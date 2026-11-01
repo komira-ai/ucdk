@@ -25,6 +25,8 @@ protox = "0.10"
 serde_json = "1"
 # Verifies the SHA-256 pin of each downloaded tool, and computes record keys and framed hashes.
 sha2 = "0.10"
+# Overwrites a secret with zeros when its holder is dropped, in a way the optimiser may not remove.
+zeroize = "1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
