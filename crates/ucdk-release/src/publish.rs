@@ -4,6 +4,7 @@
 pub use ucdk_release_proto::v1::Held;
 use ucdk_release_proto::v1::Reason;
 
+use crate::identity::{ContentIdentity, IdentityMatch, identity_matches};
 use crate::transitions::Stand;
 
 /// What a registry reports for a coordinate, to an observer that carries a grant.
@@ -39,7 +40,7 @@ pub enum PublishDecision {
 }
 
 /// Decides the coordinate whose bytes have the identity digest `ours`, given what the registry
-/// reports. Digests are compared byte for byte. A held coordinate, staged or published, that
+/// reports. The digest is a hex string compared without regard to letter case (see [`crate::identity`]). A held coordinate, staged or published, that
 /// exposes no digest cannot be compared, and a comparison with no common field is a refusal,
 /// never equality (`CHANNEL`). A yanked coordinate is refused whatever its bytes, and a burned
 /// one is refused with `PUBLISH_BURNED`: it is never put, never retried and never read as absent.
@@ -53,14 +54,14 @@ pub fn decide_publish(ours: &str, presence: &Presence) -> PublishDecision {
         Presence::Yanked(_) => PublishDecision::Refused(Reason::PublishYanked),
         Presence::Burned => PublishDecision::Refused(Reason::PublishBurned),
         Presence::Staged(held) | Presence::Present(held) => {
-            if held.digest.is_empty() {
-                PublishDecision::Refused(Reason::Channel)
-            } else if held.digest != ours {
-                PublishDecision::Refused(Reason::PublishDifferentBytes)
-            } else if matches!(presence, Presence::Staged(_)) {
-                PublishDecision::AlreadyStaged
-            } else {
-                PublishDecision::AlreadyPresent
+            let theirs = ContentIdentity::of_sha256(&held.digest);
+            match identity_matches(&ContentIdentity::of_sha256(ours), &theirs) {
+                IdentityMatch::NoCommonField => PublishDecision::Refused(Reason::Channel),
+                IdentityMatch::Mismatch => PublishDecision::Refused(Reason::PublishDifferentBytes),
+                IdentityMatch::Match if matches!(presence, Presence::Staged(_)) => {
+                    PublishDecision::AlreadyStaged
+                }
+                IdentityMatch::Match => PublishDecision::AlreadyPresent,
             }
         }
     }
