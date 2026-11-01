@@ -40,8 +40,12 @@ impl ExitClass {
 ///
 /// - `SUCCEEDED`, `NOOP` and `SUPERSEDED` are done.
 /// - `VALIDATION_FAILED` is class 7, landed or not: a validation reads what a step produced.
-/// - A lost or an unconfirmed lease is class 6 whatever the verdict says, because another
-///   writer may hold the fence and the effect may have landed.
+/// - A lost or an unconfirmed lease is class 6 for every other verdict, even when nothing
+///   landed, because the run's `landed` cannot rule out that
+///   another writer holds the fence and has changed something.
+/// - A done verdict wins over any reason, so `SUCCEEDED` with `LEASE_LOST` is class 0. A
+///   producer must never emit that pair; it is answered rather than refused only so that the
+///   function stays total.
 /// - A verdict nobody set is a bug of the producer and is class 6: it never claims that
 ///   nothing changed.
 ///

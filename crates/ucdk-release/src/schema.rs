@@ -36,7 +36,12 @@ impl SchemaPolicy {
     /// A policy that writes `current` and reads every major from `oldest_read` to `current`;
     /// refused unless `1 <= oldest_read <= current`.
     pub fn new(current: i32, oldest_read: i32) -> Result<Self, PolicyError> {
-        let _ = (current, oldest_read);
+        if !(1..=current).contains(&oldest_read) {
+            return Err(PolicyError {
+                current,
+                oldest_read,
+            });
+        }
         Ok(Self {
             current,
             oldest_read,
@@ -110,6 +115,10 @@ pub struct PolicyError {
 
 impl fmt::Display for PolicyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("")
+        write!(
+            f,
+            "a policy needs 1 <= oldest read <= current, and this one has oldest read {} and current {}",
+            self.oldest_read, self.current
+        )
     }
 }
