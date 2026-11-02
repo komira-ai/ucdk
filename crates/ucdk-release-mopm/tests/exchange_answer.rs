@@ -137,6 +137,15 @@ fn ok_body(mutate: impl FnOnce(&mut Value)) -> Reply {
     raw(200, &[], &ok_text(mutate))
 }
 
+/// A good answer whose first package is written as `first`, raw, and whose second is beta's.
+fn packages(first: &str) -> Reply {
+    let text = format!(
+        r#"{{"token":"{MINTED}","token_kind":"publish","expires_at":"{}","packages":[{first},{{"name":"beta","version":"0.1.0"}}]}}"#,
+        iso(600)
+    );
+    raw(200, &[], &text)
+}
+
 /// A good answer with `extra` written as further fields after the others.
 fn repeated(extra: &str) -> Reply {
     let mut text = ok_text(|_| {});
@@ -261,6 +270,22 @@ fn an_answer_that_is_not_a_well_formed_grant_is_unreachable() {
             repeated(r#""note":1,"note":2"#),
         ),
         (
+            "a package name twice, the asked one last".to_owned(),
+            packages(r#"{"name":"other","name":"alpha","version":"1.2.3"}"#),
+        ),
+        (
+            "a package name twice, the asked one first".to_owned(),
+            packages(r#"{"name":"alpha","name":"other","version":"1.2.3"}"#),
+        ),
+        (
+            "a package version twice, the asked one last".to_owned(),
+            packages(r#"{"name":"alpha","version":"9.9.9","version":"1.2.3"}"#),
+        ),
+        (
+            "a package version twice, the asked one first".to_owned(),
+            packages(r#"{"name":"alpha","version":"1.2.3","version":"9.9.9"}"#),
+        ),
+        (
             "an object and more".to_owned(),
             raw(200, &[], &format!("{} x", ok_text(|_| {}))),
         ),
@@ -348,6 +373,7 @@ fn an_answer_with_more_fields_or_its_packages_in_another_order_is_read() {
                 b["scope"] = json!(["publish"]);
                 b["issued_at"] = json!(iso(0));
                 b["packages"][0]["created"] = json!(true);
+                b["packages"][1]["note"] = json!({"name": "x", "version": "y"});
             }),
         ),
         (

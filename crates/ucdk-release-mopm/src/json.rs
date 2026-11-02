@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
-//! A JSON object read for a credential: a name that appears twice is noted, so that two readers
-//! can never disagree about which value counts, and the one field that holds a credential is
+//! A JSON object read for a credential: a name that appears twice in any object, at any depth,
+//! is noted, so that two readers can never disagree about which value counts, and the one field that holds a credential is
 //! read into a buffer that is wiped on drop, whether the rest of the object is read or not.
 //!
 //! Not held: a credential written with a JSON escape passes through `serde_json`'s scratch
 //! buffer, which this crate cannot wipe. A credential with no escape is copied once, from the
 //! body (which the caller wipes) straight into the wiped buffer.
 
+use std::cell::Cell;
 use std::fmt;
 
 use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
@@ -19,7 +20,7 @@ pub(crate) struct Fields {
     pub secret: Option<Zeroizing<String>>,
     /// Every other field.
     pub rest: Map<String, Value>,
-    /// A name appeared more than once.
+    /// A name appeared more than once in one object, at any depth.
     pub repeated: bool,
 }
 
@@ -79,6 +80,75 @@ impl<'de> Visitor<'de> for Credential {
     }
 }
 
+/// Reads any value into a `Value`, as `serde_json` would, but notes in `repeated` a name that
+/// appears twice in one of its objects, at any depth (where a plain `Value` keeps the last).
+struct Strict<'a> {
+    repeated: &'a Cell<bool>,
+}
+
+impl<'de> DeserializeSeed<'de> for Strict<'_> {
+    type Value = Value;
+
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<Value, D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Strict<'_> {
+    type Value = Value;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("any JSON value")
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Value, E> {
+        Ok(Value::Bool(v))
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Value, E> {
+        Ok(Value::from(v))
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Value, E> {
+        Ok(Value::from(v))
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Value, E> {
+        Ok(Value::from(v))
+    }
+
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Value, E> {
+        Ok(Value::from(v))
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+        let mut items = Vec::new();
+        while let Some(item) = seq.next_element_seed(Strict {
+            repeated: self.repeated,
+        })? {
+            items.push(item);
+        }
+        Ok(Value::Array(items))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Value, A::Error> {
+        let mut map = Map::new();
+        while let Some(name) = access.next_key::<String>()? {
+            let value = access.next_value_seed(Strict {
+                repeated: self.repeated,
+            })?;
+            if map.insert(name, value).is_some() {
+                self.repeated.set(true);
+            }
+        }
+        Ok(Value::Object(map))
+    }
+}
+
 /// Reads one object; the field named `secret`, if any, is the credential.
 struct Object<'a> {
     secret: Option<&'a str>,
@@ -98,6 +168,7 @@ impl<'de> Visitor<'de> for Object<'_> {
             repeated: false,
         };
         let mut seen_secret = false;
+        let nested = Cell::new(false);
         while let Some(name) = access.next_key::<String>()? {
             if Some(name.as_str()) == self.secret {
                 // The earlier value, if any, is dropped here and so wiped.
@@ -105,10 +176,11 @@ impl<'de> Visitor<'de> for Object<'_> {
                 fields.repeated |= seen_secret;
                 seen_secret = true;
             } else {
-                let value = access.next_value::<Value>()?;
+                let value = access.next_value_seed(Strict { repeated: &nested })?;
                 fields.repeated |= fields.rest.insert(name, value).is_some();
             }
         }
+        fields.repeated |= nested.get();
         Ok(fields)
     }
 }
@@ -178,6 +250,25 @@ mod tests {
     }
 
     #[test]
+    fn a_repeated_name_at_any_depth_is_noted_and_the_values_are_kept_as_written() {
+        for body in [
+            r#"{"p":[{"name":"other","name":"alpha","version":"1"}]}"#,
+            r#"{"p":[{"name":"alpha","version":"1","name":"other"}]}"#,
+            r#"{"p":[{"name":"alpha","version":"1","version":"2"}]}"#,
+            r#"{"p":{"q":{"a":1,"a":2}}}"#,
+            r#"{"p":[[{"a":1,"a":1}]]}"#,
+        ] {
+            assert!(read(body, Some("token")).unwrap().repeated, "{body}");
+        }
+        // Equal names in different objects, and every kind of value, are no repeat.
+        let body = r#"{"p":[{"name":"a","x":null},{"name":"b","x":[true,-1,2,1.5,"t",{}]}]}"#;
+        let fields = read(body, Some("token")).unwrap();
+        assert!(!fields.repeated);
+        let expected: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(fields.rest["p"], expected["p"]);
+    }
+
+    #[test]
     fn anything_but_one_object_is_not_read() {
         for body in [
             "",
@@ -200,5 +291,10 @@ mod tests {
         assert_eq!(object.to_string(), "a JSON object");
         let credential: &dyn Expected = &Credential;
         assert_eq!(credential.to_string(), "any JSON value");
+        let repeated = Cell::new(false);
+        let strict: &dyn Expected = &Strict {
+            repeated: &repeated,
+        };
+        assert_eq!(strict.to_string(), "any JSON value");
     }
 }
