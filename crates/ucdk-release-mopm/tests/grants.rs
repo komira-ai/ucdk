@@ -158,6 +158,26 @@ fn bytes_that_are_not_an_envelope_are_malformed() {
             frame(&[b"1", b"stage", b"0", b"r", b"a", b"4000000000", b"t"]),
         ),
         (
+            "count with a leading zero",
+            frame(&[b"1", b"stage", b"0", b"r", b"a", b"00", b"t"]),
+        ),
+        (
+            "count with a sign",
+            frame(&[b"1", b"stage", b"0", b"r", b"a", b"+0", b"t"]),
+        ),
+        (
+            "type with a leading zero",
+            frame(&[
+                b"1", b"stage", b"0", b"r", b"a", b"1", b"c", b"01", b"n", b"v", b"p", b"t",
+            ]),
+        ),
+        (
+            "type with a sign",
+            frame(&[
+                b"1", b"stage", b"0", b"r", b"a", b"1", b"c", b"-0", b"n", b"v", b"p", b"t",
+            ]),
+        ),
+        (
             "type not a number",
             frame(&[
                 b"1", b"stage", b"0", b"r", b"a", b"1", b"c", b"x", b"n", b"v", b"p", b"t",

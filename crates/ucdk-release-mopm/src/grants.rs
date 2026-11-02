@@ -83,6 +83,16 @@ fn take_str(rest: &mut &[u8]) -> Result<String, Malformed> {
     String::from_utf8(take(rest)?.to_vec()).map_err(|_| Malformed)
 }
 
+/// The next framed text as a number written the one way [`Envelope::encode`] writes it: no
+/// sign, no leading zero.
+fn take_number<N: std::str::FromStr + ToString>(rest: &mut &[u8]) -> Result<N, Malformed> {
+    let text = take_str(rest)?;
+    let number: N = text.parse().map_err(|_| Malformed)?;
+    (number.to_string() == text)
+        .then_some(number)
+        .ok_or(Malformed)
+}
+
 impl Envelope {
     pub fn new(
         phase: GrantPhase,
@@ -171,11 +181,11 @@ impl Envelope {
         };
         let registry = take_str(&mut rest)?;
         let actor = take_str(&mut rest)?;
-        let count: usize = take_str(&mut rest)?.parse().map_err(|_| Malformed)?;
+        let count: usize = take_number(&mut rest)?;
         let mut coordinates = Vec::new();
         for _ in 0..count {
             let channel = take_str(&mut rest)?;
-            let r#type: i32 = take_str(&mut rest)?.parse().map_err(|_| Malformed)?;
+            let r#type: i32 = take_number(&mut rest)?;
             let name = take_str(&mut rest)?;
             let version = take_str(&mut rest)?;
             let platform = take_str(&mut rest)?;
