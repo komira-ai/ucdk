@@ -383,3 +383,52 @@ fn a_later_target_never_starts_under_a_lease_another_holder_took() {
     assert_eq!(state, State::Intent);
     assert_eq!(rig.ledger.lease().expect("held").0, "someone-else");
 }
+
+#[test]
+fn a_retake_between_targets_whose_answer_is_lost_starts_nothing_more() {
+    let mut rig = Rig::with("retake_lost_answer", |m| {
+        common::set_targets(m, "build", "test", &["//t:a", "//t:b"]);
+    });
+    // The first target is silent past the lease, so the second needs the lease taken again;
+    // that grant lands on the ledger and its answer is lost.
+    rig.build.silent_for(Duration::from_secs(700));
+    rig.ledger.lose_acquire_if_answer(true);
+    let outcome = rig.handle("build", &["action:test"]);
+    assert_eq!(
+        (outcome.verdict, outcome.reason),
+        (Verdict::Indeterminate, Reason::LeaseUnconfirmed),
+        "{}",
+        outcome.message
+    );
+    assert_eq!(
+        exit_class(outcome.verdict, outcome.reason, false),
+        ExitClass::FailedChanged
+    );
+    assert_eq!(rig.ledger.acquire_ifs(), 1, "the retake was reached");
+    assert_eq!(
+        rig.build.commands().len(),
+        1,
+        "the second target never started"
+    );
+    let (_, state) = rig.ledger.action("build", "test").expect("the record");
+    assert_eq!(state, State::Intent, "nothing was confirmed");
+    // The grant persisted: the lease is ours, under the fence it raised.
+    let snapshot = rig.ledger.inner.read().expect("read");
+    assert_eq!(snapshot.fence.value(), 2);
+    assert_eq!(snapshot.lease.expect("held").holder, HOLDER);
+
+    // A later attempt of the same holder takes the lease at once and finishes the action.
+    rig.ledger.lose_acquire_if_answer(false);
+    rig.build.silent_for(Duration::ZERO);
+    rig.attempt = 2;
+    let again = rig.handle("build", &["action:test"]);
+    assert_eq!(again.verdict, Verdict::Succeeded, "{}", again.message);
+    assert_eq!(
+        rig.build.commands().len(),
+        3,
+        "both targets ran on the later attempt"
+    );
+    let (_, state) = rig.ledger.action("build", "test").expect("the record");
+    assert_eq!(state, State::Confirmed);
+    assert_eq!(rig.ledger.lease(), None);
+}

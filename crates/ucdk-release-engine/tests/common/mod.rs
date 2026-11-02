@@ -249,12 +249,22 @@ pub fn set_targets(m: &mut Machine, stage: &str, action: &str, labels: &[&str]) 
 pub struct Scratch(PathBuf);
 
 impl Scratch {
+    /// A directory of this instance's own: the name, the process and a number no other
+    /// instance of the process has, made with an exclusive create, so tests that run at the
+    /// same time, or use the same name, never share or remove each other's directory.
     pub fn new(name: &str) -> Self {
-        let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
-            .join(format!("engine-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("make the scratch directory");
-        Self(dir)
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = Path::new(env!("CARGO_TARGET_TMPDIR"));
+        fs::create_dir_all(root).expect("make the scratch root");
+        loop {
+            let n = NEXT.fetch_add(1, Ordering::SeqCst);
+            let dir = root.join(format!("engine-{name}-{}-{n}", std::process::id()));
+            match fs::create_dir(&dir) {
+                Ok(()) => return Self(dir),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => panic!("make the scratch directory {}: {e}", dir.display()),
+            }
+        }
     }
 
     pub fn path(&self) -> &Path {

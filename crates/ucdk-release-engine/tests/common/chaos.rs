@@ -20,6 +20,7 @@ struct ChaosState {
     lose_at: AtomicU64,
     fail_reads: AtomicBool,
     lose_acquire_answer: AtomicBool,
+    lose_acquire_if_answer: AtomicBool,
     fail_release: AtomicBool,
     acquire_ifs: AtomicU64,
     renews: AtomicU64,
@@ -62,6 +63,13 @@ impl Chaos {
 
     pub fn fail_writes(&self, on: bool) {
         self.state.fail_writes.store(on, Ordering::SeqCst);
+    }
+
+    /// Every conditional grant lands on the ledger and then answers that it is unavailable.
+    pub fn lose_acquire_if_answer(&self, on: bool) {
+        self.state
+            .lose_acquire_if_answer
+            .store(on, Ordering::SeqCst);
     }
 
     pub fn lose_acquire_answer(&self, on: bool) {
@@ -233,7 +241,8 @@ impl Ledger for Chaos {
         token: &Token,
         fence: Fence,
     ) -> Result<Lease, LeaseError> {
-        let lose = self.gate().map_err(LeaseError::Unavailable)?;
+        let lose = self.gate().map_err(LeaseError::Unavailable)?
+            || self.state.lose_acquire_if_answer.load(Ordering::SeqCst);
         self.state.acquire_ifs.fetch_add(1, Ordering::SeqCst);
         let lease = self.inner.acquire_if(holder, ttl, token, fence);
         Self::answered(lose, lease, LeaseError::Unavailable)

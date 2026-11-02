@@ -272,8 +272,16 @@ impl<'a> LeaseGuard<'a> {
     /// Takes the lease again, under a new fence, after it lapsed, but only if the document is
     /// still at `token` and no lease has been granted since this guard's own (`fence`): one
     /// call of [`Ledger::acquire_if`], so the check and the grant are one step. A guard that
-    /// lost its lease to another holder is refused, and stays lost. Use it only to record the
-    /// result of work that is already done, never to start more.
+    /// lost its lease to another holder is refused, and stays lost.
+    ///
+    /// Use it to record the result of work that is already done, and to go on with work of the
+    /// same kind that the same unit has left: the release engine takes it before the next
+    /// target of a Test action whose earlier target ran silently past the lease. Because the
+    /// grant is refused after any write or grant since this guard's own, what runs under the new
+    /// fence never overlaps another holder's work. Never use it before an effect of another
+    /// kind (an intent write, a grant exchange, or a call that writes outside the ledger), and
+    /// never to keep an invocation that is running: a progress event that finds the lease
+    /// lapsed stops it.
     ///
     /// # Errors
     ///

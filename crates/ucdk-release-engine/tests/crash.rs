@@ -9,8 +9,11 @@
 
 mod common;
 
+use std::time::Duration;
+
 use common::{Rig, decoded};
 use ucdk_ledger::{Ledger, State};
+use ucdk_release::machine::Checked;
 use ucdk_release_proto::v1::Verdict;
 
 /// How the ledger fails at its `n`th call.
@@ -33,6 +36,10 @@ struct Case {
     record: fn(&Rig) -> Option<State>,
     /// Whether the item is a Test action, which pins the run and runs the build system.
     pins: bool,
+    /// The targets a Test action runs; 0 for a validation.
+    targets: usize,
+    /// Whether a clean run takes its lapsed lease again before a later target.
+    retakes: bool,
 }
 
 fn fail_at(rig: &Rig, mode: Mode, n: u64) {
@@ -53,6 +60,12 @@ fn sweep(case: &Case, mode: Mode) {
         Verdict::Succeeded
     );
     let calls = clean.ledger.calls() - before;
+    assert_eq!(
+        clean.ledger.acquire_ifs() > 0,
+        case.retakes,
+        "{}: whether a clean run retakes its lease",
+        case.name
+    );
     assert!(
         calls > 6,
         "a run reads, writes, renews and releases: {calls}"
@@ -100,8 +113,8 @@ fn sweep(case: &Case, mode: Mode) {
             assert_eq!(state, State::Confirmed, "{}", label(n));
         }
         let total = rig.build.commands().len();
-        // A Test action runs the build system once or twice; a validation never does.
-        let allowed = if case.pins { 1..=2 } else { 0..=0 };
+        // A Test action runs each target once or twice; a validation never runs anything.
+        let allowed = case.targets..=2 * case.targets;
         assert!(
             total >= tested && allowed.contains(&total),
             "{}: the test ran {tested} time(s), then {total} in all",
@@ -120,6 +133,29 @@ fn test_action_case() -> Case {
         arrange: |_| {},
         record: |rig| rig.ledger.action("build", "test").map(|(_, s)| s),
         pins: true,
+        targets: 1,
+        retakes: false,
+    }
+}
+
+/// A Test action of two targets, each silent for longer than the lease: the lease is taken
+/// again before the second target and before the record, so the sweep fails each of those
+/// conditional grants in turn, before and after it landed.
+fn silent_targets_case() -> Case {
+    Case {
+        name: "silent_targets",
+        stage: "build",
+        only: ["action:test"],
+        arrange: |rig| {
+            let mut machine = common::machine();
+            common::set_targets(&mut machine, "build", "test", &["//t:a", "//t:b"]);
+            rig.machine = Checked::read(machine).expect("the machine passes every rule");
+            rig.build.silent_for(Duration::from_secs(700));
+        },
+        record: |rig| rig.ledger.action("build", "test").map(|(_, s)| s),
+        pins: true,
+        targets: 2,
+        retakes: true,
     }
 }
 
@@ -133,6 +169,8 @@ fn closure_case() -> Case {
         },
         record: |rig| rig.ledger.validation("build", "closure").map(|(_, s)| s),
         pins: false,
+        targets: 0,
+        retakes: false,
     }
 }
 
@@ -147,6 +185,8 @@ fn readback_case() -> Case {
         },
         record: |rig| rig.ledger.validation("publish", "visible").map(|(_, s)| s),
         pins: false,
+        targets: 0,
+        retakes: false,
     }
 }
 
@@ -158,6 +198,16 @@ fn test_action_every_n() {
 #[test]
 fn test_action_every_n_with_the_answer_lost() {
     sweep(&test_action_case(), Mode::LosesAnswer);
+}
+
+#[test]
+fn silent_targets_every_n() {
+    sweep(&silent_targets_case(), Mode::Dies);
+}
+
+#[test]
+fn silent_targets_every_n_with_the_answer_lost() {
+    sweep(&silent_targets_case(), Mode::LosesAnswer);
 }
 
 #[test]
