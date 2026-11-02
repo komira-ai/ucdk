@@ -188,7 +188,7 @@ impl Created {
     /// open group that lists no files is not read as stored: mopm answers `skip_identical` with no
     /// files only for a group past open, and a set whose files are all stored is `Duplicate` by the
     /// group read before any create is sent.
-    pub fn answers(&self, members: &[Member]) -> bool {
+    pub(crate) fn answers(&self, members: &[Member]) -> bool {
         let declared = |a: &MemberAnswer| {
             members.iter().find(|m| {
                 (m.name.as_str(), m.version.as_str()) == (a.name.as_str(), a.version.as_str())
