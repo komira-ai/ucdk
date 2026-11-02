@@ -13,6 +13,8 @@
 //! it passed. A validation that failed leaves the intent, and is evaluated again by the next
 //! request.
 
+use std::collections::BTreeSet;
+
 use sha2::{Digest, Sha256};
 use ucdk_core::Hash256;
 use ucdk_ledger::State;
@@ -120,7 +122,9 @@ impl Engine<'_> {
 
     /// The coordinates a read-back validation reads, in order: those of its Smoke action when it
     /// is attached to one, and otherwise those of every Publish action of the stage; and for
-    /// each the digest the set says it has.
+    /// each the digest the set says it has. Actions may publish the same artifact to the same
+    /// channel, and a coordinate is read once: the first occurrence, keyed by channel and
+    /// coordinate, is the one kept.
     fn coordinates(&self, stage: &Stage, holder: &Holder, set: &ReleaseSet) -> Flow<Vec<Wanted>> {
         let legs: Vec<(&str, &[String])> = match holder {
             Holder::Action(name) => smokes(stage)
@@ -132,6 +136,7 @@ impl Engine<'_> {
                 .collect(),
         };
         let mut wanted = Vec::new();
+        let mut seen = BTreeSet::new();
         for (channel, artifacts) in legs {
             for name in artifacts {
                 let Some(manifest) = member(set, name) else {
@@ -153,6 +158,16 @@ impl Engine<'_> {
                     version: manifest.version.clone(),
                     platform: manifest.platform.clone(),
                 };
+                let key = (
+                    channel,
+                    manifest.r#type,
+                    manifest.name.as_str(),
+                    manifest.version.as_str(),
+                    manifest.platform.as_str(),
+                );
+                if !seen.insert(key) {
+                    continue;
+                }
                 let subject = format!(
                     "{channel}/{} {} {} ({})",
                     manifest.name,

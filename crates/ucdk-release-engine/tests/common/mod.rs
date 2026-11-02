@@ -8,9 +8,11 @@
 #![allow(dead_code, unused_imports)]
 
 mod chaos;
+mod direct;
 mod seams;
 
 pub use chaos::Chaos;
+pub use direct::decoded;
 pub use seams::{Fetch, Probe, Scripted, TestStore, Watched};
 
 use std::collections::BTreeMap;
@@ -436,6 +438,11 @@ impl Rig {
                 }
             })
             .collect();
+        self.seal_with(members)
+    }
+
+    /// Seals a set of `members` as `seal_members` does.
+    pub fn seal_with(&mut self, members: Vec<Member>) -> Hash256 {
         let set = set_document::seal(ReleaseSet {
             schema_version: 1,
             revision: REVISION.to_owned(),
@@ -532,7 +539,7 @@ impl Rig {
 #[allow(clippy::too_many_arguments)] // One parameter per seam of `Seams`, as the engine takes them.
 fn run_on(
     machine: &Checked,
-    ledger: &Chaos,
+    ledger: &dyn Ledger,
     build: &mut dyn BuildSystemSeam,
     store: &mut TestStore,
     registry: &mut Probe,

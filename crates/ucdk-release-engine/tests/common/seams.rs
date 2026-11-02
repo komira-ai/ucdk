@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Seams that can be made to say something else.
 
+use std::collections::VecDeque;
+
 use super::*;
 
 /// A store whose reads can be made to fail.
@@ -51,6 +53,11 @@ pub struct Probe {
     pub anonymous: Vec<bool>,
     pub observes: u64,
     pub fetches: u64,
+    /// What the next observes answer, one entry per call: `Some` is the answer, `None` lets
+    /// the registry answer. Once it is empty the registry answers.
+    pub observe_script: VecDeque<Option<Result<Presence, SeamError>>>,
+    /// What the next fetches answer, as `observe_script` does.
+    pub fetch_script: VecDeque<Option<Result<Option<Vec<u8>>, SeamError>>>,
     /// Done once, at the first observe: something happens to the world while the engine reads.
     pub on_observe: Option<Box<dyn FnOnce() + Send>>,
 }
@@ -63,6 +70,8 @@ impl Probe {
             anonymous: Vec::new(),
             observes: 0,
             fetches: 0,
+            observe_script: VecDeque::new(),
+            fetch_script: VecDeque::new(),
             on_observe: None,
         }
     }
@@ -104,7 +113,10 @@ impl Publisher for Probe {
         }
         self.observes += 1;
         self.anonymous.push(g.is_none());
-        self.inner.observe(g, k, set)
+        match self.observe_script.pop_front().flatten() {
+            Some(answer) => answer,
+            None => self.inner.observe(g, k, set),
+        }
     }
 
     fn stage(&mut self, g: &Grant, items: &[StageItem<'_>]) -> Result<StageAnswer, SeamError> {
@@ -130,6 +142,9 @@ impl Publisher for Probe {
     fn fetch(&mut self, g: &Grant, k: &Coordinate) -> Result<Option<Vec<u8>>, SeamError> {
         self.fetches += 1;
         self.anonymous.push(g.is_none());
+        if let Some(answer) = self.fetch_script.pop_front().flatten() {
+            return answer;
+        }
         match &self.fetch {
             Fetch::Real => self.inner.fetch(g, k),
             Fetch::Answer(answer) => answer.clone(),

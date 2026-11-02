@@ -4,7 +4,9 @@
 use super::*;
 
 /// A memory ledger on the shared clock that counts every call and can fail calls: reads, the
-/// answer of a grant, releases, or every call from the `n`th on (a process that died there).
+/// answer of a grant, releases, or every call from the `n`th on (a process that died there). A
+/// call can also be made to run on the inner ledger and then answer an error, as a write whose
+/// answer was lost on the way back.
 #[derive(Debug, Clone)]
 pub struct Chaos {
     pub inner: MemoryLedger,
@@ -15,6 +17,7 @@ pub struct Chaos {
 struct ChaosState {
     calls: AtomicU64,
     crash_at: AtomicU64,
+    lose_at: AtomicU64,
     fail_reads: AtomicBool,
     lose_acquire_answer: AtomicBool,
     fail_release: AtomicBool,
@@ -38,8 +41,15 @@ impl Chaos {
             .store(self.calls() + n, Ordering::SeqCst);
     }
 
+    /// The `n`th call from now (1 is the next) runs on the inner ledger and then answers as
+    /// unavailable: what it did landed, and the caller is not told. Only that call is affected.
+    pub fn lose_answer_at(&self, n: u64) {
+        self.state.lose_at.store(self.calls() + n, Ordering::SeqCst);
+    }
+
     pub fn revive(&self) {
         self.state.crash_at.store(0, Ordering::SeqCst);
+        self.state.lose_at.store(0, Ordering::SeqCst);
     }
 
     pub fn calls(&self) -> u64 {
@@ -72,13 +82,27 @@ impl Chaos {
         self.state.acquire_ifs.load(Ordering::SeqCst)
     }
 
-    fn gate(&self) -> Result<(), String> {
+    /// Counts a call. `Err` when the process is dead at it; `Ok(true)` when its answer is to be
+    /// lost after it ran.
+    fn gate(&self) -> Result<bool, String> {
         let n = self.state.calls.fetch_add(1, Ordering::SeqCst) + 1;
         let crash = self.state.crash_at.load(Ordering::SeqCst);
         if crash != 0 && n >= crash {
             return Err("the process died here".to_owned());
         }
-        Ok(())
+        Ok(self.state.lose_at.load(Ordering::SeqCst) == n)
+    }
+
+    /// `answer`, unless the call is one whose answer is lost.
+    fn answered<T, E>(
+        lose: bool,
+        answer: Result<T, E>,
+        unavailable: impl FnOnce(String) -> E,
+    ) -> Result<T, E> {
+        match answer {
+            Ok(_) if lose => Err(unavailable("the answer was lost".to_owned())),
+            other => other,
+        }
     }
 
     /// The records of the ledger, by path.
@@ -166,16 +190,17 @@ impl Chaos {
 
 impl Ledger for Chaos {
     fn read(&self) -> Result<Snapshot, LedgerError> {
-        self.gate().map_err(LedgerError::Unavailable)?;
+        let lose = self.gate().map_err(LedgerError::Unavailable)?;
         if self.state.fail_reads.load(Ordering::SeqCst) {
             return Err(LedgerError::Unavailable("reads are down".to_owned()));
         }
-        self.inner.read()
+        Self::answered(lose, self.inner.read(), LedgerError::Unavailable)
     }
 
     fn write(&self, expected: &Token, change: Change) -> Result<Token, LedgerError> {
-        self.gate().map_err(LedgerError::Unavailable)?;
-        self.inner.write(expected, change)
+        let lose = self.gate().map_err(LedgerError::Unavailable)?;
+        let done = self.inner.write(expected, change);
+        Self::answered(lose, done, LedgerError::Unavailable)
     }
 
     fn write_fenced(
@@ -184,20 +209,21 @@ impl Ledger for Chaos {
         expected: &Token,
         change: Change,
     ) -> Result<Token, LedgerError> {
-        self.gate().map_err(LedgerError::Unavailable)?;
+        let lose = self.gate().map_err(LedgerError::Unavailable)?;
         if self.state.fail_writes.load(Ordering::SeqCst) {
             return Err(LedgerError::Unavailable("writes are down".to_owned()));
         }
-        self.inner.write_fenced(fence, expected, change)
+        let done = self.inner.write_fenced(fence, expected, change);
+        Self::answered(lose, done, LedgerError::Unavailable)
     }
 
     fn acquire(&self, holder: &str, ttl: Duration) -> Result<Lease, LeaseError> {
-        self.gate().map_err(LeaseError::Unavailable)?;
+        let lose = self.gate().map_err(LeaseError::Unavailable)?;
         let lease = self.inner.acquire(holder, ttl)?;
         if self.state.lose_acquire_answer.load(Ordering::SeqCst) {
             return Err(LeaseError::Unavailable("the answer was lost".to_owned()));
         }
-        Ok(lease)
+        Self::answered(lose, Ok(lease), LeaseError::Unavailable)
     }
 
     fn acquire_if(
@@ -207,22 +233,25 @@ impl Ledger for Chaos {
         token: &Token,
         fence: Fence,
     ) -> Result<Lease, LeaseError> {
-        self.gate().map_err(LeaseError::Unavailable)?;
+        let lose = self.gate().map_err(LeaseError::Unavailable)?;
         self.state.acquire_ifs.fetch_add(1, Ordering::SeqCst);
-        self.inner.acquire_if(holder, ttl, token, fence)
+        let lease = self.inner.acquire_if(holder, ttl, token, fence);
+        Self::answered(lose, lease, LeaseError::Unavailable)
     }
 
     fn renew(&self, fence: Fence, ttl: Duration) -> Result<Lease, LedgerError> {
-        self.gate().map_err(LedgerError::Unavailable)?;
+        let lose = self.gate().map_err(LedgerError::Unavailable)?;
         self.state.renews.fetch_add(1, Ordering::SeqCst);
-        self.inner.renew(fence, ttl)
+        let lease = self.inner.renew(fence, ttl);
+        Self::answered(lose, lease, LedgerError::Unavailable)
     }
 
     fn release(&self, fence: Fence) -> Result<(), LedgerError> {
-        self.gate().map_err(LedgerError::Unavailable)?;
+        let lose = self.gate().map_err(LedgerError::Unavailable)?;
         if self.state.fail_release.load(Ordering::SeqCst) {
             return Err(LedgerError::Unavailable("the release was lost".to_owned()));
         }
-        self.inner.release(fence)
+        let done = self.inner.release(fence);
+        Self::answered(lose, done, LedgerError::Unavailable)
     }
 }

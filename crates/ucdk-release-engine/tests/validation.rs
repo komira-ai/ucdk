@@ -11,6 +11,7 @@ use ucdk_release::codec;
 use ucdk_release::store::{SetScope, StoreKey};
 use ucdk_release_engine::SET_FILE;
 use ucdk_release_fake::coordinate_key;
+use ucdk_release_proto::v1::action::Kind as ActionKind;
 use ucdk_release_proto::v1::{Reason, RowState, ValidationKind, Verdict, Visibility};
 use ucdk_release_seams::{ArtifactStore as _, Grant, Publisher as _, SeamError};
 
@@ -286,6 +287,95 @@ fn a_stage_level_readback_covers_every_publish_action() {
         .validation("publish", "everything")
         .expect("record");
     assert_eq!(state, State::Confirmed);
+}
+
+#[test]
+fn a_stage_level_readback_reads_a_coordinate_once_however_many_actions_publish_it() {
+    // `publish` pushes both packages to `registry`; a second action pushes the same two again
+    // (the other way round), and a third pushes one of them to another channel.
+    let mut rig = Rig::with("readback_overlap", |m| {
+        let mut mirror = m.channels[0].clone();
+        mirror.name = "mirror".to_owned();
+        mirror.repositories[0].location = "https://mirror.example.com/files".to_owned();
+        m.channels.push(mirror);
+        let publish = common::action_mut(m, "publish", "publish").clone();
+        let again = |name: &str, channel: &str, artifacts: &[&str]| {
+            let mut action = publish.clone();
+            action.name = name.to_owned();
+            action.validations.clear();
+            if let Some(ActionKind::Publish(p)) = &mut action.kind {
+                p.channel = channel.to_owned();
+                p.artifacts = artifacts.iter().map(ToString::to_string).collect();
+            }
+            action
+        };
+        let stage = common::stage_mut(m, "publish");
+        stage.actions.push(again(
+            "publish-again",
+            "registry",
+            &["ucdk-lib", "ucdk-cli"],
+        ));
+        stage
+            .actions
+            .push(again("publish-mirror", "mirror", &["ucdk-cli"]));
+        stage
+            .validations
+            .push(validation("everything", ValidationKind::ChannelReadback, 0));
+    });
+    rig.seal(None);
+    rig.publish(&["ucdk-cli", "ucdk-lib"]);
+    let outcome = rig.handle("publish", &["validation:everything"]);
+    // The mirror has no publisher in the rig: its row is unreadable, and the verdict says so.
+    assert_eq!(
+        outcome.verdict,
+        Verdict::Indeterminate,
+        "{}",
+        outcome.message
+    );
+    let report = &outcome.validations[0];
+    let mirror = format!(
+        "mirror/ucdk-cli 1.2.3 {PLATFORM} (FILE): {}",
+        ucdk_release_engine::READBACK_ASSERTION
+    );
+    let names: Vec<&str> = report.rows.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(
+        names,
+        [readback_row("ucdk-cli"), readback_row("ucdk-lib"), mirror],
+        "each coordinate once, in the order it was first named, and keyed by its channel"
+    );
+    assert_eq!(
+        states(report),
+        [
+            RowState::RowPassed,
+            RowState::RowPassed,
+            RowState::RowUnreadable
+        ]
+    );
+    assert_eq!(
+        report.rows[2].detail,
+        "no publisher was given for the channel mirror"
+    );
+    let reads: Vec<String> = rig
+        .registry
+        .inner
+        .call_log()
+        .iter()
+        .skip_while(|c| !c.starts_with("observe"))
+        .cloned()
+        .collect();
+    let (cli, lib) = (
+        coordinate_key(&coordinate("ucdk-cli")),
+        coordinate_key(&coordinate("ucdk-lib")),
+    );
+    assert_eq!(
+        reads,
+        [
+            format!("observe {cli}"),
+            format!("fetch {cli}"),
+            format!("observe {lib}"),
+            format!("fetch {lib}"),
+        ]
+    );
 }
 
 #[test]
