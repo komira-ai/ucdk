@@ -17,7 +17,8 @@
 //!   answers into [`SeamError`](ucdk_release_seams::SeamError);
 //! - [`read_version`]: the first read, checked and then sent;
 //! - [`group_id`], the answers' readers and [`Registry`]: the group read, the version read,
-//!   `stage` and `abort` against a [`Transport`].
+//!   `declare`, `stage` (which refuses a name that was not declared) and `abort` against a
+//!   [`Transport`].
 //!
 //! The publisher itself and the HTTP adapter are not here yet.
 

@@ -81,6 +81,8 @@ fn a_declared_name_matches_ignoring_ascii_case_and_the_stage_goes_on() {
     let bytes = file_bytes();
     let files = set_files(&owned, &bytes);
     let mut reg = Registry::new(held(&id), group_config(), Box::new(clock()));
+    // A member name is lower case by mopm's grammar (`members` refuses any other), so the case
+    // that can differ is the declaration's.
     reg.declare(&names(&["ALPHA"])).unwrap();
     assert_eq!(
         reg.stage(&caller(), &members, &files),
