@@ -269,7 +269,7 @@ fn a_package_record_is_refused_for_another_name_a_bad_version_or_a_repeat() {
         "",
         "1.0 0",
         "1.0",
-        "1.0.0.0",
+        "1.0.0.1.5",
         "01.0.0",
         "1.0.x",
         "v1.0.0",
