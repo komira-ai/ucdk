@@ -7,10 +7,11 @@ mod common;
 use common::*;
 use serde_json::{Value, json};
 use ucdk_core::ManualClock;
+use ucdk_release::codec::GrantFault;
 use ucdk_release::publish::Held;
 use ucdk_release_mopm::{Method, Registry};
 use ucdk_release_proto::v1::{Coordinate, Reason};
-use ucdk_release_seams::SeamError;
+use ucdk_release_seams::{Backoff, SeamError};
 
 const PACKAGE: &str = "/api/v1/packages/alpha";
 const INDEX: &str = "/index/al/ph/alpha";
@@ -137,7 +138,7 @@ fn an_index_that_has_not_the_package_yet_falls_back_to_the_records_and_a_failed_
 }
 
 #[test]
-fn a_package_nobody_published_or_with_no_version_is_an_empty_list() {
+fn a_package_nobody_published_is_an_empty_list_and_a_missing_version_answer_is_not() {
     let fake = Fake::default().on(
         Method::Get,
         PACKAGE,
@@ -145,16 +146,39 @@ fn a_package_nobody_published_or_with_no_version_is_an_empty_list() {
     );
     let (result, reg) = newest_of(fake);
     assert_eq!(result, Ok(Vec::new()));
-    assert_eq!(reg.transport().log.len(), 1);
-    let fake = Fake::default()
-        .on(
-            Method::Get,
-            PACKAGE,
-            vec![json_reply(200, &package_json(&[]))],
-        )
-        .on(Method::Get, INDEX, vec![error_reply(404, "not_in_index")]);
-    let (result, _) = newest_of(fake);
-    assert_eq!(result, Ok(Vec::new()));
+    assert_eq!(reg.transport().lines(), [format!("GET {PACKAGE}")]);
+    for (reply, message) in [
+        (
+            error_reply(404, "version_not_found"),
+            "mopm answered in a way this call does not expect",
+        ),
+        (ok(404), "mopm answered 404 with no error code"),
+    ] {
+        let (result, reg) = newest_of(Fake::default().on(Method::Get, PACKAGE, vec![reply]));
+        assert_eq!(result, Err(SeamError::Transient(message.to_owned())));
+        assert_eq!(reg.transport().lines(), [format!("GET {PACKAGE}")]);
+    }
+}
+
+#[test]
+fn a_package_with_no_version_is_an_empty_list_and_the_index_is_not_read() {
+    for index in [
+        error_reply(503, "unavailable"),
+        text_reply(200, "not json at all"),
+        error_reply(404, "not_in_index"),
+    ] {
+        let fake = Fake::default()
+            .on(
+                Method::Get,
+                PACKAGE,
+                vec![json_reply(200, &package_json(&[]))],
+            )
+            .on(Method::Get, INDEX, vec![index]);
+        let (result, reg) = newest_of(fake);
+        assert_eq!(result, Ok(Vec::new()));
+        assert_eq!(reg.transport().lines(), [format!("GET {PACKAGE}")]);
+        assert_eq!(reg.transport().count(Method::Get, INDEX), 0);
+    }
 }
 
 #[test]
@@ -333,5 +357,351 @@ fn the_index_path_of_a_short_name_is_padded_with_underscores() {
             Ok(vec![(coordinate(name, "1.0.0", "any"), held())])
         );
         assert_eq!(reg.transport().count(Method::Get, path), 1);
+    }
+}
+
+fn digest(c: char) -> String {
+    c.to_string().repeat(64)
+}
+
+fn held_with(c: char) -> Held {
+    Held {
+        digest: digest(c),
+        stamp: None,
+        exceptional: false,
+    }
+}
+
+/// A record of `alpha` whose file for each subdirectory has its own digest.
+fn record_with(version: &str, state: &str, files: &[(&str, char)]) -> Value {
+    let subdirs: Vec<&str> = files.iter().map(|(s, _)| *s).collect();
+    let mut record = record(version, state, &subdirs);
+    for (file, (_, c)) in record["files"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .zip(files)
+    {
+        file["sha256"] = json!(digest(*c));
+    }
+    record
+}
+
+fn listed(version: &str, files: &[(&str, char)]) -> Found {
+    files
+        .iter()
+        .map(|(platform, c)| (coordinate("alpha", version, platform), held_with(*c)))
+        .collect()
+}
+
+fn package_reply(versions: &[(&str, &str)]) -> Reply {
+    json_reply(200, &package_json(versions))
+}
+
+#[test]
+fn every_version_and_platform_is_listed_with_its_own_digest_from_the_index_or_the_record() {
+    let index = index_body(&[
+        record_with("1.0.2", "published", &[("linux-64", 'a'), ("noarch", 'b')]),
+        record_with("1.0.0", "yanked", &[("linux-64", 'e'), ("noarch", 'f')]),
+    ]);
+    let fake = Fake::default()
+        .on(
+            Method::Get,
+            PACKAGE,
+            vec![package_reply(&[
+                ("1.0.2", "published"),
+                ("1.0.1", "published"),
+                ("1.0.0", "yanked"),
+            ])],
+        )
+        .on(Method::Get, INDEX, vec![text_reply(200, &index)])
+        .on(
+            Method::Get,
+            &record_path("alpha", "1.0.1"),
+            vec![json_reply(
+                200,
+                &record_with("1.0.1", "published", &[("linux-64", 'c'), ("noarch", 'd')]),
+            )],
+        );
+    let (result, reg) = newest_of(fake);
+    let mut expected = listed("1.0.2", &[("linux-x86_64", 'a'), ("any", 'b')]);
+    expected.extend(listed("1.0.1", &[("linux-x86_64", 'c'), ("any", 'd')]));
+    expected.extend(listed("1.0.0", &[("linux-x86_64", 'e'), ("any", 'f')]));
+    assert_eq!(result, Ok(expected));
+    assert_eq!(
+        reg.transport().lines(),
+        [
+            format!("GET {PACKAGE}"),
+            format!("GET {INDEX}"),
+            format!("GET {}", record_path("alpha", "1.0.1")),
+        ]
+    );
+}
+
+#[test]
+fn the_index_lists_a_burned_version_nothing_and_a_takedown_with_its_digest_and_reads_no_record() {
+    let index = index_body(&[
+        record_with("1.0.2", "tombstoned", &[]),
+        record_with("1.0.1", "tombstoned", &[("linux-64", 'c'), ("noarch", 'd')]),
+    ]);
+    let fake = Fake::default()
+        .on(
+            Method::Get,
+            PACKAGE,
+            vec![package_reply(&[
+                ("1.0.2", "tombstoned"),
+                ("1.0.1", "tombstoned"),
+            ])],
+        )
+        .on(Method::Get, INDEX, vec![text_reply(200, &index)]);
+    let (result, reg) = newest_of(fake);
+    assert_eq!(
+        result,
+        Ok(listed("1.0.1", &[("linux-x86_64", 'c'), ("any", 'd')]))
+    );
+    assert_eq!(
+        reg.transport().lines(),
+        [format!("GET {PACKAGE}"), format!("GET {INDEX}")]
+    );
+}
+
+#[test]
+fn a_version_only_the_index_shows_is_left_out_because_the_package_record_decides_the_versions() {
+    let index = index_body(&[
+        record_with("1.0.1", "published", &[("noarch", 'b')]),
+        record_with("1.0.0", "published", &[("noarch", 'a')]),
+    ]);
+    let fake = Fake::default()
+        .on(
+            Method::Get,
+            PACKAGE,
+            vec![package_reply(&[("1.0.0", "published")])],
+        )
+        .on(Method::Get, INDEX, vec![text_reply(200, &index)]);
+    let (result, reg) = newest_of(fake);
+    assert_eq!(result, Ok(listed("1.0.0", &[("any", 'a')])));
+    assert_eq!(reg.transport().log.len(), 2);
+}
+
+#[test]
+fn a_state_the_index_gives_other_than_the_package_record_does_not_change_the_files_listed() {
+    // The package says published and the index says yanked, with the digests unchanged: the
+    // index record's files are listed and no record is read to settle the difference.
+    let index = index_body(&[record_with(
+        "1.0.0",
+        "yanked",
+        &[("linux-64", 'a'), ("noarch", 'b')],
+    )]);
+    let fake = Fake::default()
+        .on(
+            Method::Get,
+            PACKAGE,
+            vec![package_reply(&[("1.0.0", "published")])],
+        )
+        .on(Method::Get, INDEX, vec![text_reply(200, &index)]);
+    let (result, reg) = newest_of(fake);
+    assert_eq!(
+        result,
+        Ok(listed("1.0.0", &[("linux-x86_64", 'a'), ("any", 'b')]))
+    );
+    assert_eq!(
+        reg.transport().lines(),
+        [format!("GET {PACKAGE}"), format!("GET {INDEX}")]
+    );
+}
+
+#[test]
+fn exactly_the_configured_number_of_versions_is_listed_and_one_more_is_an_error() {
+    let default = group_config().newest_versions;
+    assert_eq!(default, 1000);
+    let names: Vec<String> = (0..=default).map(|n| format!("1.0.{n}")).collect();
+    let build = |count: usize| {
+        let versions: Vec<(&str, &str)> = names[..count]
+            .iter()
+            .map(|v| (v.as_str(), "published"))
+            .collect();
+        let records: Vec<Value> = names[..count]
+            .iter()
+            .map(|v| record_with(v, "published", &[("noarch", 'a')]))
+            .collect();
+        Fake::default()
+            .on(Method::Get, PACKAGE, vec![package_reply(&versions)])
+            .on(
+                Method::Get,
+                INDEX,
+                vec![text_reply(200, &index_body(&records))],
+            )
+    };
+    let (result, reg) = newest_of(build(default));
+    let expected: Found = names[..default]
+        .iter()
+        .flat_map(|v| listed(v, &[("any", 'a')]))
+        .collect();
+    assert_eq!(result, Ok(expected));
+    assert_eq!(
+        reg.transport().lines(),
+        [format!("GET {PACKAGE}"), format!("GET {INDEX}")]
+    );
+    let (result, reg) = newest_of(build(default + 1));
+    assert_eq!(
+        result,
+        Err(SeamError::Permanent(
+            "the package lists more versions than the configured cap".to_owned()
+        ))
+    );
+    assert_eq!(reg.transport().lines(), [format!("GET {PACKAGE}")]);
+}
+
+#[test]
+fn a_package_record_that_names_another_package_or_repeats_or_misspells_a_version_is_permanent() {
+    let versions = |list: Value| json!({"name": "alpha", "state": "active", "versions": list});
+    let bodies = [
+        json!({"name": "beta", "versions": [{"version": "1.0.0", "state": "published"}]}),
+        json!({"versions": [{"version": "1.0.0", "state": "published"}]}),
+        versions(json!([
+            {"version": "1.0.0", "state": "published"},
+            {"version": "1.0.0", "state": "yanked"},
+        ])),
+        versions(json!([{"version": "", "state": "published"}])),
+        versions(json!([{"version": "not a version", "state": "published"}])),
+    ];
+    for body in bodies {
+        let fake = Fake::default()
+            .on(Method::Get, PACKAGE, vec![json_reply(200, &body)])
+            .on(Method::Get, INDEX, vec![text_reply(200, "")])
+            .on(
+                Method::Get,
+                &record_path("alpha", "1.0.0"),
+                vec![json_reply(200, &record("1.0.0", "published", &BOTH))],
+            );
+        let (result, reg) = newest_of(fake);
+        assert_eq!(
+            result,
+            Err(SeamError::Permanent(
+                "malformed answer: a package record".to_owned()
+            )),
+            "{body}"
+        );
+        assert_eq!(reg.transport().lines(), [format!("GET {PACKAGE}")]);
+    }
+}
+
+fn rate_limit(retry_after: &str) -> Reply {
+    Ok(response(
+        429,
+        &[("retry-after", retry_after)],
+        &error_body("rate_limited"),
+    ))
+}
+
+/// The failure answers of a read and the error each becomes.
+fn failures() -> Vec<(Reply, SeamError)> {
+    vec![
+        (
+            error_reply(401, "unauthorized"),
+            SeamError::GrantRefused(GrantFault::Denied),
+        ),
+        (
+            error_reply(403, "forbidden"),
+            SeamError::GrantRefused(GrantFault::Denied),
+        ),
+        (
+            error_reply(401, "token_expired"),
+            SeamError::GrantRefused(GrantFault::Expired),
+        ),
+        (
+            rate_limit("7"),
+            SeamError::RateLimited(Backoff::after_millis(7000)),
+        ),
+        (
+            rate_limit("600"),
+            SeamError::RateLimited(Backoff::after_millis(600_000)),
+        ),
+        (rate_limit("601"), SeamError::Refused(Reason::Channel)),
+    ]
+}
+
+#[test]
+fn a_denied_or_rate_limited_read_of_the_package_the_index_or_a_record_fails_and_stops_the_reads() {
+    let two = ["1.0.1", "1.0.0"];
+    for (reply, error) in failures() {
+        let versions = [("1.0.1", "published"), ("1.0.0", "published")];
+        // The package read.
+        let (result, reg) =
+            newest_of(Fake::default().on(Method::Get, PACKAGE, vec![reply.clone()]));
+        assert_eq!(result, Err(error.clone()));
+        assert_eq!(reg.transport().lines(), [format!("GET {PACKAGE}")]);
+        // The index read.
+        let fake = Fake::default()
+            .on(Method::Get, PACKAGE, vec![package_reply(&versions)])
+            .on(Method::Get, INDEX, vec![reply.clone()]);
+        let (result, reg) = newest_of(fake);
+        assert_eq!(result, Err(error.clone()));
+        assert_eq!(
+            reg.transport().lines(),
+            [format!("GET {PACKAGE}"), format!("GET {INDEX}")]
+        );
+        // The read of the first record the index does not show.
+        let mut fake = Fake::default()
+            .on(Method::Get, PACKAGE, vec![package_reply(&versions)])
+            .on(Method::Get, INDEX, vec![error_reply(404, "not_in_index")]);
+        for version in two {
+            let reply = if version == "1.0.1" {
+                reply.clone()
+            } else {
+                json_reply(200, &record(version, "published", &BOTH))
+            };
+            fake = fake.on(Method::Get, &record_path("alpha", version), vec![reply]);
+        }
+        let (result, reg) = newest_of(fake);
+        assert_eq!(result, Err(error));
+        assert_eq!(
+            reg.transport().lines(),
+            [
+                format!("GET {PACKAGE}"),
+                format!("GET {INDEX}"),
+                format!("GET {}", record_path("alpha", "1.0.1")),
+            ]
+        );
+    }
+}
+
+#[test]
+fn a_malformed_or_wrong_identity_record_read_after_the_package_and_the_index_is_permanent() {
+    let wrong_version = record("1.0.9", "published", &BOTH);
+    let mut wrong_name = record("1.0.1", "published", &BOTH);
+    wrong_name["name"] = json!("beta");
+    for reply in [
+        ok(200),
+        text_reply(200, "[]"),
+        json_reply(200, &wrong_version),
+        json_reply(200, &wrong_name),
+    ] {
+        let fake = Fake::default()
+            .on(
+                Method::Get,
+                PACKAGE,
+                vec![package_reply(&[
+                    ("1.0.1", "published"),
+                    ("1.0.0", "published"),
+                ])],
+            )
+            .on(
+                Method::Get,
+                INDEX,
+                vec![text_reply(
+                    200,
+                    &index_body(&[record("1.0.0", "published", &BOTH)]),
+                )],
+            )
+            .on(Method::Get, &record_path("alpha", "1.0.1"), vec![reply]);
+        let (result, reg) = newest_of(fake);
+        assert_eq!(
+            result,
+            Err(SeamError::Permanent(
+                "malformed answer: a version record".to_owned()
+            ))
+        );
+        assert_eq!(reg.transport().log.len(), 3);
     }
 }
