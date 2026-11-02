@@ -95,7 +95,7 @@ fn a_declared_name_matches_ignoring_ascii_case_and_the_stage_goes_on() {
 }
 
 #[test]
-fn a_second_declaration_replaces_the_first_and_a_refused_one_changes_nothing() {
+fn a_second_declaration_replaces_the_first() {
     let (owned, members, id) = world();
     let bytes = file_bytes();
     let files = set_files(&owned, &bytes);
@@ -103,47 +103,91 @@ fn a_second_declaration_replaces_the_first_and_a_refused_one_changes_nothing() {
     // Replaced by a declaration without `alpha`: the stage is refused.
     reg.declare(&names(&["beta"])).unwrap();
     assert_eq!(
-        stage_kind(&reg.stage(&caller(), &members, &files)),
-        "undeclared"
+        reg.stage(&caller(), &members, &files),
+        Err(SeamError::Undeclared {
+            name: "alpha".to_owned()
+        })
     );
     assert!(reg.transport().log.is_empty());
-    // Each refused declaration names its entry and leaves `beta` declared, so `alpha` stays
-    // refused.
-    let refused = [
-        (names(&["alpha", ""]), DeclareError::Empty { index: 1 }),
-        (
-            names(&["alpha", "al pha"]),
-            DeclareError::Whitespace {
-                name: "al pha".to_owned(),
-            },
-        ),
-        (
-            names(&["alpha", "a/b"]),
-            DeclareError::Slash {
-                name: "a/b".to_owned(),
-            },
-        ),
-        (
-            names(&["alpha", "Alpha"]),
-            DeclareError::Duplicate {
-                name: "Alpha".to_owned(),
-            },
-        ),
-    ];
-    for (declaration, error) in refused {
-        assert_eq!(reg.declare(&declaration), Err(error));
-        assert_eq!(
-            stage_kind(&reg.stage(&caller(), &members, &files)),
-            "undeclared"
-        );
-        assert!(reg.transport().log.is_empty());
-    }
     // Declared again, the same set stages.
     reg.declare(&names(&["beta", "alpha"])).unwrap();
     assert_eq!(
         reg.stage(&caller(), &members, &files),
         Ok(StageAnswer::Duplicate)
     );
+}
+
+#[test]
+fn a_refused_declaration_leaves_the_earlier_one_in_force() {
+    let (owned, members, id) = world();
+    let bytes = file_bytes();
+    let files = set_files(&owned, &bytes);
+    let mut both = alpha();
+    both.push(Owned::new("beta", "2.0.0", "any"));
+    let both_members = set(&both);
+    let both_files = set_files(&both, &bytes);
+    let refused = [
+        (names(&["beta", ""]), DeclareError::Empty { index: 1 }),
+        (
+            names(&["beta", "be ta"]),
+            DeclareError::Whitespace {
+                name: "be ta".to_owned(),
+            },
+        ),
+        (
+            names(&["beta", "b/c"]),
+            DeclareError::Slash {
+                name: "b/c".to_owned(),
+            },
+        ),
+        (
+            names(&["beta", "Beta"]),
+            DeclareError::Duplicate {
+                name: "Beta".to_owned(),
+            },
+        ),
+    ];
+    for (declaration, error) in refused {
+        // `alpha` is declared by `registry`; the refused declaration would have admitted `beta`.
+        let mut reg = registry(held(&id), &clock());
+        assert_eq!(reg.declare(&declaration), Err(error.clone()));
+        // The newly named `beta` is not declared, and nothing is sent for it.
+        assert_eq!(
+            reg.stage(&caller(), &both_members, &both_files),
+            Err(SeamError::Undeclared {
+                name: "beta".to_owned()
+            }),
+            "{error:?}"
+        );
+        assert!(reg.transport().log.is_empty(), "{error:?}");
+        // The earlier declaration of `alpha` is in force.
+        assert_eq!(
+            reg.stage(&caller(), &members, &files),
+            Ok(StageAnswer::Duplicate),
+            "{error:?}"
+        );
+        assert_eq!(
+            reg.transport().lines(),
+            [format!("GET {}", group_path(&id)), format!("POST {GROUPS}")],
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
+fn replacing_a_declaration_with_an_empty_list_refuses_the_name_it_held_and_sends_nothing() {
+    let (owned, members, id) = world();
+    let bytes = file_bytes();
+    let files = set_files(&owned, &bytes);
+    let mut reg = registry(held(&id), &clock());
+    reg.declare(&[]).unwrap();
+    assert_eq!(
+        reg.stage(&caller(), &members, &files),
+        Err(SeamError::Undeclared {
+            name: "alpha".to_owned()
+        })
+    );
+    assert!(reg.transport().log.is_empty());
 }
 
 #[test]

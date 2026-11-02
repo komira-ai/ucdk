@@ -167,7 +167,7 @@ fn retry_after_seconds(response: &Response) -> Option<u64> {
 /// A 429: `RateLimited` for the seconds `Retry-After` states (rounded up to ticks by the seam,
 /// at least one), never more than `ceiling`; a longer wait is a refusal, because the daily file
 /// allowance can ask for up to a day and a `Pause` of that length is never the answer.
-fn rate_limited(response: &Response, ceiling: Duration) -> SeamError {
+pub(crate) fn rate_limited(response: &Response, ceiling: Duration) -> SeamError {
     let seconds = retry_after_seconds(response).unwrap_or(DEFAULT_RETRY_AFTER_SECONDS);
     if Duration::from_secs(seconds) > ceiling {
         return SeamError::Refused(Reason::Channel);
@@ -204,7 +204,9 @@ pub fn map_reply(op: Op, response: &Response, ceiling: Duration) -> Option<Mappe
         (Op::Commit, Some("upload_invalid")) => transient(),
         // Authorisation of a commit that was sent: the token may have been honoured first.
         (Op::Commit, _) => unknown(),
-        (Op::Read, Some("package_not_found" | "version_not_found")) => Mapped::Missing,
+        (Op::Read, Some("package_not_found" | "version_not_found")) if status == 404 => {
+            Mapped::Missing
+        }
         (Op::Create | Op::Yank, Some("package_not_found" | "not_owner")) => refuse(),
         (Op::Create, Some("limit_exceeded" | "payload_too_large")) => refuse(),
         (_, Some("token_expired")) if status == 401 => {

@@ -122,3 +122,31 @@ fn a_record_for_another_package_or_version_or_with_two_files_for_a_subdirectory_
         assert!(matches!(result, Err(SeamError::Permanent(_))), "{result:?}");
     }
 }
+
+#[test]
+fn a_version_read_that_failed_is_never_absent_whatever_error_code_it_carries() {
+    use ucdk_release_seams::Backoff;
+    let path = record_path("alpha", "1.0.0");
+    let limited = |code: &str| Ok(response(429, &[("retry-after", "7")], &error_body(code)));
+    for code in ["package_not_found", "version_not_found"] {
+        let read = |reply: Reply| {
+            let fake = Fake::default().on(Method::Get, &path, vec![reply]);
+            reg(fake).read_record("alpha", "1.0.0")
+        };
+        let transient = read(error_reply(500, code));
+        assert!(
+            matches!(transient, Err(SeamError::Transient(_))),
+            "{transient:?}"
+        );
+        assert_eq!(
+            read(error_reply(401, code)),
+            Err(SeamError::GrantRefused(GrantFault::Denied)),
+            "{code}"
+        );
+        assert_eq!(
+            read(limited(code)),
+            Err(SeamError::RateLimited(Backoff::after_millis(7000))),
+            "{code}"
+        );
+    }
+}

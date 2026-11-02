@@ -2,8 +2,11 @@
 //! The bodies mopm answers with on success, read into plain types: the group a create or a read
 //! describes, and the record of a version. A body that does not have the shape of mopm's response
 //! schema is `None`, and the caller makes a schema violation of it. Nothing here is lenient: a
-//! field of the wrong type, an unknown status or subdirectory and a malformed digest all fail the
-//! whole body, so that nothing is decided on a half-read answer.
+//! field of the wrong type (an optional one that is present included), an unknown status or
+//! subdirectory, a malformed digest or group id, a file of an open group without `uploaded`, a
+//! file of a version that is not tombstoned without its `url`, and an upload header that is not a
+//! plain header or that is a credential all fail the whole body, so that nothing is decided on a
+//! half-read answer. Fields this crate does not read are ignored.
 
 use serde_json::Value;
 
@@ -71,7 +74,9 @@ pub struct Group {
 }
 
 /// Where and how to `PUT` a file the registry does not hold yet. The headers go with the `PUT`
-/// exactly as given, and the bearer token never does.
+/// exactly as given, and the bearer token never does: a header named `authorization` or
+/// `proxy-authorization` in any case, a name that is not an HTTP token, a value that is not
+/// visible ASCII, spaces and tabs, and a name given twice are refused when the answer is read.
 #[derive(Clone)]
 pub struct Target {
     pub url: Url,
@@ -98,7 +103,8 @@ pub struct MemberAnswer {
 pub struct Created {
     pub id: String,
     pub status: GroupStatus,
-    /// The call ran out of time before it reached every member: the same request is sent again.
+    /// The call ran out of time before it reached every member (`reserving: {done, total}`): the
+    /// same request is sent again.
     pub reserving: bool,
     /// The groups of the caller this create ended.
     pub superseded: Vec<String>,
@@ -174,6 +180,54 @@ fn stored(file: &MemberFile) -> FileFact {
 }
 
 impl Created {
+    /// Whether a finished answer (not `reserving`) answers the declared set `members` and nothing
+    /// else. An open group lists each declared member once, and each of its declared files once,
+    /// stored or with a target; a group past open (`validating`, `committed`, `visible`) lists
+    /// declared members only, with no files. Any other status, a member or file missing, given
+    /// twice or not declared does not answer the set, and nothing is uploaded on it. A member of an
+    /// open group that lists no files is not read as stored: mopm answers `skip_identical` with no
+    /// files only for a group past open, and a set whose files are all stored is `Duplicate` by the
+    /// group read before any create is sent.
+    pub fn answers(&self, members: &[Member]) -> bool {
+        let declared = |a: &MemberAnswer| {
+            members.iter().find(|m| {
+                (m.name.as_str(), m.version.as_str()) == (a.name.as_str(), a.version.as_str())
+            })
+        };
+        let once = self.members.iter().enumerate().all(|(i, a)| {
+            self.members[..i].iter().all(|b| {
+                (b.name.as_str(), b.version.as_str()) != (a.name.as_str(), a.version.as_str())
+            })
+        });
+        match self.status {
+            GroupStatus::Open => {
+                once && self.members.len() == members.len()
+                    && self.members.iter().all(|a| {
+                        declared(a).is_some_and(|m| {
+                            a.files.len() == m.files.len()
+                                && m.files.iter().all(|f| {
+                                    a.files
+                                        .iter()
+                                        .filter(|u| {
+                                            (u.subdir, u.filename.as_str())
+                                                == (f.subdir, f.file_name.as_str())
+                                        })
+                                        .count()
+                                        == 1
+                                })
+                        })
+                    })
+            }
+            GroupStatus::Validating | GroupStatus::Committed | GroupStatus::Visible => {
+                once && self
+                    .members
+                    .iter()
+                    .all(|a| a.files.is_empty() && declared(a).is_some())
+            }
+            _ => false,
+        }
+    }
+
     /// The target of the `PUT` of `file` of `member`, if the registry lists the file as not stored.
     pub fn pending(&self, member: &Member, file: &MemberFile) -> Option<&Target> {
         self.members
@@ -195,6 +249,19 @@ fn text<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str)
 }
 
+/// An optional field: `Some(None)` when it is absent, `None` when it is present and not what
+/// `read` takes, so that a malformed optional field fails the body and is never read as absent.
+fn optional<'a, T>(
+    value: &'a Value,
+    key: &str,
+    read: fn(&'a Value) -> Option<T>,
+) -> Option<Option<T>> {
+    match value.get(key) {
+        None => Some(None),
+        Some(field) => read(field).map(Some),
+    }
+}
+
 fn digest<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     text(value, key).filter(|d| valid_sha256(d))
 }
@@ -214,14 +281,17 @@ fn file_fact(value: &Value) -> Option<FileFact> {
         text(value, "filename"),
         digest(value, "sha256"),
         size,
+        optional(value, "uploaded", Value::as_bool),
     ) {
-        (Some(subdir), Some(filename), Some(sha256), Some(size)) => Some(FileFact {
-            subdir,
-            filename: filename.to_owned(),
-            sha256: sha256.to_owned(),
-            size,
-            uploaded: value.get("uploaded").and_then(Value::as_bool),
-        }),
+        (Some(subdir), Some(filename), Some(sha256), Some(size), Some(uploaded)) => {
+            Some(FileFact {
+                subdir,
+                filename: filename.to_owned(),
+                sha256: sha256.to_owned(),
+                size,
+                uploaded,
+            })
+        }
         _ => None,
     }
 }
@@ -254,11 +324,18 @@ pub fn parse_group(body: &[u8]) -> Option<Group> {
         status,
         array(&value, "members", group_member),
     ) {
-        (Some(id), Some(status), Some(members)) => Some(Group {
-            id: id.to_owned(),
-            status,
-            members,
-        }),
+        (Some(id), Some(status), Some(members))
+            if status != GroupStatus::Open
+                || members
+                    .iter()
+                    .all(|m| m.files.iter().all(|f| f.uploaded.is_some())) =>
+        {
+            Some(Group {
+                id: id.to_owned(),
+                status,
+                members,
+            })
+        }
         _ => None,
     }
 }
@@ -269,14 +346,40 @@ fn target(value: &Value) -> Option<Target> {
         None => Some(Vec::new()),
         Some(map) => map.as_object().and_then(|map| {
             map.iter()
-                .map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_owned())))
+                .map(|(k, v)| {
+                    v.as_str()
+                        .filter(|v| upload_header(k, v))
+                        .map(|v| (k.clone(), v.to_owned()))
+                })
                 .collect()
         }),
     };
+    let distinct = headers.as_ref().is_some_and(|h| {
+        h.iter()
+            .enumerate()
+            .all(|(i, (k, _))| h[..i].iter().all(|(j, _)| !j.eq_ignore_ascii_case(k)))
+    });
     match (url, headers) {
-        (Some(url), Some(headers)) => Some(Target { url, headers }),
+        (Some(url), Some(headers)) if distinct => Some(Target { url, headers }),
         _ => None,
     }
+}
+
+/// Whether `name: value` may go with a storage `PUT`: the name is an HTTP token and is not a
+/// credential header, and the value is visible ASCII, spaces and tabs.
+fn upload_header(name: &str, value: &str) -> bool {
+    const TOKEN_MARKS: &[u8] = b"!#$%&'*+-.^_`|~";
+    let token = !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || TOKEN_MARKS.contains(&b));
+    let credential = ["authorization", "proxy-authorization"]
+        .iter()
+        .any(|c| name.eq_ignore_ascii_case(c));
+    let plain = value
+        .bytes()
+        .all(|b| b.is_ascii_graphic() || b == b' ' || b == b'\t');
+    token && !credential && plain
 }
 
 fn upload_file(value: &Value) -> Option<UploadFile> {
@@ -317,10 +420,23 @@ fn group_ids(value: &Value, key: &str) -> Option<Vec<String>> {
         None => Some(Vec::new()),
         Some(list) => list.as_array().and_then(|ids| {
             ids.iter()
-                .map(|id| id.as_str().map(str::to_owned))
+                .map(|id| {
+                    id.as_str()
+                        .filter(|id| valid_group_id(id))
+                        .map(str::to_owned)
+                })
                 .collect()
         }),
     }
+}
+
+/// `reserving`: absent, or `{done, total}` with two counts.
+fn reserving(value: &Value) -> Option<bool> {
+    let counts = |field: &Value| {
+        let count = |key| field.get(key).and_then(Value::as_u64);
+        (field.is_object() && count("done").is_some() && count("total").is_some()).then_some(())
+    };
+    optional(value, "reserving", counts).map(|r| r.is_some())
 }
 
 /// The body of the answer to `POST /groups`.
@@ -333,14 +449,17 @@ pub fn parse_created(body: &[u8]) -> Option<Created> {
         status,
         members,
         group_ids(&value, "superseded"),
+        reserving(&value),
     ) {
-        (Some(id), Some(status), Some(members), Some(superseded)) => Some(Created {
-            id: id.to_owned(),
-            status,
-            reserving: value.get("reserving").is_some(),
-            superseded,
-            members,
-        }),
+        (Some(id), Some(status), Some(members), Some(superseded), Some(reserving)) => {
+            Some(Created {
+                id: id.to_owned(),
+                status,
+                reserving,
+                superseded,
+                members,
+            })
+        }
         _ => None,
     }
 }
@@ -353,20 +472,22 @@ fn record_file(value: &Value) -> Option<RecordFile> {
         text(value, "filename"),
         digest(value, "sha256"),
         size,
+        optional(value, "url", Value::as_str),
     ) {
-        (Some(subdir), Some(filename), Some(sha256), Some(size)) => Some(RecordFile {
+        (Some(subdir), Some(filename), Some(sha256), Some(size), Some(url)) => Some(RecordFile {
             subdir,
             filename: filename.to_owned(),
             sha256: sha256.to_owned(),
             size,
-            url: text(value, "url").map(str::to_owned),
+            url: url.map(str::to_owned),
         }),
         _ => None,
     }
 }
 
 /// The body of `GET /packages/{name}/{version}`. A record that shows two files for one
-/// subdirectory is a broken response, since one version holds at most one file per subdirectory.
+/// subdirectory is a broken response, since one version holds at most one file per subdirectory,
+/// and so is a published or yanked version with a file that has no `url`.
 pub fn parse_record(body: &[u8]) -> Option<VersionRecord> {
     let value: Value = serde_json::from_slice(body).ok()?;
     let state = text(&value, "state").and_then(VersionState::parse);
@@ -385,7 +506,8 @@ pub fn parse_record(body: &[u8]) -> Option<VersionRecord> {
             if files
                 .iter()
                 .enumerate()
-                .all(|(i, f)| files[..i].iter().all(|g| g.subdir != f.subdir)) =>
+                .all(|(i, f)| files[..i].iter().all(|g| g.subdir != f.subdir))
+                && (state == VersionState::Tombstoned || files.iter().all(|f| f.url.is_some())) =>
         {
             Some(VersionRecord {
                 name: name.to_owned(),

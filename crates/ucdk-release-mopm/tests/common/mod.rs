@@ -162,6 +162,12 @@ pub struct Logged {
     pub authorized: bool,
     /// The value of the `authorization` header, as sent.
     pub bearer: Option<String>,
+    /// Every header in the order sent: a plain value as it is, a secret as `<secret>`.
+    pub headers: Vec<(String, String)>,
+    /// The body bytes, as sent.
+    pub raw: Vec<u8>,
+    /// The query of the URL, as sent.
+    pub query_text: Option<String>,
 }
 
 /// A registry written by hand: each route is a method and a path with the replies it gives in
@@ -221,6 +227,23 @@ impl Transport for Fake {
                 }
                 _ => None,
             }),
+            headers: request
+                .headers
+                .iter()
+                .map(|h| {
+                    let value = match &h.value {
+                        HeaderValue::Plain(v) => v.clone(),
+                        HeaderValue::Secret(_) => "<secret>".to_owned(),
+                    };
+                    (h.name.clone(), value)
+                })
+                .collect(),
+            raw: request.body.to_vec(),
+            query_text: request
+                .url
+                .expose()
+                .split_once('?')
+                .map(|(_, q)| q.to_owned()),
         });
         for (method, at, clock, by) in &self.bumps {
             if *method == request.method && *at == path {
