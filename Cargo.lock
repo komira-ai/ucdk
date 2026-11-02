@@ -760,6 +760,7 @@ name = "ucdk-release-mopm"
 version = "0.0.0"
 dependencies = [
  "rustls",
+ "serde",
  "serde_json",
  "sha2",
  "ucdk-core",
@@ -768,6 +769,7 @@ dependencies = [
  "ucdk-release-proto",
  "ucdk-release-seams",
  "ureq",
+ "zeroize",
 ]
 
 [[package]]

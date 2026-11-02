@@ -162,6 +162,25 @@ impl Url {
         }
     }
 
+    /// This URL with the query parameter `key=value`, both percent-encoded, in place of any
+    /// parameter already called `key`, however its name is escaped (so the server can never
+    /// read an earlier value instead); every other parameter is kept, in order, and an empty one
+    /// is dropped.
+    #[must_use]
+    pub(crate) fn with_param(&self, key: &str, value: &str) -> Url {
+        let pair = format!("{}={}", encode_segment(key), encode_segment(value));
+        let kept = self.query.iter().flat_map(|q| q.split('&')).filter(|p| {
+            let name = p.split_once('=').map_or(*p, |(name, _)| name);
+            !p.is_empty() && percent_decoded(name) != key.as_bytes()
+        });
+        let query = kept.chain([pair.as_str()]).collect::<Vec<_>>().join("&");
+        Url {
+            origin: self.origin.clone(),
+            path: self.path.clone(),
+            query: Some(query),
+        }
+    }
+
     /// The URL with its query replaced by `<redacted>`: safe to print and to put in an error.
     pub fn redacted(&self) -> String {
         let query = if self.query.is_some() {
@@ -179,6 +198,32 @@ impl Url {
             None => format!("{}{}", self.origin, self.path),
         }
     }
+}
+
+/// The bytes a query name stands for: each `%` and two hex digits is the byte they name, and
+/// every other byte, a `%` that starts no escape included, is itself.
+fn percent_decoded(text: &str) -> Vec<u8> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let escape = bytes
+            .get(at + 1..at + 3)
+            .filter(|_| bytes[at] == b'%')
+            .and_then(|hex| std::str::from_utf8(hex).ok())
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        match escape {
+            Some(byte) => {
+                out.push(byte);
+                at += 3;
+            }
+            None => {
+                out.push(bytes[at]);
+                at += 1;
+            }
+        }
+    }
+    out
 }
 
 /// One path segment, percent-encoded: letters, digits and `-._~` stay, every other byte is

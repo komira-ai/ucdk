@@ -1,0 +1,378 @@
+// SPDX-License-Identifier: Apache-2.0
+//! The grant envelope: what the mopm grant source writes into [`Grant::issued`] and the
+//! publisher reads back, and the checks the publisher makes of a grant before it sends anything.
+//!
+//! The envelope is the grant's secret. It is length-framed text, so no field can run into the
+//! next: the version, the phase, the exceptional mark, the registry location, the actor, the
+//! number of coordinates and the five fields of each, and last the token mopm minted. It is
+//! unauthenticated and private to this crate: the publisher trusts the grant source that built
+//! it. An [`Envelope`] is neither `Debug`, `Display` nor `Clone`, and its token is overwritten
+//! with zeros by the `zeroize` crate when it is dropped.
+//!
+//! Every check here is client-side and sends nothing: a refused grant is
+//! `GrantRefused(Denied)` (the grant is not for this call) or `GrantRefused(Expired)`.
+
+use std::fmt;
+
+use ucdk_release::codec::{GrantFault, GrantPhase};
+use ucdk_release_proto::v1::Coordinate;
+use ucdk_release_seams::{Grant, SeamError};
+use zeroize::{ZeroizeOnDrop, Zeroizing};
+
+const VERSION: &str = "1";
+
+/// Why bytes are not an envelope this crate wrote, or why an envelope cannot be made. Each
+/// names the part at fault; none carries any of the bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Malformed {
+    /// A length that is not canonical decimal digits followed by `:`, or that runs past the end.
+    Frame,
+    /// A version other than this crate's.
+    Version,
+    /// A phase not on the list.
+    Phase,
+    /// An exceptional mark other than `0` or `1`.
+    Mark,
+    /// A text field that is not UTF-8.
+    Text,
+    /// A coordinate count or type that is not canonical decimal (no `+`, no leading zero, no
+    /// `-0`) or does not fit its type.
+    Number,
+    /// A Read envelope that carries a token, or a write envelope whose token is empty or not
+    /// visible ASCII.
+    Token,
+    /// Bytes after the token.
+    Trailing,
+}
+
+impl fmt::Display for Malformed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let part = match self {
+            Malformed::Frame => "a length frame",
+            Malformed::Version => "the version",
+            Malformed::Phase => "the phase",
+            Malformed::Mark => "the exceptional mark",
+            Malformed::Text => "a text field",
+            Malformed::Number => "a number",
+            Malformed::Token => "the token",
+            Malformed::Trailing => "the bytes after the token",
+        };
+        write!(f, "not a grant envelope: {part} is malformed")
+    }
+}
+
+impl std::error::Error for Malformed {}
+
+/// What a grant says it is for, and the token it carries.
+pub struct Envelope {
+    pub phase: GrantPhase,
+    /// The grant was exchanged for the exceptional subject; carried so a log shows it.
+    pub exceptional: bool,
+    /// The location of the registry the grant is for, compared byte for byte.
+    pub registry: String,
+    /// The actor of the group id: `u:<id>` or `ci:gh-repo:<id>`.
+    pub actor: String,
+    /// Every coordinate the grant covers, by all five fields.
+    pub coordinates: Vec<Coordinate>,
+    token: Zeroizing<Vec<u8>>,
+}
+
+// The token is held in `Zeroizing`, which wipes it on drop, so the envelope is wiped on drop too.
+// This marker is a promise the compiler does not check: every field of `Envelope` that holds a
+// secret must be `Zeroizing`, or be wiped by a `Drop` of its own, before it is added.
+impl ZeroizeOnDrop for Envelope {}
+
+/// The bytes [`put`] writes for a text of `len` bytes: its decimal length, a colon and the text.
+fn framed_len(len: usize) -> usize {
+    len.to_string().len() + 1 + len
+}
+
+fn put(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(bytes.len().to_string().as_bytes());
+    out.push(b':');
+    out.extend_from_slice(bytes);
+}
+
+fn phase_word(phase: GrantPhase) -> &'static str {
+    match phase {
+        GrantPhase::Stage => "stage",
+        GrantPhase::Commit => "commit",
+        GrantPhase::Read => "read",
+    }
+}
+
+/// The next framed text of `rest` and what follows it. The length is canonical decimal digits:
+/// no sign, no leading zero, so one text has one encoding.
+fn take<'a>(rest: &mut &'a [u8]) -> Result<&'a [u8], Malformed> {
+    let colon = rest
+        .iter()
+        .position(|b| *b == b':')
+        .ok_or(Malformed::Frame)?;
+    let digits = std::str::from_utf8(&rest[..colon]).map_err(|_| Malformed::Frame)?;
+    let len: usize = digits.parse().map_err(|_| Malformed::Frame)?;
+    if digits != len.to_string() {
+        return Err(Malformed::Frame);
+    }
+    let body = &rest[colon + 1..];
+    if len > body.len() {
+        return Err(Malformed::Frame);
+    }
+    let (text, after) = body.split_at(len);
+    *rest = after;
+    Ok(text)
+}
+
+fn take_str(rest: &mut &[u8]) -> Result<String, Malformed> {
+    String::from_utf8(take(rest)?.to_vec()).map_err(|_| Malformed::Text)
+}
+
+/// The next framed text as a number written the one way [`Envelope::encode`] writes it,
+/// canonical decimal: no `+`, no leading zero, no `-0`, and in range of its type (a negative
+/// type is written with its `-`).
+fn take_number<N: std::str::FromStr + ToString>(rest: &mut &[u8]) -> Result<N, Malformed> {
+    let text = take_str(rest)?;
+    let number: N = text.parse().map_err(|_| Malformed::Number)?;
+    (number.to_string() == text)
+        .then_some(number)
+        .ok_or(Malformed::Number)
+}
+
+impl Envelope {
+    /// An envelope, if `token` fits `phase`: a Read envelope carries none, and a stage or commit
+    /// envelope carries one or more visible ASCII characters (all a header value may hold). So
+    /// every envelope that can be made can be encoded and decoded back. The token is wiped on
+    /// drop whether it is accepted or refused.
+    pub fn new(
+        phase: GrantPhase,
+        exceptional: bool,
+        registry: String,
+        actor: String,
+        coordinates: Vec<Coordinate>,
+        token: Vec<u8>,
+    ) -> Result<Self, Malformed> {
+        let token = Zeroizing::new(token);
+        let visible = token.iter().all(u8::is_ascii_graphic);
+        let carries = !token.is_empty();
+        if !visible || carries != (phase != GrantPhase::Read) {
+            return Err(Malformed::Token);
+        }
+        Ok(Self {
+            phase,
+            exceptional,
+            registry,
+            actor,
+            coordinates,
+            token,
+        })
+    }
+
+    /// The token mopm minted, as sent in the `authorization` header. `None` for a Read
+    /// envelope, which carries none.
+    pub fn bearer_token(&self) -> Option<&[u8]> {
+        (!self.token.is_empty()).then_some(self.token.as_slice())
+    }
+
+    /// The bytes of the grant's secret. They hold the token, so they are wiped on drop, and the
+    /// buffer is sized once so that no reallocation leaves a copy of the token behind.
+    pub fn encode(&self) -> Zeroizing<Vec<u8>> {
+        let count = self.coordinates.len().to_string();
+        let texts = [
+            VERSION.len(),
+            phase_word(self.phase).len(),
+            1,
+            self.registry.len(),
+            self.actor.len(),
+            count.len(),
+            self.token.len(),
+        ];
+        let fields = self.coordinates.iter().flat_map(|c| {
+            [
+                c.channel.len(),
+                c.r#type.to_string().len(),
+                c.name.len(),
+                c.version.len(),
+                c.platform.len(),
+            ]
+        });
+        let size: usize = texts.into_iter().chain(fields).map(framed_len).sum();
+        let mut out = Zeroizing::new(Vec::with_capacity(size));
+        put(&mut out, VERSION.as_bytes());
+        put(&mut out, phase_word(self.phase).as_bytes());
+        put(&mut out, if self.exceptional { b"1" } else { b"0" });
+        put(&mut out, self.registry.as_bytes());
+        put(&mut out, self.actor.as_bytes());
+        put(&mut out, count.as_bytes());
+        for c in &self.coordinates {
+            put(&mut out, c.channel.as_bytes());
+            put(&mut out, c.r#type.to_string().as_bytes());
+            put(&mut out, c.name.as_bytes());
+            put(&mut out, c.version.as_bytes());
+            put(&mut out, c.platform.as_bytes());
+        }
+        put(&mut out, &self.token);
+        out
+    }
+
+    /// Reads what [`Envelope::encode`] wrote. Anything else is [`Malformed`], naming the part at
+    /// fault: a bad length frame, another version, a phase or mark not on the list, a text that
+    /// is not UTF-8, a count or type not in canonical decimal, a coordinate count that does not
+    /// fit the bytes, a token that does not fit the phase (as [`Envelope::new`] checks), and
+    /// bytes left over.
+    pub fn decode(bytes: &[u8]) -> Result<Self, Malformed> {
+        let mut rest = bytes;
+        if take(&mut rest)? != VERSION.as_bytes() {
+            return Err(Malformed::Version);
+        }
+        let phase = match take(&mut rest)? {
+            b"stage" => GrantPhase::Stage,
+            b"commit" => GrantPhase::Commit,
+            b"read" => GrantPhase::Read,
+            _ => return Err(Malformed::Phase),
+        };
+        let exceptional = match take(&mut rest)? {
+            b"0" => false,
+            b"1" => true,
+            _ => return Err(Malformed::Mark),
+        };
+        let registry = take_str(&mut rest)?;
+        let actor = take_str(&mut rest)?;
+        let count: usize = take_number(&mut rest)?;
+        let mut coordinates = Vec::new();
+        for _ in 0..count {
+            let channel = take_str(&mut rest)?;
+            let r#type: i32 = take_number(&mut rest)?;
+            let name = take_str(&mut rest)?;
+            let version = take_str(&mut rest)?;
+            let platform = take_str(&mut rest)?;
+            coordinates.push(Coordinate {
+                channel,
+                r#type,
+                name,
+                version,
+                platform,
+            });
+        }
+        let token = take(&mut rest)?.to_vec();
+        let envelope = Self::new(phase, exceptional, registry, actor, coordinates, token)?;
+        if !rest.is_empty() {
+            return Err(Malformed::Trailing);
+        }
+        Ok(envelope)
+    }
+}
+
+/// The verb a grant is presented to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verb {
+    Observe,
+    Fetch,
+    Newest,
+    List,
+    Stage,
+    Abort,
+    Commit,
+    Yank,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Needs {
+    Any,
+    Stage,
+    Commit,
+}
+
+impl Verb {
+    fn is_read(self) -> bool {
+        self.needs() == Needs::Any
+    }
+
+    /// The phase that may present a grant to this verb: a stage grant stages and aborts, a
+    /// commit grant commits and yanks, and a read takes a grant of any phase (the group read of
+    /// an observe needs a token, which a Read envelope does not carry; the caller sees that).
+    fn needs(self) -> Needs {
+        match self {
+            Verb::Observe | Verb::Fetch | Verb::Newest | Verb::List => Needs::Any,
+            Verb::Stage | Verb::Abort => Needs::Stage,
+            Verb::Commit | Verb::Yank => Needs::Commit,
+        }
+    }
+}
+
+/// What a call is about to do with a grant.
+pub struct Use<'a> {
+    /// The configured registry location, compared byte for byte with the envelope's.
+    pub registry: &'a str,
+    /// The injected clock's now, in milliseconds.
+    pub now_ms: u64,
+    pub verb: Verb,
+    /// Every coordinate the call names: for `observe` the key and the whole declared set, for
+    /// `abort` the whole set, for a yank every held sibling. Empty for `newest` and `list`.
+    pub coordinates: &'a [&'a Coordinate],
+    /// How long the call may run: the grant must still be good this long after now.
+    pub lasts_ms: u64,
+}
+
+fn denied() -> SeamError {
+    SeamError::GrantRefused(GrantFault::Denied)
+}
+
+/// Checks `grant` for `call`, sending nothing. `Ok(None)` is no grant: an anonymous read.
+/// Otherwise the envelope the call may present.
+///
+/// Refused as `Denied`: no grant for a write, an envelope that is not one, one for another
+/// registry, one of a phase the verb does not accept, and one that leaves any coordinate of the
+/// call uncovered (every one is checked, not the first). Refused as `Expired`: a grant whose
+/// stated expiry is not after now plus `lasts_ms`. A grant with a wrong repository is `Denied`
+/// whether or not it is also expired.
+pub fn authorise(grant: &Grant, call: &Use<'_>) -> Result<Option<Envelope>, SeamError> {
+    let Some(expires) = grant.expires_ms() else {
+        return if call.verb.is_read() {
+            Ok(None)
+        } else {
+            Err(denied())
+        };
+    };
+    let envelope = Envelope::decode(grant.secret()).map_err(|_| denied())?;
+    if envelope.registry != call.registry {
+        return Err(denied());
+    }
+    let phase_ok = match call.verb.needs() {
+        Needs::Any => true,
+        Needs::Stage => envelope.phase == GrantPhase::Stage,
+        Needs::Commit => envelope.phase == GrantPhase::Commit,
+    };
+    let covered = call
+        .coordinates
+        .iter()
+        .all(|c| envelope.coordinates.iter().any(|held| held == *c));
+    if !phase_ok || !covered {
+        return Err(denied());
+    }
+    if expires <= call.now_ms.saturating_add(call.lasts_ms) {
+        return Err(SeamError::GrantRefused(GrantFault::Expired));
+    }
+    Ok(Some(envelope))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_token_and_its_encoding_are_wiped_storage() {
+        let envelope = Envelope::new(
+            GrantPhase::Stage,
+            false,
+            "r".to_owned(),
+            "a".to_owned(),
+            Vec::new(),
+            b"t".to_vec(),
+        )
+        .unwrap();
+        // These lines compile only while each buffer is `Zeroizing`.
+        let token: &Zeroizing<Vec<u8>> = &envelope.token;
+        let encoded: Zeroizing<Vec<u8>> = envelope.encode();
+        assert_eq!(token.as_slice(), b"t");
+        assert!(!encoded.is_empty());
+    }
+}
