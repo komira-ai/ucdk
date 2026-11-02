@@ -7,11 +7,18 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
+use common::release::{
+    every_release_record, golden_records, grant, granted, publication, publication_at, put_release,
+    read_release, refused, run, seal,
+};
 use common::{Scratch, confirmed, path, put, record};
 use ucdk_ledger::{
     Change, Fence, FileLedger, Holding, LeaseError, LeaseState, Ledger, LedgerError,
-    MAX_CLOCK_SKEW, ManualClock, MemoryLedger, State,
+    MAX_CLOCK_SKEW, ManualClock, MemoryLedger, Origin, State,
 };
+use ucdk_release::codec::{Phase, keys_of};
+use ucdk_release::transitions::Kind;
+use ucdk_release_proto::v1::{ArtifactType, Coordinate};
 
 /// Runs `check` on a fresh ledger of each kind.
 fn on_every_ledger(name: &str, check: impl Fn(&dyn Ledger)) {
@@ -319,4 +326,242 @@ fn of_two_acquire_ifs_on_one_token_and_fence_exactly_one_is_granted() {
             .any(|o| matches!(o, Err(LeaseError::Held { .. }))),
         "{outcomes:?}"
     );
+}
+
+// ---- release records ---------------------------------------------------------------------------
+// A release record is a record of the ledger like any other: the codec fills the tag, the readable
+// name and the payload, and the ledger keeps them. Each test below writes through the helpers of
+// `common::release`, reads the file back from a handle opened afresh, and decodes it.
+
+/// Opens the ledger file again, as a later process does.
+fn reopened(scratch: &Scratch) -> FileLedger {
+    FileLedger::open(scratch.file()).expect("open again")
+}
+
+#[test]
+fn publication_record_survives_reopen() {
+    let scratch = Scratch::new("pub-reopen");
+    let intent = publication(Some(Phase::Committing));
+    let at = {
+        let ledger = FileLedger::open(scratch.file()).expect("open");
+        put_release(&ledger, &intent, Origin::Created, State::Intent)
+    };
+    let ledger = reopened(&scratch);
+    assert_eq!(
+        read_release(&ledger, &at),
+        Some((intent.clone(), Origin::Created, State::Intent)),
+        "the intent, with the phase whose effect may have landed"
+    );
+    // Confirmed once the read-back saw the bytes: the same path, no phase.
+    let confirmed = publication(None);
+    assert_eq!(
+        put_release(&ledger, &confirmed, Origin::Created, State::Confirmed),
+        at,
+        "a publication keeps one path through its states"
+    );
+    drop(ledger);
+    assert_eq!(
+        read_release(&reopened(&scratch), &at),
+        Some((confirmed, Origin::Created, State::Confirmed))
+    );
+    // And a coordinate found in a registry is kept as adopted.
+    let found = golden_records()
+        .into_iter()
+        .find(|(_, origin, _)| matches!(origin, Origin::Adopted))
+        .expect("an adopted publication");
+    let ledger = reopened(&scratch);
+    let at = put_release(&ledger, &found.0, found.1, found.2);
+    drop(ledger);
+    assert_eq!(read_release(&reopened(&scratch), &at), Some(found));
+}
+
+#[test]
+fn run_record_payload_round_trips_through_the_file_ledger() {
+    let scratch = Scratch::new("run-payload");
+    let record = run();
+    let at = {
+        let ledger = FileLedger::open(scratch.file()).expect("open");
+        put_release(&ledger, &record, Origin::Created, State::Confirmed)
+    };
+    let snapshot = reopened(&scratch).read().expect("read");
+    let held = &snapshot.records[&at];
+    assert_eq!(held.kind.as_str(), "run");
+    assert_eq!(held.name, "run-7", "the name is the run id");
+    assert!(held.physical.is_none() && held.deps.is_empty());
+    let keys: Vec<&str> = held.outputs.keys().map(String::as_str).collect();
+    let mut listed = keys_of(record.kind()).to_vec();
+    listed.sort_unstable();
+    assert_eq!(keys, listed, "every payload key of a run is on the list");
+    assert_eq!(
+        read_release(&reopened(&scratch), &at),
+        Some((record, Origin::Created, State::Confirmed))
+    );
+}
+
+#[test]
+fn a_seal_record_round_trips_through_the_file_ledger() {
+    let scratch = Scratch::new("seal");
+    let record = seal();
+    // A seal is created confirmed, in one write: the ledger never held it as an intent.
+    let ledger = FileLedger::open(scratch.file()).expect("open");
+    let before = ledger.read().expect("read").token;
+    let at = put_release(&ledger, &record, Origin::Created, State::Confirmed);
+    let after = ledger.read().expect("read");
+    assert_ne!(after.token, before);
+    assert_eq!(after.records.len(), 1);
+    assert_eq!(after.records[&at].state, State::Confirmed);
+    assert_eq!(
+        after.records[&at].name,
+        "build/linux-x86_64/0123456789abcdef"
+    );
+    drop(ledger);
+    assert_eq!(
+        read_release(&reopened(&scratch), &at),
+        Some((record, Origin::Created, State::Confirmed))
+    );
+}
+
+#[test]
+fn a_grant_record_round_trips_and_holds_no_secret_key() {
+    let scratch = Scratch::new("grant");
+    let ledger = FileLedger::open(scratch.file()).expect("open");
+    // The exchanges of one phase of one attempt: asked, granted, and a second one refused. Each
+    // is a record of its own, and the asked one is rewritten when it is answered.
+    let asked = grant(1, None);
+    let first = put_release(&ledger, &asked, Origin::Created, State::Intent);
+    let answered = grant(1, Some(granted()));
+    assert_eq!(
+        put_release(&ledger, &answered, Origin::Created, State::Confirmed),
+        first
+    );
+    let second = put_release(
+        &ledger,
+        &grant(2, Some(refused())),
+        Origin::Created,
+        State::Confirmed,
+    );
+    assert_ne!(first, second);
+    drop(ledger);
+    let ledger = reopened(&scratch);
+    assert_eq!(
+        read_release(&ledger, &first),
+        Some((answered, Origin::Created, State::Confirmed))
+    );
+    assert_eq!(
+        read_release(&ledger, &second),
+        Some((grant(2, Some(refused())), Origin::Created, State::Confirmed))
+    );
+    // The ledger is a plain text document: no key and no value of a grant is a credential.
+    let text = std::fs::read_to_string(scratch.file()).expect("the file");
+    for record in ledger.read().expect("read").records.values() {
+        for key in record.outputs.keys() {
+            let lower = key.to_ascii_lowercase();
+            for secret in ["token", "secret", "password", "credential", "jwt"] {
+                assert!(
+                    !lower.contains(secret),
+                    "the key {key} could hold a credential"
+                );
+            }
+            assert!(
+                keys_of(Kind::Grant).contains(&key.as_str()),
+                "{key} is not on the list of a grant"
+            );
+        }
+    }
+    assert!(text.contains("output coordinates "));
+}
+
+#[test]
+fn every_release_record_comes_back_identical_from_every_ledger() {
+    // Each kind the codec writes, put into a ledger record, written and read back, is the record
+    // it was, with its origin and state: on the memory ledger, and on the file ledger both on the
+    // handle that wrote it and on one opened afresh. The light form of a record is kept at the
+    // path of its full form, so each record has a ledger of its own.
+    for (n, wanted) in every_release_record().into_iter().enumerate() {
+        let (release, origin, state) = wanted.clone();
+        on_every_ledger(&format!("release-every-{n}"), |ledger| {
+            let at = put_release(ledger, &release, origin, state);
+            assert_eq!(ledger.read().expect("read").records.len(), 1);
+            assert_eq!(read_release(ledger, &at), Some(wanted.clone()), "{at}");
+        });
+        let scratch = Scratch::new(&format!("release-every-reopen-{n}"));
+        let at = {
+            let ledger = FileLedger::open(scratch.file()).expect("open");
+            put_release(&ledger, &release, origin, state)
+        };
+        assert_eq!(read_release(&reopened(&scratch), &at), Some(wanted), "{at}");
+    }
+}
+
+fn coordinate(channel: &str, name: &str, version: &str, platform: &str) -> Coordinate {
+    Coordinate {
+        channel: channel.to_owned(),
+        r#type: ArtifactType::File as i32,
+        name: name.to_owned(),
+        version: version.to_owned(),
+        platform: platform.to_owned(),
+    }
+}
+
+#[test]
+fn framed_coordinates_of_any_text_are_kept_by_the_file_ledger_side_by_side() {
+    // Publications whose framed coordinates hold non-ASCII text, spaces, tabs, line breaks,
+    // percent signs, `=`, `,`, colons and digits, and two coordinates that a `/` join would spell
+    // alike, are written together into one file, read back from a handle opened afresh, and each
+    // is the record it was at a path of its own.
+    let coordinates = [
+        coordinate("stable", "t\u{f6}\u{f6}l", "1.0", "linux-x86_64"),
+        coordinate("st\u{e9}ble", "\u{1f980}", "\u{2163}", "\u{7a0b}"),
+        coordinate("stable", "two words", "1.0\tbeta", " p "),
+        coordinate("stable", "line\nbreak", "1.0\r\n", "p\n"),
+        coordinate("stable", "100%", "%25", "a=b,c"),
+        coordinate("3:abc", "12:", "1:2", "0:"),
+        coordinate("stable", "a/b", "c", "p"),
+        coordinate("stable", "a", "b/c", "p"),
+    ];
+    let scratch = Scratch::new("release-framed");
+    let records: Vec<_> = coordinates.iter().map(publication_at).collect();
+    let at: Vec<_> = {
+        let ledger = FileLedger::open(scratch.file()).expect("open");
+        records
+            .iter()
+            .map(|r| put_release(&ledger, r, Origin::Created, State::Confirmed))
+            .collect()
+    };
+    let distinct: std::collections::BTreeSet<_> = at.iter().collect();
+    assert_eq!(
+        distinct.len(),
+        records.len(),
+        "every coordinate has a path of its own"
+    );
+    let ledger = reopened(&scratch);
+    assert_eq!(ledger.read().expect("read").records.len(), records.len());
+    for (path, record) in at.iter().zip(&records) {
+        assert_eq!(
+            read_release(&ledger, path),
+            Some((record.clone(), Origin::Created, State::Confirmed)),
+            "{path}"
+        );
+    }
+    // The file is still lines of the format: a line break in a coordinate is escaped.
+    let text = std::fs::read_to_string(scratch.file()).expect("the file");
+    for line in text.lines() {
+        let tag = line.split(' ').next().expect("a tag");
+        assert!(
+            [
+                "ucdk-ledger",
+                "version",
+                "fence",
+                "end",
+                "record",
+                "kind",
+                "name",
+                "origin",
+                "state",
+                "output"
+            ]
+            .contains(&tag),
+            "a line outside the format: {line:?}"
+        );
+    }
 }

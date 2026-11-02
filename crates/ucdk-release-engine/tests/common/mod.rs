@@ -37,9 +37,9 @@ use ucdk_release_proto::v1::{
     ValidationKind, Visibility,
 };
 use ucdk_release_seams::{
-    ArtifactStore, Blob, BuildSystem as BuildSystemSeam, CommitAnswer, CommitUnit, EntryWriter,
-    Grant, Heartbeat, Invocation, ListScope, Listed, Located, Publisher, SeamError, StageAnswer,
-    StageItem, TestOutcome, YankUnit,
+    ArtifactStore, Blob, BuildSystem as BuildSystemSeam, CommitAnswer, CommitUnit, DeclareError,
+    EntryWriter, Grant, Heartbeat, Invocation, ListScope, Listed, Located, Publisher, SeamError,
+    StageAnswer, StageItem, TestOutcome, YankUnit,
 };
 
 pub const PLATFORM: &str = "linux-x86_64";
@@ -604,8 +604,12 @@ impl Publisher for Probe {
         self.inner.stage(g, items)
     }
 
-    fn abort(&mut self, g: &Grant, ks: &[Coordinate]) -> Result<(), SeamError> {
-        self.inner.abort(g, ks)
+    fn declare(&mut self, names: &[String]) -> Result<(), DeclareError> {
+        self.inner.declare(names)
+    }
+
+    fn abort(&mut self, g: &Grant, set: &[StageItem<'_>]) -> Result<(), SeamError> {
+        self.inner.abort(g, set)
     }
 
     fn commit(&mut self, g: &Grant, items: &[StageItem<'_>]) -> Result<CommitAnswer, SeamError> {
@@ -945,6 +949,8 @@ impl Rig {
 
     /// Commits the packages `names` of the example to the registry, as a publish would.
     pub fn publish(&mut self, names: &[&str]) {
+        let declared: Vec<String> = names.iter().map(ToString::to_string).collect();
+        self.registry.inner.declare(&declared).expect("declare");
         let held = Held::default();
         for name in names {
             let blob = bytes_of(name);

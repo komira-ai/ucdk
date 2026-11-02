@@ -11,9 +11,11 @@ use codec_records::{
     stage, stage_of, validation, written,
 };
 use ucdk_release::codec::{
-    CodecError, GrantAnswer, GrantFault, GrantPhase, Phase, Record, Seal, Stage, keys_of,
+    CodecError, GrantAnswer, GrantFault, GrantPhase, Phase, Publication, Record, Seal, Stage,
+    coordinate_text, keys_of,
 };
 use ucdk_release::transitions::Kind;
+use ucdk_release_proto::v1::{ArtifactType, Coordinate};
 
 #[test]
 fn every_record_kind_round_trips() {
@@ -439,5 +441,184 @@ fn attempt_zero_is_refused() {
             matches!(&err, CodecError::Bad { key, value, .. } if key == "attempt" && value == "0"),
             "{err:?}"
         );
+    }
+}
+
+fn coordinate(channel: &str, name: &str, version: &str, platform: &str) -> Coordinate {
+    Coordinate {
+        channel: channel.to_owned(),
+        r#type: ArtifactType::File as i32,
+        name: name.to_owned(),
+        version: version.to_owned(),
+        platform: platform.to_owned(),
+    }
+}
+
+#[test]
+fn a_publication_coordinate_is_framed_so_slashes_cannot_alias() {
+    // The text is each field's length in bytes, a `:` and the field, in the order channel,
+    // type, name, version, platform: no joining character, so none can be moved from one field
+    // to the next.
+    assert_eq!(
+        coordinate_text(&coordinate(
+            "stable",
+            "tool",
+            "1.2.3+build.4",
+            "linux-x86_64"
+        )),
+        "6:stable1:14:tool13:1.2.3+build.412:linux-x86_64"
+    );
+    // Two coordinates that a `/` join would spell alike are two texts, and two records.
+    let one = coordinate("stable", "a/b", "c", "p");
+    let other = coordinate("stable", "a", "b/c", "p");
+    assert_ne!(coordinate_text(&one), coordinate_text(&other));
+    let channel_runs_on = coordinate("a/stable", "b", "c", "p");
+    let name_runs_back = coordinate("a", "stable/b", "c", "p");
+    assert_ne!(
+        coordinate_text(&channel_runs_on),
+        coordinate_text(&name_runs_back)
+    );
+    let publication = |c: &Coordinate| {
+        let Record::Publication(p) = publication(false, None) else {
+            panic!("a publication")
+        };
+        Record::Publication(Publication {
+            coordinate: coordinate_text(c),
+            ..p
+        })
+    };
+    let (a, b) = (publication(&one), publication(&other));
+    let (ea, eb) = (written(&a), written(&b));
+    assert_ne!(
+        ea.path(),
+        eb.path(),
+        "two coordinates are two ledger records"
+    );
+    // And whatever the fields hold, the record reads back the coordinate it was given.
+    assert_eq!(Record::decode(&ea), Ok(a));
+    assert_eq!(Record::decode(&eb), Ok(b));
+}
+
+/// The five fields a framed text holds, read back by the framing alone: each is its length in
+/// bytes, a `:`, and that many bytes. Nothing may be left over.
+fn unframed(text: &str) -> Vec<String> {
+    let mut rest = text;
+    let mut fields = Vec::new();
+    while !rest.is_empty() {
+        let (len, tail) = rest.split_once(':').expect("a length and a colon");
+        let len: usize = len.parse().expect("a length in digits");
+        fields.push(tail[..len].to_owned());
+        rest = &tail[len..];
+    }
+    fields
+}
+
+#[test]
+fn each_of_the_five_fields_is_its_length_a_colon_and_the_field() {
+    let file = ArtifactType::File as i32;
+    for c in [
+        coordinate("stable", "tool", "1.2.3+build.4", "linux-x86_64"),
+        // Empty fields are framed too: a zero length and a colon.
+        coordinate("", "", "", ""),
+        // The length counts bytes, not characters.
+        coordinate("st\u{e9}ble", "t\u{f6}\u{f6}l", "1", "p"),
+        // A colon or digits inside a field are the field's own bytes.
+        coordinate("3:abc", "12:", "1:2", "0:"),
+        coordinate("a/b", "c/d/e", "f/", "/g"),
+    ] {
+        let text = coordinate_text(&c);
+        let fields = [
+            c.channel.clone(),
+            file.to_string(),
+            c.name.clone(),
+            c.version.clone(),
+            c.platform.clone(),
+        ];
+        let framed: String = fields.iter().map(|f| format!("{}:{f}", f.len())).collect();
+        assert_eq!(text, framed, "{c:?}");
+        assert_eq!(unframed(&text), fields, "{c:?}");
+    }
+}
+
+#[test]
+fn the_type_is_framed_as_its_raw_number_known_or_not() {
+    // The type is the number the coordinate holds, in decimal with its sign, never mapped to a
+    // known artifact type: unspecified, unknown, negative and the bounds of an i32 are framed as
+    // they are, and read back to the same number.
+    for (number, text) in [
+        (ArtifactType::Unspecified as i32, "0"),
+        (ArtifactType::File as i32, "1"),
+        (ArtifactType::Oci as i32, "2"),
+        (ArtifactType::Npm as i32, "5"),
+        (6, "6"),
+        (1234, "1234"),
+        (-1, "-1"),
+        (-42, "-42"),
+        (i32::MAX, "2147483647"),
+        (i32::MIN, "-2147483648"),
+    ] {
+        let mut c = coordinate("s", "n", "v", "p");
+        c.r#type = number;
+        let framed = coordinate_text(&c);
+        assert_eq!(
+            framed,
+            format!("1:s{}:{text}1:n1:v1:p", text.len()),
+            "{number}"
+        );
+        let fields = unframed(&framed);
+        assert_eq!(fields, ["s", text, "n", "v", "p"], "{number}");
+        assert_eq!(fields[1].parse::<i32>(), Ok(number));
+    }
+}
+
+#[test]
+fn a_slash_cannot_move_from_one_field_to_another() {
+    // For each two neighbouring text fields (channel and name, with the type between them, name
+    // and version, version and platform), a segment moved across the `/` between them, either
+    // way, spells the same `/` join and gives another framed text.
+    let base = ["stable/x", "y/tool/z", "w/1.2.3/v", "u/linux"];
+    let of = |f: &[String; 4]| {
+        coordinate_text(&Coordinate {
+            channel: f[0].clone(),
+            r#type: ArtifactType::File as i32,
+            name: f[1].clone(),
+            version: f[2].clone(),
+            platform: f[3].clone(),
+        })
+    };
+    let base = base.map(str::to_owned);
+    let original = of(&base);
+    let mut seen = std::collections::BTreeSet::from([original.clone()]);
+    for left in 0..3 {
+        let right = left + 1;
+        // The last segment of the left field moves to the start of the right one ...
+        let mut forward = base.clone();
+        let (head, tail) = base[left].rsplit_once('/').expect("a slash");
+        forward[left] = head.to_owned();
+        forward[right] = format!("{tail}/{}", base[right]);
+        // ... and the first segment of the right field moves to the end of the left one.
+        let mut back = base.clone();
+        let (head, tail) = base[right].split_once('/').expect("a slash");
+        back[left] = format!("{}/{head}", base[left]);
+        back[right] = tail.to_owned();
+        for moved in [forward, back] {
+            assert_eq!(
+                base.join("/"),
+                moved.join("/"),
+                "a `/` join spells both alike"
+            );
+            let text = of(&moved);
+            assert_ne!(text, original, "{moved:?}");
+            assert!(
+                seen.insert(text.clone()),
+                "{moved:?} spells a text seen before"
+            );
+            let fields = unframed(&text);
+            assert_eq!(
+                [&fields[0], &fields[2], &fields[3], &fields[4]],
+                [&moved[0], &moved[1], &moved[2], &moved[3]],
+                "the framing reads back the fields as they were given"
+            );
+        }
     }
 }

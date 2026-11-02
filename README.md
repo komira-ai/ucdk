@@ -11,6 +11,7 @@ Pre-release, not usable. See [CONTRIBUTING.md](CONTRIBUTING.md).
 - `crates/ucdk-release-seams`: the seams of a release (build system, process runner, output files, artifact store, publisher, grant source, source) with the classified error, the pause and the heartbeat.
 - `crates/ucdk-release-fake`: working in-memory implementations of those seams, with fault injection and call logs.
 - `crates/ucdk-release-engine`: the release engine: Test actions and validations, run through those seams under the run's lease, which progress keeps alive.
+- `crates/ucdk-release-build`: the real build side of a release: a process runner over child processes, a reader of the local files a build wrote, and the Buck2 and Bazel build systems over them.
 - `crates/ucdk-api`: the `ucdk.api.v1` messages and the one function that shows a ledger.
 - `crates/ucdk-capi`: the C ABI, a shared library of five functions.
 - `crates/ucdk-codegen`: the generator of the Python and TypeScript SDK sources.

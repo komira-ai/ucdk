@@ -1,0 +1,35 @@
+# The confirmation of the Buck2 and Bazel adapters against the real tools, started by hand.
+# Entry 12a of the release build design is accepted only after a green run (docs/release-build-systems.md,
+# questions 18 and 19). `cargo xtask build-confirm` installs the pinned Buck2 and Bazel releases,
+# each checked against its SHA-256, and runs the ignored tests of crates/ucdk-release-build/tests/confirm.rs:
+# one genrule target of a small fixture workspace per tool, built through ucdk's process runner, file
+# reader and adapter. The raw transcript of every call of a tool is uploaded, whatever the result.
+name: build-confirm
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: build-confirm-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  confirm:
+    name: confirm
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: cargo xtask build-confirm
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: build-confirm-transcripts
+          path: target/tmp/build-confirm/transcripts
+          if-no-files-found: warn

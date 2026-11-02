@@ -5,9 +5,11 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+pub mod agents;
 pub mod check;
 pub mod cli;
 pub mod cmd;
+pub mod confirm;
 pub mod coverage;
 pub mod dco;
 pub mod direction;

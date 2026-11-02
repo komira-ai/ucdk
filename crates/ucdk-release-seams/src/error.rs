@@ -49,6 +49,9 @@ pub enum SeamError {
     Unknown(String),
     /// The grant presented was refused before the call ran.
     GrantRefused(GrantFault),
+    /// The artifact is not one the release declared: refused before anything was sent, and the
+    /// error names the artifact.
+    Undeclared { name: String },
 }
 
 /// What a failed `observe` makes of the action that called it.
@@ -78,7 +81,8 @@ impl SeamError {
     /// `Preflight`, where nothing was written: `Refused(r)` says nothing happened and is the
     /// action's refusal with that same reason `r`; `Permanent` says nothing happened and the same
     /// call fails again (a coordinate the channel cannot hold, a set that does not contain it),
-    /// so it is `REFUSED` with `CHANNEL`; `GrantRefused(Denied)` is `REFUSED` with `CREDENTIAL`.
+    /// so it is `REFUSED` with `CHANNEL`; `Undeclared` is `REFUSED` with `APPROVED_NAMES`;
+    /// `GrantRefused(Denied)` is `REFUSED` with `CREDENTIAL`.
     /// Every other failure leaves the registry unread and the action `INDETERMINATE`.
     ///
     /// `AfterEffect`: every failure is `INDETERMINATE`, whatever it promises. A refusal of the
@@ -90,6 +94,7 @@ impl SeamError {
         match self {
             SeamError::Refused(reason) => ObserveFailure::Refused(*reason),
             SeamError::Permanent(_) => ObserveFailure::Refused(Reason::Channel),
+            SeamError::Undeclared { .. } => ObserveFailure::Refused(Reason::ApprovedNames),
             SeamError::GrantRefused(GrantFault::Denied) => {
                 ObserveFailure::Refused(Reason::Credential)
             }
@@ -109,6 +114,7 @@ impl SeamError {
                 | SeamError::Permanent(_)
                 | SeamError::RateLimited(_)
                 | SeamError::GrantRefused(_)
+                | SeamError::Undeclared { .. }
         )
     }
 }
@@ -127,6 +133,10 @@ impl fmt::Display for SeamError {
             SeamError::GrantRefused(fault) => {
                 write!(f, "the grant was refused ({fault:?}); nothing happened")
             }
+            SeamError::Undeclared { name } => write!(
+                f,
+                "the artifact {name} is not one the release declared; nothing happened"
+            ),
         }
     }
 }
