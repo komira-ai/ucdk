@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use common::{AnyLedger, Backend, Counter, FlakyLedger, Hooked, confirmed, path};
 use ucdk_ledger::{
-    Change, Clock, DEFAULT_LEASE_TTL, Fence, GuardError, LeaseGuard, Ledger, LedgerError,
-    MAX_CLOCK_SKEW, ManualClock, State, default_holder,
+    Change, Clock, DEFAULT_LEASE_TTL, Fence, GuardError, LeaseError, LeaseGuard, Ledger,
+    LedgerError, MAX_CLOCK_SKEW, ManualClock, State, default_holder,
 };
 
 /// Why a run stopped before its last step.
@@ -540,6 +540,256 @@ fn a_ledger_opened_to_read_grants_no_lease() {
     assert_eq!(refused, Some(GuardError::Ledger(LedgerError::ReadOnly)));
 }
 
+// ---- renewal on progress, and taking the lease again after a lapse ---------------------------
+
+/// When the lease on the ledger lapses, in milliseconds on the ledger's clock.
+fn expiry(ledger: &dyn Ledger) -> u64 {
+    ledger
+        .read()
+        .expect("read")
+        .lease
+        .expect("a lease is held")
+        .expires_at
+}
+
+fn at(clock: &ManualClock, to: u64) {
+    clock.advance(Duration::from_millis(to - clock.now_millis()));
+}
+
+fn guarded<'a>(ledger: &'a dyn Ledger, holder: &str) -> LeaseGuard<'a> {
+    LeaseGuard::acquire(ledger, holder, DEFAULT_LEASE_TTL)
+        .map_err(|e| e.to_string())
+        .expect("granted")
+}
+
+fn renew_if_due_renews_only_when_less_than_half_the_ttl_remains(backend: Backend) {
+    let (ledger, clock) = timed(backend);
+    let start = clock.now_millis();
+    let ttl = u64::try_from(DEFAULT_LEASE_TTL.as_millis()).expect("small");
+    let mut guard = guarded(&ledger, "first");
+    assert_eq!(expiry(&ledger), start + ttl);
+    // More than half is left, and exactly half is left: the lease is as it was.
+    for now in [start + 1, start + ttl / 2] {
+        at(&clock, now);
+        assert_eq!(guard.renew_if_due(), Ok(()));
+        assert_eq!(expiry(&ledger), start + ttl, "no renewal at {now}");
+    }
+    // One millisecond short of half: renewed to a whole ttl from now, under the same fence.
+    at(&clock, start + ttl / 2 + 1);
+    assert_eq!(guard.renew_if_due(), Ok(()));
+    assert_eq!(expiry(&ledger), start + ttl / 2 + 1 + ttl);
+    assert_eq!(guard.fence(), ledger.read().expect("read").fence);
+}
+
+fn renew_if_due_after_a_lapse_a_takeover_or_a_release_is_lost(backend: Backend) {
+    // Lapsed and nobody took it: the ledger refuses the renewal, and the guard stays lost.
+    let (ledger, clock) = timed(backend);
+    let mut guard = guarded(&ledger, "first");
+    clock.advance(DEFAULT_LEASE_TTL);
+    assert_eq!(guard.renew_if_due(), Err(GuardError::Lost));
+    assert_eq!(guard.renew_if_due(), Err(GuardError::Lost));
+
+    // Taken over: the lease on the ledger is another holder's, so it is never "fresh".
+    let (ledger, clock) = timed(backend);
+    let mut guard = guarded(&ledger, "first");
+    clock.advance(DEFAULT_LEASE_TTL + MAX_CLOCK_SKEW);
+    ledger.acquire("second", DEFAULT_LEASE_TTL).expect("taken");
+    assert_eq!(guard.renew_if_due(), Err(GuardError::Lost));
+
+    // No lease on the ledger at all: the same.
+    let (ledger, _) = timed(backend);
+    let mut guard = guarded(&ledger, "first");
+    ledger.release(guard.fence()).expect("release");
+    assert_eq!(guard.renew_if_due(), Err(GuardError::Lost));
+
+    // A guard that gave the lease back is not holding it.
+    let (ledger, _) = timed(backend);
+    let mut guard = guarded(&ledger, "first");
+    guard.release().expect("release");
+    assert_eq!(guard.renew_if_due(), Err(GuardError::NotHeld));
+}
+
+fn a_grant_whose_document_cannot_be_read_is_unconfirmed(backend: Backend) {
+    let flaky = FlakyLedger::on(backend);
+    flaky.fail_reads(true);
+    let granted = LeaseGuard::acquire(&flaky, "first", DEFAULT_LEASE_TTL).err();
+    assert!(
+        matches!(granted, Some(GuardError::Unconfirmed { ref why }) if why.contains("reads are down")),
+        "{granted:?}"
+    );
+    // The lease was granted and is on the ledger: another holder is refused, the same one is not.
+    flaky.fail_reads(false);
+    assert!(matches!(
+        LeaseGuard::acquire(&flaky, "second", DEFAULT_LEASE_TTL).err(),
+        Some(GuardError::Held { .. })
+    ));
+    assert!(LeaseGuard::acquire(&flaky, "first", DEFAULT_LEASE_TTL).is_ok());
+}
+
+fn a_grant_the_ledger_calls_changed_is_a_stale_ledger(backend: Backend) {
+    let flaky = FlakyLedger::on(backend);
+    flaky.fail_acquire_with(Some(LeaseError::Changed));
+    let granted = LeaseGuard::acquire(&flaky, "first", DEFAULT_LEASE_TTL).err();
+    assert_eq!(granted, Some(GuardError::Ledger(LedgerError::Stale)));
+}
+
+fn renew_if_due_that_cannot_read_the_ledger_says_so(backend: Backend) {
+    let flaky = FlakyLedger::on(backend);
+    let mut guard = guarded(&flaky, "first");
+    flaky.fail_reads(true);
+    assert!(matches!(
+        guard.renew_if_due(),
+        Err(GuardError::Ledger(LedgerError::Unavailable(_)))
+    ));
+}
+
+fn reacquire_if_unchanged_takes_a_lapsed_lease_nobody_touched(backend: Backend) {
+    let (ledger, clock) = timed(backend);
+    let mut guard = guarded(&ledger, "first");
+    let granted_at = ledger.read().expect("read").token;
+    assert_eq!(guard.token(), &granted_at, "before the first write");
+    guard
+        .commit(&Change::Put(confirmed("app/s1", "first-1")))
+        .expect("a write under the live lease");
+    let token = guard.token().clone();
+    assert_ne!(token, granted_at, "the write moved the token");
+    assert_eq!(token, ledger.read().expect("read").token);
+    let first = guard.fence();
+
+    // The work took longer than the lease, and no one else came.
+    clock.advance(DEFAULT_LEASE_TTL + Duration::from_secs(1));
+    assert_eq!(guard.renew(), Err(GuardError::Lost), "lapsed");
+    assert_eq!(guard.reacquire_if_unchanged(&token, first), Ok(()));
+    assert_eq!(
+        guard.fence().value(),
+        first.value() + 1,
+        "under a new fence"
+    );
+
+    // It holds the lease again and writes under it.
+    assert_eq!(guard.renew(), Ok(()));
+    guard
+        .commit(&Change::Put(confirmed("app/s2", "first-2")))
+        .expect("the result of the work is recorded");
+    assert_eq!(records_of(&ledger).len(), 2);
+    assert_eq!(guard.release(), Ok(()));
+}
+
+fn reacquire_if_unchanged_refuses_a_changed_token(backend: Backend) {
+    let (ledger, clock) = timed(backend);
+    let mut guard = guarded(&ledger, "first");
+    guard
+        .commit(&Change::Put(confirmed("app/s1", "first-1")))
+        .expect("a write");
+    let token = guard.token().clone();
+    let fence = guard.fence();
+    // The lease lapsed past the skew bound, and an unleased writer changed the document.
+    clock.advance(DEFAULT_LEASE_TTL + MAX_CLOCK_SKEW);
+    let read = ledger.read().expect("read");
+    ledger
+        .write(&read.token, Change::Put(confirmed("app/other", "other-1")))
+        .expect("an unfenced write after the lapse");
+    let before = ledger.read().expect("read");
+
+    assert_eq!(
+        guard.reacquire_if_unchanged(&token, fence),
+        Err(GuardError::Lost)
+    );
+    assert_eq!(ledger.read().expect("read"), before, "nothing was granted");
+    assert_eq!(guard.renew(), Err(GuardError::Lost), "the guard stays lost");
+    assert_eq!(
+        guard.commit(&Change::Remove(path("app/s1"))),
+        Err(GuardError::Lost)
+    );
+}
+
+fn reacquire_if_unchanged_refuses_a_grant_made_since_its_own(backend: Backend) {
+    let (ledger, clock) = timed(backend);
+    let mut guard = guarded(&ledger, "first");
+    guard
+        .commit(&Change::Put(confirmed("app/s1", "first-1")))
+        .expect("a write");
+    let token = guard.token().clone();
+    let fence = guard.fence();
+    clock.advance(DEFAULT_LEASE_TTL + Duration::from_secs(1));
+    // A second attempt of the same holder took the lease; it did not touch the document.
+    let mut second = guarded(&ledger, "first");
+    assert_eq!(ledger.read().expect("read").token, token);
+
+    assert_eq!(
+        guard.reacquire_if_unchanged(&token, fence),
+        Err(GuardError::Lost),
+        "the zombie attempt does not fence the second one out"
+    );
+    // The second attempt is unharmed.
+    assert_eq!(second.renew(), Ok(()));
+    second
+        .commit(&Change::Put(confirmed("app/s2", "second-2")))
+        .expect("the second attempt writes");
+    assert_eq!(ledger.read().expect("read").fence, second.fence());
+}
+
+fn reacquire_if_unchanged_calls_acquire_if_and_never_reads_then_acquires(backend: Backend) {
+    let clock = ManualClock::at(1_000_000);
+    let flaky = FlakyLedger::on_clock(backend, Arc::new(clock.clone()));
+    let mut guard = guarded(&flaky, "first");
+    guard
+        .commit(&Change::Put(confirmed("app/s1", "first-1")))
+        .expect("a write");
+    let token = guard.token().clone();
+    let fence = guard.fence();
+    assert_eq!((flaky.acquire_calls(), flaky.acquire_if_calls()), (1, 0));
+    clock.advance(DEFAULT_LEASE_TTL + Duration::from_secs(1));
+
+    assert_eq!(guard.reacquire_if_unchanged(&token, fence), Ok(()));
+    assert_eq!(
+        (flaky.acquire_calls(), flaky.acquire_if_calls()),
+        (1, 1),
+        "one conditional grant, and no plain acquire after the first"
+    );
+}
+
+fn reacquire_if_unchanged_answers_what_the_ledger_could_not(backend: Backend) {
+    let flaky = FlakyLedger::on(backend);
+    let mut guard = guarded(&flaky, "first");
+    guard
+        .commit(&Change::Put(confirmed("app/s1", "first-1")))
+        .expect("a write");
+    let token = guard.token().clone();
+    let fence = guard.fence();
+
+    // A grant whose answer was lost: the lease may be ours, and the guard is not marked lost.
+    flaky.fail_acquire_if(Some(LeaseError::Unavailable("down".to_owned())));
+    assert!(matches!(
+        guard.reacquire_if_unchanged(&token, fence),
+        Err(GuardError::Unconfirmed { .. })
+    ));
+    assert_eq!(guard.renew(), Ok(()), "still held");
+    // A ledger that was opened to read.
+    flaky.fail_acquire_if(Some(LeaseError::ReadOnly));
+    assert_eq!(
+        guard.reacquire_if_unchanged(&token, fence),
+        Err(GuardError::Ledger(LedgerError::ReadOnly))
+    );
+    // The lease is another holder's.
+    flaky.fail_acquire_if(Some(LeaseError::Held {
+        holder: "second".to_owned(),
+        remaining: Duration::from_secs(1),
+    }));
+    assert_eq!(
+        guard.reacquire_if_unchanged(&token, fence),
+        Err(GuardError::Lost)
+    );
+    // A guard that gave the lease back does not take it again.
+    let elsewhere = FlakyLedger::on(backend);
+    let mut released = guarded(&elsewhere, "other");
+    released.release().expect("release");
+    assert_eq!(
+        released.reacquire_if_unchanged(&token, Fence::new(1)),
+        Err(GuardError::NotHeld)
+    );
+}
+
 macro_rules! on_every_ledger {
     ($($name:ident),* $(,)?) => {
         $(
@@ -576,4 +826,14 @@ on_every_ledger!(
     commit_retries_a_stale_token_up_to_five_times_then_is_busy,
     a_commit_that_cannot_read_the_ledger_says_so,
     the_default_holder_names_the_process_and_a_holder_can_be_named,
+    renew_if_due_renews_only_when_less_than_half_the_ttl_remains,
+    renew_if_due_after_a_lapse_a_takeover_or_a_release_is_lost,
+    a_grant_whose_document_cannot_be_read_is_unconfirmed,
+    a_grant_the_ledger_calls_changed_is_a_stale_ledger,
+    renew_if_due_that_cannot_read_the_ledger_says_so,
+    reacquire_if_unchanged_takes_a_lapsed_lease_nobody_touched,
+    reacquire_if_unchanged_refuses_a_changed_token,
+    reacquire_if_unchanged_refuses_a_grant_made_since_its_own,
+    reacquire_if_unchanged_calls_acquire_if_and_never_reads_then_acquires,
+    reacquire_if_unchanged_answers_what_the_ledger_could_not,
 );

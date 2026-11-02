@@ -794,6 +794,12 @@ fn a_lease_change_that_cannot_be_written_is_unavailable_and_changes_nothing() {
         matches!(acquired, Err(LeaseError::Unavailable(_))),
         "{acquired:?}"
     );
+    let gone = ledger.read().expect("read");
+    let conditional = ledger.acquire_if("bob", TTL, &gone.token, gone.fence);
+    assert!(
+        matches!(conditional, Err(LeaseError::Unavailable(_))),
+        "{conditional:?}"
+    );
     let renewed = ledger.renew(lease.fence, TTL);
     assert_eq!(renewed, Err(LedgerError::Fenced), "no lease is on file");
     let release = ledger.release(lease.fence);
@@ -884,6 +890,11 @@ fn every_change_over_a_file_that_became_corrupt_after_the_open_is_unavailable() 
     assert!(
         matches!(acquired, Err(LeaseError::Unavailable(ref why)) if unavailable(why)),
         "{acquired:?}"
+    );
+    let conditional = ledger.acquire_if("bob", TTL, &token, lease.fence);
+    assert!(
+        matches!(conditional, Err(LeaseError::Unavailable(ref why)) if unavailable(why)),
+        "{conditional:?}"
     );
     let read = ledger.read();
     assert!(
@@ -982,6 +993,10 @@ fn a_read_only_ledger_refuses_every_write() {
     assert_eq!(reader.renew(fence, TTL), Err(LedgerError::ReadOnly));
     assert_eq!(reader.release(fence), Err(LedgerError::ReadOnly));
     assert_eq!(reader.acquire("bob", TTL), Err(LeaseError::ReadOnly));
+    assert_eq!(
+        reader.acquire_if("bob", TTL, &snapshot.token, fence),
+        Err(LeaseError::ReadOnly)
+    );
     assert_eq!(listing(&scratch), before, "no refusal changed a file");
 }
 

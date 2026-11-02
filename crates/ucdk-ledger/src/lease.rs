@@ -130,6 +130,10 @@ pub enum LeaseError {
     Unavailable(String),
     /// The ledger was opened to read and does not write: nothing was granted.
     ReadOnly,
+    /// A conditional grant ([`Ledger::acquire_if`](crate::Ledger::acquire_if)) found that the
+    /// document, or the highest fence ever granted, is no longer what the caller read: nothing
+    /// was granted.
+    Changed,
 }
 
 impl fmt::Display for LeaseError {
@@ -142,6 +146,10 @@ impl fmt::Display for LeaseError {
             ),
             Self::Unavailable(why) => write!(f, "the lease is unavailable: {why}"),
             Self::ReadOnly => f.write_str("the ledger was opened read-only: no lease is granted"),
+            Self::Changed => f.write_str(
+                "the ledger changed since it was read, or a lease was granted since: \
+                 no lease is granted",
+            ),
         }
     }
 }
