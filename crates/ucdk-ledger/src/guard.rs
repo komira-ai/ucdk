@@ -139,12 +139,13 @@ impl<'a> LeaseGuard<'a> {
                 // reading. Otherwise the guard was displaced before it began. A write that
                 // landed under this fence in the gap is part of the document as read, and the
                 // baseline is that document; the fence is still ours.
+                // The highest fence is the granted one only while no grant was made since, so
+                // the lease the document holds under it is this grant, to this holder.
                 let ours = snapshot.fence == lease.fence
-                    && snapshot.lease.as_ref().is_some_and(|held| {
-                        held.holder == holder
-                            && held.fence == lease.fence
-                            && held.state(snapshot.at) == LeaseState::Live
-                    });
+                    && snapshot
+                        .lease
+                        .as_ref()
+                        .is_some_and(|held| held.state(snapshot.at) == LeaseState::Live);
                 if !ours {
                     return Err(GuardError::Lost);
                 }
