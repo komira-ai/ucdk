@@ -25,12 +25,13 @@ use ucdk_release::codec::{GrantFault, GrantPhase};
 use ucdk_release_proto::v1::push_identity::Kind;
 use ucdk_release_proto::v1::{Coordinate, Reason, Visibility};
 use ucdk_release_seams::{Grant, GrantRequest, GrantSource, SeamError};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::config::{Config, MOPM_TOKEN_TTL};
 use crate::errors::{error_code, rate_limited};
 use crate::grants::Envelope;
 use crate::identity::{Expected, IdentitySource, IdentityToken, check_identity};
+use crate::json::read_object;
 use crate::mapping::check_shape;
 use crate::transport::{Header, Method, Request, Response, Transport};
 
@@ -49,10 +50,11 @@ pub enum ActorForm {
 
 /// What the grant source is told.
 pub struct GrantSourceConfig {
-    /// The channel, the registry the exchange is sent to, and the `Retry-After` ceiling.
+    /// The channel, the registry the exchange is sent to, and the `Retry-After` ceiling. The
+    /// registry is also the one repository this source serves: a repository whose location is
+    /// not the registry's, byte for byte, is refused, so a token is never exchanged at one
+    /// registry for a grant labelled with another.
     pub config: Config,
-    /// The location of the one repository this source serves, compared byte for byte.
-    pub location: String,
     /// The issuer the identity token must name (its `iss` claim), compared exactly. The caller
     /// states it: nothing here assumes a CI platform.
     pub issuer: String,
@@ -72,8 +74,8 @@ fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
-/// The year of the Unix epoch: no expiry is earlier.
-const EPOCH_YEAR: u64 = 1970;
+/// Days from the start of the proleptic Gregorian calendar's year zero to the Unix epoch.
+const DAYS_TO_EPOCH: u64 = 719_468;
 
 fn days_in_month(year: u64, month: u64) -> u64 {
     let leap = (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400);
@@ -85,15 +87,20 @@ fn days_in_month(year: u64, month: u64) -> u64 {
     }
 }
 
-/// Days from the Unix epoch to the civil date, for a valid date in or after its year.
-fn days_from_civil(year: u64, month: u64, day: u64) -> u64 {
-    let y = if month <= 2 { year - 1 } else { year };
+/// Days from the Unix epoch to a valid civil date; `None` for a date before the epoch.
+fn days_from_civil(year: u64, month: u64, day: u64) -> Option<u64> {
+    // The year counted from March, so that a leap day is the last day of its year.
+    let y = if month <= 2 {
+        year.checked_sub(1)?
+    } else {
+        year
+    };
     let era = y / 400;
     let yoe = y - era * 400;
     let mp = (month + 9) % 12;
     let doy = (153 * mp + 2) / 5 + day - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    (era * 146_097 + doe).saturating_sub(719_468)
+    (era * 146_097 + doe).checked_sub(DAYS_TO_EPOCH)
 }
 
 /// The milliseconds since the epoch of an instant written `YYYY-MM-DDTHH:MM:SS[.f...]Z`, the
@@ -125,16 +132,13 @@ pub(crate) fn utc_millis(text: &str) -> Option<u64> {
             ok.then(|| first[..3].parse::<u64>().ok())??
         }
     };
-    let valid = year >= EPOCH_YEAR
-        && (1..=12).contains(&month)
+    let valid = (1..=12).contains(&month)
         && (1..=days_in_month(year, month)).contains(&day)
         && hour < 24
         && minute < 60
         && second < 60;
-    valid.then(|| {
-        let days = days_from_civil(year, month, day);
-        (((days * 24 + hour) * 60 + minute) * 60 + second) * 1000 + fraction
-    })
+    let days = valid.then(|| days_from_civil(year, month, day))??;
+    Some((((days * 24 + hour) * 60 + minute) * 60 + second) * 1000 + fraction)
 }
 
 fn already_used(body: &[u8]) -> bool {
@@ -168,7 +172,8 @@ fn exchange_failure(response: &Response, ceiling: Duration) -> SeamError {
     }
 }
 
-fn echoed(value: &Value) -> Option<BTreeSet<(String, String)>> {
+/// The `(name, version)` pairs of the answer, in its order and with any repeat.
+fn echoed(value: &Value) -> Option<Vec<(String, String)>> {
     value
         .as_array()?
         .iter()
@@ -180,57 +185,69 @@ fn echoed(value: &Value) -> Option<BTreeSet<(String, String)>> {
         .collect()
 }
 
+/// When the exchange was sent and when its answer came back, on the local clock.
+#[derive(Clone, Copy)]
+struct Times {
+    sent_ms: u64,
+    received_ms: u64,
+}
+
+/// Reads a successful answer. Unknown fields are ignored; a repeated field or a field of the
+/// wrong type is `Unreachable` (the answer cannot be read; so is a token that is not
+/// header-safe, which the envelope refuses);
+/// another kind of token, or packages that are not exactly the ones asked for (a repeat
+/// included, in any order), is `Denied`; an expiry not after the answer came back is `Expired`.
 fn interpret(
     response: &Response,
     asked: &BTreeSet<(String, String)>,
-    now_ms: u64,
+    times: Times,
     ceiling: Duration,
 ) -> Result<Minted, SeamError> {
     if !response.is_success() {
         return Err(exchange_failure(response, ceiling));
     }
     let unreadable = || refused(GrantFault::Unreachable);
-    let Ok(Value::Object(mut map)) = serde_json::from_slice(&response.body) else {
-        return Err(unreadable());
-    };
-    let Some(Value::String(token)) = map.remove("token") else {
-        return Err(unreadable());
-    };
-    let token = Zeroizing::new(token.into_bytes());
-    let visible = !token.is_empty() && token.iter().all(u8::is_ascii_graphic);
+    let fields = read_object(&response.body, Some("token"))
+        .filter(|f| !f.repeated)
+        .ok_or_else(unreadable)?;
+    let mut text = fields.secret.ok_or_else(unreadable)?;
+    // The text's buffer moves into the token, which is wiped on drop; what is left is empty.
+    let token = Zeroizing::new(std::mem::take(&mut *text).into_bytes());
+    let map = fields.rest;
     let stated = map
         .get("expires_at")
         .and_then(Value::as_str)
         .and_then(utc_millis);
     let packages = map.get("packages").and_then(echoed);
-    let (true, Some(stated), Some(packages)) = (visible, stated, packages) else {
+    let (Some(stated), Some(packages)) = (stated, packages) else {
         return Err(unreadable());
     };
     let plain = map.get("token_kind").and_then(Value::as_str) == Some("publish");
-    if !plain || packages != *asked {
+    let distinct: BTreeSet<(String, String)> = packages.iter().cloned().collect();
+    if !plain || distinct.len() != packages.len() || distinct != *asked {
         return Err(refused(GrantFault::Denied));
     }
-    if stated <= now_ms {
+    // The expiry is on the issuer's clock. A token never outlives its stated life on ours,
+    // counted from when the request was sent (the issuer may have minted it at once, and the
+    // answer may have been slow to arrive), so an issuer whose clock is ahead cannot make it
+    // last longer than the life mopm promises.
+    let cap = times.sent_ms.saturating_add(millis(MOPM_TOKEN_TTL));
+    let expires_ms = stated.min(cap);
+    if expires_ms <= times.received_ms {
         return Err(refused(GrantFault::Expired));
     }
-    // The expiry is on the issuer's clock. A token never outlives its stated life on ours, and
-    // an issuer whose clock is ahead cannot make it last longer than the life mopm promises.
-    let cap = now_ms.saturating_add(millis(MOPM_TOKEN_TTL));
-    Ok(Minted {
-        token,
-        expires_ms: stated.min(cap),
-    })
+    Ok(Minted { token, expires_ms })
 }
 
 /// Reads the answer to an exchange and overwrites its body, which holds the minted token.
 fn read_exchange(
     response: &mut Response,
     asked: &BTreeSet<(String, String)>,
-    now_ms: u64,
+    times: Times,
     ceiling: Duration,
 ) -> Result<Minted, SeamError> {
-    let result = interpret(response, asked, now_ms, ceiling);
-    response.body.fill(0);
+    let result = interpret(response, asked, times, ceiling);
+    response.body.zeroize();
     result
 }
 
@@ -275,6 +292,13 @@ impl<T: Transport, I: IdentitySource, C: Clock> MopmGrantSource<T, I, C> {
         }
     }
 
+    /// The location of the repository this source serves: the registry's, if it has no query
+    /// (a registry with one is a configuration `Config::check` refuses, and serves nothing).
+    fn served(&self) -> Option<String> {
+        let registry = &self.setup.config.registry;
+        (!registry.has_query()).then(|| registry.expose())
+    }
+
     fn exchange(
         &mut self,
         token: &IdentityToken,
@@ -294,12 +318,17 @@ impl<T: Transport, I: IdentitySource, C: Clock> MopmGrantSource<T, I, C> {
             ],
             body: &body,
         };
+        let sent_ms = self.clock.now_millis();
         let mut response = self
             .transport
             .send(&request)
             .map_err(|_| refused(GrantFault::Unreachable))?;
+        let times = Times {
+            sent_ms,
+            received_ms: self.clock.now_millis(),
+        };
         let ceiling = self.setup.config.retry_after_ceiling;
-        read_exchange(&mut response, asked, self.clock.now_millis(), ceiling)
+        read_exchange(&mut response, asked, times, ceiling)
     }
 }
 
@@ -316,7 +345,7 @@ impl<T: Transport + Send, I: IdentitySource + Send, C: Clock> GrantSource
             return Ok(Grant::none());
         }
         let public = req.repository.visibility == Visibility::Public as i32;
-        if !public || req.repository.location != self.setup.location {
+        if !public || Some(&req.repository.location) != self.served().as_ref() {
             return Err(refused(GrantFault::Denied));
         }
         if req.coordinates.len() > GRANT_LIMIT {
@@ -372,7 +401,10 @@ impl<T: Transport + Send, I: IdentitySource + Send, C: Clock> GrantSource
             actor,
             req.coordinates.to_vec(),
             std::mem::take(&mut *minted.token),
-        );
+        )
+        // A token that is empty or not visible ASCII cannot be sent as a bearer: the answer
+        // cannot be used.
+        .map_err(|_| refused(GrantFault::Unreachable))?;
         // The encoded buffer moves into the grant, which wipes it on drop; what is left behind
         // is an empty vector.
         let mut secret = envelope.encode();

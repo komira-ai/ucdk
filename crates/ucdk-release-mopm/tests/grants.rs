@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use common::{coordinate, error_body, response};
 use ucdk_release::codec::{GrantFault, GrantPhase};
-use ucdk_release_mopm::{Envelope, Mapped, Op, Use, Verb, authorise, map_reply};
+use ucdk_release_mopm::{Envelope, Malformed, Mapped, Op, Use, Verb, authorise, map_reply};
 use ucdk_release_proto::v1::Coordinate;
 use ucdk_release_seams::{Grant, SeamError};
 
@@ -40,6 +40,7 @@ fn envelope(phase: GrantPhase, coordinates: Vec<Coordinate>) -> Envelope {
         coordinates,
         token,
     )
+    .unwrap()
 }
 
 fn grant(phase: GrantPhase, coordinates: Vec<Coordinate>, expires_ms: u64) -> Grant {
@@ -90,7 +91,8 @@ fn an_envelope_round_trips_every_field_even_when_a_text_holds_a_separator() {
         "u:42".to_owned(),
         vec![tricky.clone(), coordinate("alpha", "1.2.3", "noarch")],
         TOKEN.to_vec(),
-    );
+    )
+    .unwrap();
     let back = Envelope::decode(&original.encode()).unwrap();
     assert_eq!(back.phase, GrantPhase::Commit);
     assert!(back.exceptional);
@@ -118,88 +120,194 @@ fn a_read_envelope_has_no_bearer() {
 }
 
 #[test]
-fn bytes_that_are_not_an_envelope_are_malformed() {
+fn bytes_that_are_not_an_envelope_are_malformed_and_name_the_part_at_fault() {
     let good = envelope(GrantPhase::Stage, set()).encode();
-    let token_frame = |token: &[u8]| frame(&[b"1", b"stage", b"0", b"r", b"a", b"0", token]);
-    let mut cases: Vec<(&str, Vec<u8>)> = vec![
-        ("empty", Vec::new()),
-        ("no colon", b"11".to_vec()),
-        ("length not utf-8", b"\xff:x".to_vec()),
-        ("length not a number", b"x:x".to_vec()),
-        ("signed length", b"+1:1".to_vec()),
-        ("leading zero", b"01:1".to_vec()),
-        ("length past the end", b"9:1".to_vec()),
+    let head: [&[u8]; 5] = [b"1", b"stage", b"0", b"r", b"a"];
+    let with = |tail: &[&[u8]]| {
+        let parts: Vec<&[u8]> = head.iter().copied().chain(tail.iter().copied()).collect();
+        frame(&parts)
+    };
+    let one = |field: usize, value: &'static [u8]| {
+        let mut c: [&[u8]; 5] = [b"c", b"1", b"n", b"v", b"p"];
+        c[field] = value;
+        with(&[b"1", c[0], c[1], c[2], c[3], c[4], b"t"])
+    };
+    let mut cases: Vec<(&str, Vec<u8>, Malformed)> = vec![
+        ("empty", Vec::new(), Malformed::Frame),
+        ("no colon", b"11".to_vec(), Malformed::Frame),
+        ("length not utf-8", b"\xff:x".to_vec(), Malformed::Frame),
+        ("length not a number", b"x:x".to_vec(), Malformed::Frame),
+        ("signed length", b"+1:1".to_vec(), Malformed::Frame),
+        ("leading zero", b"01:1".to_vec(), Malformed::Frame),
+        ("length past the end", b"9:1".to_vec(), Malformed::Frame),
+        (
+            "length past usize",
+            b"99999999999999999999999:1".to_vec(),
+            Malformed::Frame,
+        ),
         (
             "other version",
             frame(&[b"2", b"stage", b"0", b"r", b"a", b"0", b"t"]),
+            Malformed::Version,
         ),
         (
             "phase not on the list",
             frame(&[b"1", b"publish", b"0", b"r", b"a", b"0", b"t"]),
+            Malformed::Phase,
         ),
         (
             "mark not on the list",
             frame(&[b"1", b"stage", b"2", b"r", b"a", b"0", b"t"]),
+            Malformed::Mark,
         ),
         (
             "registry not utf-8",
             frame(&[b"1", b"stage", b"0", b"\xff", b"a", b"0", b"t"]),
+            Malformed::Text,
         ),
         (
             "actor not utf-8",
             frame(&[b"1", b"stage", b"0", b"r", b"\xff", b"0", b"t"]),
+            Malformed::Text,
         ),
+        ("channel not utf-8", one(0, b"\xff"), Malformed::Text),
+        ("type not utf-8", one(1, b"\xff"), Malformed::Text),
+        ("name not utf-8", one(2, b"\xff"), Malformed::Text),
+        ("version not utf-8", one(3, b"\xff"), Malformed::Text),
+        ("platform not utf-8", one(4, b"\xff"), Malformed::Text),
+        ("count not a number", with(&[b"x", b"t"]), Malformed::Number),
         (
-            "count not a number",
-            frame(&[b"1", b"stage", b"0", b"r", b"a", b"x", b"t"]),
+            "count with a leading zero",
+            with(&[b"00", b"t"]),
+            Malformed::Number,
+        ),
+        ("count with a sign", with(&[b"+0", b"t"]), Malformed::Number),
+        ("negative count", with(&[b"-1", b"t"]), Malformed::Number),
+        (
+            "count past usize",
+            with(&[b"18446744073709551616", b"t"]),
+            Malformed::Number,
         ),
         (
             "count past the bytes",
-            frame(&[b"1", b"stage", b"0", b"r", b"a", b"4000000000", b"t"]),
+            with(&[b"4000000000", b"t"]),
+            Malformed::Frame,
+        ),
+        ("type not a number", one(1, b"x"), Malformed::Number),
+        ("type with a leading zero", one(1, b"01"), Malformed::Number),
+        ("type with a plus sign", one(1, b"+1"), Malformed::Number),
+        ("type minus zero", one(1, b"-0"), Malformed::Number),
+        ("type past i32", one(1, b"2147483648"), Malformed::Number),
+        ("type below i32", one(1, b"-2147483649"), Malformed::Number),
+        ("no token", with(&[b"0"]), Malformed::Frame),
+        (
+            "empty token on a write",
+            with(&[b"0", b""]),
+            Malformed::Token,
         ),
         (
-            "count with a leading zero",
-            frame(&[b"1", b"stage", b"0", b"r", b"a", b"00", b"t"]),
+            "token with a space",
+            with(&[b"0", b"a b"]),
+            Malformed::Token,
         ),
         (
-            "count with a sign",
-            frame(&[b"1", b"stage", b"0", b"r", b"a", b"+0", b"t"]),
+            "token with a newline",
+            with(&[b"0", b"a\nb"]),
+            Malformed::Token,
         ),
         (
-            "type with a leading zero",
-            frame(&[
-                b"1", b"stage", b"0", b"r", b"a", b"1", b"c", b"01", b"n", b"v", b"p", b"t",
-            ]),
+            "token not ascii",
+            with(&[b"0", "\u{e9}".as_bytes()]),
+            Malformed::Token,
         ),
-        (
-            "type with a sign",
-            frame(&[
-                b"1", b"stage", b"0", b"r", b"a", b"1", b"c", b"-0", b"n", b"v", b"p", b"t",
-            ]),
-        ),
-        (
-            "type not a number",
-            frame(&[
-                b"1", b"stage", b"0", b"r", b"a", b"1", b"c", b"x", b"n", b"v", b"p", b"t",
-            ]),
-        ),
-        ("no token", frame(&[b"1", b"stage", b"0", b"r", b"a", b"0"])),
-        ("empty token on a write", token_frame(b"")),
-        ("token with a space", token_frame(b"a b")),
-        ("token with a newline", token_frame(b"a\nb")),
         (
             "token on a read",
             frame(&[b"1", b"read", b"0", b"r", b"a", b"0", b"t"]),
+            Malformed::Token,
         ),
     ];
     let mut trailing = good.to_vec();
     trailing.push(b'x');
-    cases.push(("trailing bytes", trailing));
-    cases.push(("truncated", good[..good.len() - 3].to_vec()));
-    for (what, bytes) in cases {
-        assert!(Envelope::decode(&bytes).is_err(), "{what}");
+    cases.push(("trailing bytes", trailing, Malformed::Trailing));
+    cases.push((
+        "truncated",
+        good[..good.len() - 3].to_vec(),
+        Malformed::Frame,
+    ));
+    for (what, bytes, fault) in cases {
+        assert_eq!(Envelope::decode(&bytes).err(), Some(fault), "{what}");
     }
     assert!(Envelope::decode(&good).is_ok());
+}
+
+#[test]
+fn a_type_at_either_end_of_its_range_and_unicode_texts_round_trip() {
+    for r#type in [i32::MIN, -1, 0, i32::MAX] {
+        let c = Coordinate {
+            channel: "\u{e9}t\u{e9}".to_owned(),
+            r#type,
+            name: "\u{1f600}".to_owned(),
+            version: "1.0".to_owned(),
+            platform: "\u{4e2d}".to_owned(),
+        };
+        let original = Envelope::new(
+            GrantPhase::Stage,
+            false,
+            "https://r\u{e9}.example.com".to_owned(),
+            "u:\u{e9}".to_owned(),
+            vec![c.clone()],
+            TOKEN.to_vec(),
+        )
+        .unwrap();
+        let back = Envelope::decode(&original.encode()).unwrap();
+        assert_eq!(back.coordinates, [c], "{type}");
+        assert_eq!(back.registry, "https://r\u{e9}.example.com");
+        assert_eq!(back.actor, "u:\u{e9}");
+    }
+}
+
+#[test]
+fn an_envelope_whose_token_does_not_fit_its_phase_cannot_be_made() {
+    let make = |phase, token: &[u8]| {
+        Envelope::new(
+            phase,
+            false,
+            REGISTRY.to_owned(),
+            "u:1".to_owned(),
+            Vec::new(),
+            token.to_vec(),
+        )
+        .err()
+    };
+    assert_eq!(make(GrantPhase::Read, b"t"), Some(Malformed::Token));
+    for phase in [GrantPhase::Stage, GrantPhase::Commit] {
+        assert_eq!(make(phase, b""), Some(Malformed::Token));
+        assert_eq!(make(phase, b"a b"), Some(Malformed::Token));
+        assert_eq!(make(phase, b"t"), None);
+    }
+    assert_eq!(make(GrantPhase::Read, b""), None);
+}
+
+#[test]
+fn a_malformed_envelope_says_which_part_and_nothing_of_its_bytes() {
+    let cases = [
+        (Malformed::Frame, "a length frame"),
+        (Malformed::Version, "the version"),
+        (Malformed::Phase, "the phase"),
+        (Malformed::Mark, "the exceptional mark"),
+        (Malformed::Text, "a text field"),
+        (Malformed::Number, "a number"),
+        (Malformed::Token, "the token"),
+        (Malformed::Trailing, "the bytes after the token"),
+    ];
+    for (fault, part) in cases {
+        assert_eq!(
+            fault.to_string(),
+            format!("not a grant envelope: {part} is malformed")
+        );
+        let error: &dyn std::error::Error = &fault;
+        assert!(error.source().is_none());
+    }
 }
 
 #[test]
@@ -374,11 +482,49 @@ fn the_remaining_life_must_cover_the_budget_of_the_call() {
 fn a_grant_that_is_wrong_and_expired_is_denied_not_expired() {
     let set = set();
     let refs: Vec<&Coordinate> = set.iter().collect();
+    // Of the wrong phase.
     let g = grant(GrantPhase::Commit, set.clone(), NOW - 1);
     assert_eq!(
         authorise(&g, &call(Verb::Stage, &refs)).err(),
         Some(denied())
     );
+    // For another registry.
+    let stage = grant(GrantPhase::Stage, set.clone(), NOW - 1);
+    let mut elsewhere = call(Verb::Stage, &refs);
+    elsewhere.registry = "https://other.example.com/api/v1";
+    assert_eq!(authorise(&stage, &elsewhere).err(), Some(denied()));
+    // Leaving a coordinate uncovered.
+    let held = grant(GrantPhase::Stage, set[..2].to_vec(), NOW - 1);
+    assert_eq!(
+        authorise(&held, &call(Verb::Stage, &refs)).err(),
+        Some(denied())
+    );
+    // Each of them alone, unexpired, is still refused, and the same grant right is expired.
+    let fresh = grant(GrantPhase::Stage, set[..2].to_vec(), NOW + 1);
+    assert_eq!(
+        authorise(&fresh, &call(Verb::Stage, &refs)).err(),
+        Some(denied())
+    );
+    assert_eq!(
+        authorise(&held, &call(Verb::Stage, &refs[..2])).err(),
+        Some(expired())
+    );
+}
+
+#[test]
+fn a_call_may_name_any_subset_of_what_the_grant_covers_in_any_order() {
+    let set = set();
+    let g = grant(GrantPhase::Stage, set.clone(), NOW + 1);
+    let orders: [&[usize]; 6] = [&[2, 1, 0], &[1, 0, 2], &[2], &[1], &[2, 0], &[0, 0, 2]];
+    for order in orders {
+        let asked: Vec<&Coordinate> = order.iter().map(|i| &set[*i]).collect();
+        for verb in [Verb::Stage, Verb::Abort, Verb::Observe, Verb::Fetch] {
+            assert!(
+                authorise(&g, &call(verb, &asked)).unwrap().is_some(),
+                "{order:?} {verb:?}"
+            );
+        }
+    }
 }
 
 #[test]

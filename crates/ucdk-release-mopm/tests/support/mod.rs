@@ -2,21 +2,28 @@
 //! Fixtures of the grant tests: identity tokens, a scripted transport that records what it was
 //! sent, an identity source that records what it was asked, and a grant source built from them.
 
+// Each integration-test binary (grants, identity, exchange, secrets) compiles this module and uses
+// only part of it, so an item one binary leaves unused is not dead.
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use ucdk_ledger::ManualClock;
-use ucdk_release::codec::GrantPhase;
+use ucdk_release::codec::{GrantFault, GrantPhase};
 use ucdk_release_mopm::{
-    ActorForm, GrantSourceConfig, IdentitySource, IdentityToken, IdentityUnavailable, Method,
-    MopmGrantSource, Request, Response, Transport, TransportError,
+    ActorForm, Config, Envelope, GrantSourceConfig, IdentitySource, IdentityToken,
+    IdentityUnavailable, Method, MopmGrantSource, Request, Response, Transport, TransportError,
 };
 use ucdk_release_proto::v1::push_identity::Kind;
-use ucdk_release_proto::v1::{ArtifactType, Federated, PushIdentity, Repository, Visibility};
-use ucdk_release_seams::GrantRequest;
+use ucdk_release_proto::v1::{
+    ArtifactType, Coordinate, Federated, PushIdentity, Repository, Visibility,
+};
+use ucdk_release_seams::{Grant, GrantRequest, SeamError};
+
+use crate::common::coordinate;
 
 pub const NOW_S: u64 = 1_800_000_000;
 pub const NOW_MS: u64 = NOW_S * 1000;
@@ -37,7 +44,7 @@ pub fn iso(seconds: u64) -> String {
     )
 }
 
-fn b64(bytes: &[u8]) -> String {
+pub fn b64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::new();
     for chunk in bytes.chunks(3) {
@@ -167,9 +174,16 @@ pub fn raw(status: u16, headers: &[(&str, &str)], body: &str) -> Reply {
 pub struct Script {
     pub sent: Arc<Mutex<Vec<Sent>>>,
     replies: Arc<Mutex<VecDeque<Reply>>>,
+    /// A clock moved forward while each answer is delivered: a slow network, by hand.
+    delay: Arc<Mutex<Option<(ManualClock, Duration)>>>,
 }
 
 impl Script {
+    /// Every later answer arrives `by` after its request was sent, on `clock`.
+    pub fn delay(&self, clock: &ManualClock, by: Duration) {
+        *self.delay.lock().unwrap() = Some((clock.clone(), by));
+    }
+
     pub fn push(&self, reply: Reply) {
         self.replies.lock().unwrap().push_back(reply);
     }
@@ -201,6 +215,9 @@ impl Transport for Script {
                 .map(|h| h.name.to_ascii_lowercase())
                 .collect(),
         });
+        if let Some((clock, by)) = self.delay.lock().unwrap().as_ref() {
+            clock.advance(*by);
+        }
         let reply = self.replies.lock().unwrap().pop_front();
         match reply {
             None => Err(TransportError::never_connected("no reply queued")),
@@ -244,7 +261,7 @@ impl IdentitySource for Tokens {
     fn identity_token(&mut self, audience: &str) -> Result<IdentityToken, IdentityUnavailable> {
         self.audiences.lock().unwrap().push(audience.to_owned());
         let next = self.queue.lock().unwrap().pop_front();
-        next.ok_or(IdentityUnavailable("none queued"))
+        next.ok_or(IdentityUnavailable::NoToken)
             .and_then(IdentityToken::new)
     }
 }
@@ -258,11 +275,15 @@ pub struct Rig {
 pub type Source = MopmGrantSource<Script, Tokens, ManualClock>;
 
 pub fn source_for(actor: ActorForm, clock: &ManualClock) -> (Source, Rig) {
+    source_with(crate::common::config(), actor, clock)
+}
+
+/// A source with the registry and the rest of `config`.
+pub fn source_with(config: Config, actor: ActorForm, clock: &ManualClock) -> (Source, Rig) {
     let script = Script::default();
     let tokens = Tokens::default();
     let setup = GrantSourceConfig {
-        config: crate::common::config(),
-        location: LOCATION.to_owned(),
+        config,
         issuer: ISSUER.to_owned(),
         actor,
     };
@@ -280,4 +301,32 @@ pub fn source_for(actor: ActorForm, clock: &ManualClock) -> (Source, Rig) {
 /// A source of the configured CI actor, the clock at [`NOW_MS`].
 pub fn source() -> (Source, Rig) {
     source_for(ActorForm::ConfiguredCi, &ManualClock::at(NOW_MS))
+}
+
+pub fn pair() -> Vec<Coordinate> {
+    vec![
+        coordinate("alpha", "1.2.3", "linux-x86_64"),
+        coordinate("alpha", "1.2.3", "darwin-aarch64"),
+        coordinate("beta", "0.1.0", "any"),
+    ]
+}
+
+pub fn denied() -> SeamError {
+    SeamError::GrantRefused(GrantFault::Denied)
+}
+
+pub fn refused(fault: GrantFault) -> SeamError {
+    SeamError::GrantRefused(fault)
+}
+
+pub fn texts(error: &SeamError) -> String {
+    format!("{error:?} / {error}")
+}
+
+pub fn decoded(grant: &Grant) -> Envelope {
+    Envelope::decode(grant.secret()).unwrap()
+}
+
+pub fn mopm_error(code: &str, message: &str) -> String {
+    json!({"error": {"code": code, "message": message, "hint": "h"}}).to_string()
 }

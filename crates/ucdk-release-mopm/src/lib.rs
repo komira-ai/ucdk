@@ -30,6 +30,7 @@ mod exchange;
 mod grammar;
 mod grants;
 mod identity;
+mod json;
 mod mapping;
 mod platform;
 mod requests;

@@ -12,6 +12,8 @@ publish.workspace = true
 # of a later change, talks to the network.
 
 [dependencies]
+# The visitor traits that read a JSON object with a credential into a wiped buffer.
+serde.workspace = true
 serde_json.workspace = true
 ucdk-ledger = { path = "../ucdk-ledger" }
 ucdk-release = { path = "../ucdk-release" }

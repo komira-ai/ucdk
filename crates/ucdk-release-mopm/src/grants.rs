@@ -12,6 +12,8 @@
 //! Every check here is client-side and sends nothing: a refused grant is
 //! `GrantRefused(Denied)` (the grant is not for this call) or `GrantRefused(Expired)`.
 
+use std::fmt;
+
 use ucdk_release::codec::{GrantFault, GrantPhase};
 use ucdk_release_proto::v1::Coordinate;
 use ucdk_release_seams::{Grant, SeamError};
@@ -19,9 +21,47 @@ use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 const VERSION: &str = "1";
 
-/// Bytes that are not an envelope this crate wrote.
+/// Why bytes are not an envelope this crate wrote, or why an envelope cannot be made. Each
+/// names the part at fault; none carries any of the bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Malformed;
+pub enum Malformed {
+    /// A length that is not canonical decimal digits followed by `:`, or that runs past the end.
+    Frame,
+    /// A version other than this crate's.
+    Version,
+    /// A phase not on the list.
+    Phase,
+    /// An exceptional mark other than `0` or `1`.
+    Mark,
+    /// A text field that is not UTF-8.
+    Text,
+    /// A coordinate count or type that is not canonical decimal (no `+`, no leading zero, no
+    /// `-0`) or does not fit its type.
+    Number,
+    /// A Read envelope that carries a token, or a write envelope whose token is empty or not
+    /// visible ASCII.
+    Token,
+    /// Bytes after the token.
+    Trailing,
+}
+
+impl fmt::Display for Malformed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let part = match self {
+            Malformed::Frame => "a length frame",
+            Malformed::Version => "the version",
+            Malformed::Phase => "the phase",
+            Malformed::Mark => "the exceptional mark",
+            Malformed::Text => "a text field",
+            Malformed::Number => "a number",
+            Malformed::Token => "the token",
+            Malformed::Trailing => "the bytes after the token",
+        };
+        write!(f, "not a grant envelope: {part} is malformed")
+    }
+}
+
+impl std::error::Error for Malformed {}
 
 /// What a grant says it is for, and the token it carries.
 pub struct Envelope {
@@ -64,15 +104,18 @@ fn phase_word(phase: GrantPhase) -> &'static str {
 /// The next framed text of `rest` and what follows it. The length is canonical decimal digits:
 /// no sign, no leading zero, so one text has one encoding.
 fn take<'a>(rest: &mut &'a [u8]) -> Result<&'a [u8], Malformed> {
-    let colon = rest.iter().position(|b| *b == b':').ok_or(Malformed)?;
-    let digits = std::str::from_utf8(&rest[..colon]).map_err(|_| Malformed)?;
-    let len: usize = digits.parse().map_err(|_| Malformed)?;
+    let colon = rest
+        .iter()
+        .position(|b| *b == b':')
+        .ok_or(Malformed::Frame)?;
+    let digits = std::str::from_utf8(&rest[..colon]).map_err(|_| Malformed::Frame)?;
+    let len: usize = digits.parse().map_err(|_| Malformed::Frame)?;
     if digits != len.to_string() {
-        return Err(Malformed);
+        return Err(Malformed::Frame);
     }
     let body = &rest[colon + 1..];
     if len > body.len() {
-        return Err(Malformed);
+        return Err(Malformed::Frame);
     }
     let (text, after) = body.split_at(len);
     *rest = after;
@@ -80,20 +123,25 @@ fn take<'a>(rest: &mut &'a [u8]) -> Result<&'a [u8], Malformed> {
 }
 
 fn take_str(rest: &mut &[u8]) -> Result<String, Malformed> {
-    String::from_utf8(take(rest)?.to_vec()).map_err(|_| Malformed)
+    String::from_utf8(take(rest)?.to_vec()).map_err(|_| Malformed::Text)
 }
 
-/// The next framed text as a number written the one way [`Envelope::encode`] writes it: no
-/// sign, no leading zero.
+/// The next framed text as a number written the one way [`Envelope::encode`] writes it,
+/// canonical decimal: no `+`, no leading zero, no `-0`, and in range of its type (a negative
+/// type is written with its `-`).
 fn take_number<N: std::str::FromStr + ToString>(rest: &mut &[u8]) -> Result<N, Malformed> {
     let text = take_str(rest)?;
-    let number: N = text.parse().map_err(|_| Malformed)?;
+    let number: N = text.parse().map_err(|_| Malformed::Number)?;
     (number.to_string() == text)
         .then_some(number)
-        .ok_or(Malformed)
+        .ok_or(Malformed::Number)
 }
 
 impl Envelope {
+    /// An envelope, if `token` fits `phase`: a Read envelope carries none, and a stage or commit
+    /// envelope carries one or more visible ASCII characters (all a header value may hold). So
+    /// every envelope that can be made can be encoded and decoded back. The token is wiped on
+    /// drop whether it is accepted or refused.
     pub fn new(
         phase: GrantPhase,
         exceptional: bool,
@@ -101,15 +149,21 @@ impl Envelope {
         actor: String,
         coordinates: Vec<Coordinate>,
         token: Vec<u8>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, Malformed> {
+        let token = Zeroizing::new(token);
+        let visible = token.iter().all(u8::is_ascii_graphic);
+        let carries = !token.is_empty();
+        if !visible || carries != (phase != GrantPhase::Read) {
+            return Err(Malformed::Token);
+        }
+        Ok(Self {
             phase,
             exceptional,
             registry,
             actor,
             coordinates,
-            token: Zeroizing::new(token),
-        }
+            token,
+        })
     }
 
     /// The token mopm minted, as sent in the `authorization` header. `None` for a Read
@@ -159,25 +213,26 @@ impl Envelope {
         out
     }
 
-    /// Reads what [`Envelope::encode`] wrote. Anything else is [`Malformed`]: another version,
-    /// a phase or mark not on the list, a coordinate count that does not fit the bytes, bytes
-    /// left over, a Read envelope that carries a token, a write envelope that carries none or
-    /// one that is not header-safe.
+    /// Reads what [`Envelope::encode`] wrote. Anything else is [`Malformed`], naming the part at
+    /// fault: a bad length frame, another version, a phase or mark not on the list, a text that
+    /// is not UTF-8, a count or type not in canonical decimal, a coordinate count that does not
+    /// fit the bytes, a token that does not fit the phase (as [`Envelope::new`] checks), and
+    /// bytes left over.
     pub fn decode(bytes: &[u8]) -> Result<Self, Malformed> {
         let mut rest = bytes;
         if take(&mut rest)? != VERSION.as_bytes() {
-            return Err(Malformed);
+            return Err(Malformed::Version);
         }
         let phase = match take(&mut rest)? {
             b"stage" => GrantPhase::Stage,
             b"commit" => GrantPhase::Commit,
             b"read" => GrantPhase::Read,
-            _ => return Err(Malformed),
+            _ => return Err(Malformed::Phase),
         };
         let exceptional = match take(&mut rest)? {
             b"0" => false,
             b"1" => true,
-            _ => return Err(Malformed),
+            _ => return Err(Malformed::Mark),
         };
         let registry = take_str(&mut rest)?;
         let actor = take_str(&mut rest)?;
@@ -198,11 +253,11 @@ impl Envelope {
             });
         }
         let token = take(&mut rest)?.to_vec();
-        let envelope = Self::new(phase, exceptional, registry, actor, coordinates, token);
-        let visible = envelope.token.iter().all(u8::is_ascii_graphic);
-        let carries = !envelope.token.is_empty();
-        let well_formed = rest.is_empty() && visible && (carries == (phase != GrantPhase::Read));
-        well_formed.then_some(envelope).ok_or(Malformed)
+        let envelope = Self::new(phase, exceptional, registry, actor, coordinates, token)?;
+        if !rest.is_empty() {
+            return Err(Malformed::Trailing);
+        }
+        Ok(envelope)
     }
 }
 
@@ -297,4 +352,27 @@ pub fn authorise(grant: &Grant, call: &Use<'_>) -> Result<Option<Envelope>, Seam
         return Err(SeamError::GrantRefused(GrantFault::Expired));
     }
     Ok(Some(envelope))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_token_and_its_encoding_are_wiped_storage() {
+        let envelope = Envelope::new(
+            GrantPhase::Stage,
+            false,
+            "r".to_owned(),
+            "a".to_owned(),
+            Vec::new(),
+            b"t".to_vec(),
+        )
+        .unwrap();
+        // These lines compile only while each buffer is `Zeroizing`.
+        let token: &Zeroizing<Vec<u8>> = &envelope.token;
+        let encoded: Zeroizing<Vec<u8>> = envelope.encode();
+        assert_eq!(token.as_slice(), b"t");
+        assert!(!encoded.is_empty());
+    }
 }

@@ -162,14 +162,18 @@ impl Url {
         }
     }
 
-    /// This URL with the query parameter `key=value` added, both percent-encoded.
+    /// This URL with the query parameter `key=value`, both percent-encoded, in place of any
+    /// parameter already called `key` (so the server can never read an earlier value instead);
+    /// every other parameter is kept, in order, and an empty one is dropped.
     #[must_use]
-    pub fn with_param(&self, key: &str, value: &str) -> Url {
-        let pair = format!("{}={}", encode_segment(key), encode_segment(value));
-        let query = match &self.query {
-            Some(query) => format!("{query}&{pair}"),
-            None => pair,
-        };
+    pub(crate) fn with_param(&self, key: &str, value: &str) -> Url {
+        let key = encode_segment(key);
+        let pair = format!("{key}={}", encode_segment(value));
+        let kept = self.query.iter().flat_map(|q| q.split('&')).filter(|p| {
+            let name = p.split_once('=').map_or(*p, |(name, _)| name);
+            !p.is_empty() && name != key
+        });
+        let query = kept.chain([pair.as_str()]).collect::<Vec<_>>().join("&");
         Url {
             origin: self.origin.clone(),
             path: self.path.clone(),

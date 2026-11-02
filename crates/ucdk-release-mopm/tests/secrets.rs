@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! What the types that hold a credential promise: the identity token, the envelope that carries
-//! mopm's token and the GitHub identity source that holds the request token are wiped by the
-//! `zeroize` crate when they are dropped, and none of them can be copied or printed.
+//! mopm's token, the GitHub identity source that holds the request token and the `Secret` of a
+//! bearer header are wiped by the `zeroize` crate when they are dropped, and none of them can be
+//! copied or printed. That the marker is backed by `Zeroizing` storage is held by unit tests
+//! inside the crate, next to each field.
 
 // The probe's explicit borrow is what makes the bound-less fallback the second candidate.
 #![allow(clippy::needless_borrow)]
@@ -12,7 +14,7 @@ mod support;
 use std::marker::PhantomData;
 
 use ucdk_release::codec::GrantPhase;
-use ucdk_release_mopm::{Envelope, GithubIdentity, IdentityToken};
+use ucdk_release_mopm::{Envelope, GithubIdentity, IdentityToken, Secret};
 use ucdk_release_proto::v1::{ArtifactType, Coordinate};
 use zeroize::Zeroizing;
 
@@ -56,6 +58,7 @@ fn each_holder_of_a_credential_is_wiped_by_the_zeroize_crate_on_drop() {
     assert!((&Probe::<IdentityToken>(PhantomData)).holds());
     assert!((&Probe::<Envelope>(PhantomData)).holds());
     assert!((&Probe::<Github>(PhantomData)).holds());
+    assert!((&Probe::<Secret>(PhantomData)).holds());
     // The probe tells a type that is not wiped from one that is.
     assert!((&Probe::<Zeroizing<Vec<u8>>>(PhantomData)).holds());
     assert!(!(&Probe::<Vec<u8>>(PhantomData)).holds());
@@ -67,6 +70,7 @@ fn no_holder_of_a_credential_can_be_cloned() {
     assert!(!(&Probe::<IdentityToken>(PhantomData)).holds());
     assert!(!(&Probe::<Envelope>(PhantomData)).holds());
     assert!(!(&Probe::<Github>(PhantomData)).holds());
+    assert!(!(&Probe::<Secret>(PhantomData)).holds());
     assert!((&Probe::<Vec<u8>>(PhantomData)).holds());
 }
 
@@ -76,6 +80,7 @@ fn no_holder_of_a_credential_can_be_printed_for_debugging() {
     assert!(!(&Probe::<IdentityToken>(PhantomData)).holds());
     assert!(!(&Probe::<Envelope>(PhantomData)).holds());
     assert!(!(&Probe::<Github>(PhantomData)).holds());
+    assert!(!(&Probe::<Secret>(PhantomData)).holds());
     assert!((&Probe::<Vec<u8>>(PhantomData)).holds());
 }
 
@@ -85,6 +90,7 @@ fn no_holder_of_a_credential_can_be_displayed() {
     assert!(!(&Probe::<IdentityToken>(PhantomData)).holds());
     assert!(!(&Probe::<Envelope>(PhantomData)).holds());
     assert!(!(&Probe::<Github>(PhantomData)).holds());
+    assert!(!(&Probe::<Secret>(PhantomData)).holds());
     assert!((&Probe::<String>(PhantomData)).holds());
 }
 
@@ -118,7 +124,8 @@ fn an_encoded_envelope_is_sized_once_and_wiped_on_drop() {
                 "ci:gh-repo:9001".to_owned(),
                 coordinates,
                 token,
-            );
+            )
+            .unwrap();
             let encoded: Zeroizing<Vec<u8>> = envelope.encode();
             assert_eq!(encoded.capacity(), encoded.len(), "{count} {phase:?}");
             assert!(Envelope::decode(&encoded).is_ok(), "{count} {phase:?}");

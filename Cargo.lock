@@ -760,6 +760,7 @@ name = "ucdk-release-mopm"
 version = "0.0.0"
 dependencies = [
  "rustls",
+ "serde",
  "serde_json",
  "ucdk-ledger",
  "ucdk-release",
