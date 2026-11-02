@@ -22,8 +22,12 @@ enum ExitClass {
   EXIT_CLASS_REFUSED = 3;
   // Failed, and nothing was changed: safe to run again.
   EXIT_CLASS_FAILED_NO_EFFECT = 4;
+  // Could not tell whether the end state holds, and nothing was changed: never a pass.
+  EXIT_CLASS_INDETERMINATE = 5;
   // Failed after changing something: look again before running again.
   EXIT_CLASS_FAILED_CHANGED = 6;
+  // A validation or a test target did not pass.
+  EXIT_CLASS_VALIDATION_FAILED = 7;
   // A sweep found objects that the ledger does not account for.
   EXIT_CLASS_LEAKS = 8;
 }

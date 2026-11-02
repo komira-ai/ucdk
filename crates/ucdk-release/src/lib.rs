@@ -12,6 +12,8 @@
 //! - [`set_document`] and [`store`]: the stored set and the keys of a generation;
 //!   [`verify`] checks a member and the keys of a generation over an in-memory tree, reading
 //!   an OCI image layout where the member is an image.
+//! - [`revision`]: the full commit id and the checks of the values a build is stamped with.
+//! - [`identity`]: the comparison of the digests two sides expose for a file, field by field.
 //! - [`publish`] and [`supersede`]: the decision to put one coordinate, from what a registry
 //!   reports of it, and the decision to stand down for a newer build.
 //! - [`codec`] and [`transitions`]: the records a ledger holds, and which events move a record
@@ -19,6 +21,7 @@
 //! - [`invocation`]: the argument vector and environment of one call of the build system,
 //!   layered from the machine's base flags and environment, the target's and the flags ucdk
 //!   owns; [`listing`] and [`test_report`] read what the build system printed and wrote.
+//! - [`schema`]: which majors of a document a reader accepts.
 //! - [`manifest`], [`closure`] and [`rows`]: the manifest the engine composes for a member, the
 //!   `SET_CLOSURE` validation of a set, and the accounting of evaluated rows against derived
 //!   ones.
@@ -30,13 +33,16 @@ pub mod closure;
 pub mod codec;
 pub mod flags;
 pub mod hashes;
+pub mod identity;
 pub mod invocation;
 pub mod listing;
 pub mod machine;
 pub mod manifest;
 mod oci;
 pub mod publish;
+pub mod revision;
 pub mod rows;
+pub mod schema;
 pub mod selection;
 pub mod set_document;
 pub mod store;

@@ -23,6 +23,7 @@
 
 mod answers;
 mod config;
+mod echo;
 mod errors;
 mod grammar;
 mod group_id;
@@ -39,6 +40,10 @@ pub use answers::{
 };
 
 pub use config::{Call, Config, ConfigError, MAX_PAGE, MOPM_TOKEN_TTL, Proxy, Roots, RootsError};
+pub use echo::{
+    DETAIL_EXCERPT_BYTES, ECHO_WINDOW_BYTES, WITHHELD_ECHO, echoes_credential,
+    excerpt_unless_echoes, withhold_if_echoes,
+};
 pub use errors::{
     ConflictAnswer, ConflictReason, DEFAULT_RETRY_AFTER_SECONDS, Mapped, Op, error_code,
     error_reason, map_reply, map_schema_violation, map_transport,

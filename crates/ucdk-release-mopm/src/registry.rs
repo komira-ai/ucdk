@@ -8,13 +8,19 @@
 //! set is another group. Each call takes the set as [`Member`]s, which [`members`] checks before
 //! any request is built, and a [`Caller`], the actor and the bearer token a grant carries.
 //!
+//! `stage` uploads only names the release declared ([`Registry::declare`]), as the `Publisher`
+//! contract requires: a registry never told any names refuses every stage. `abort` is not refused
+//! for a name.
+//!
 //! [`members`]: crate::members
+
+use std::collections::BTreeSet;
 
 use serde_json::{Value, json};
 use ucdk_core::{Clock, millis};
 use ucdk_release::codec::GrantFault;
 use ucdk_release_proto::v1::Reason;
-use ucdk_release_seams::{SeamError, StageAnswer};
+use ucdk_release_seams::{DeclareError, SeamError, StageAnswer, check_declaration};
 
 use crate::answers::{
     Created, Group, GroupStatus, Target, VersionRecord, VersionState, parse_created, parse_group,
@@ -132,6 +138,8 @@ pub struct Registry<T: Transport> {
     /// A create under `on_overlap: refuse` listed a superseded group, which contradicts the
     /// contract: this registry does not honour the option, and no later stage is sent.
     overlap_ignored: bool,
+    /// The names the release declared, lower-cased: `stage` refuses any other.
+    declared: BTreeSet<String>,
 }
 
 impl<T: Transport> Registry<T> {
@@ -141,6 +149,29 @@ impl<T: Transport> Registry<T> {
             config,
             clock,
             overlap_ignored: false,
+            declared: BTreeSet::new(),
+        }
+    }
+
+    /// States the names of the artifacts the release declared, replacing any earlier declaration.
+    /// The declaration is checked whole by [`check_declaration`]; one that is refused changes
+    /// nothing. Names compare ignoring ASCII case and nothing else.
+    pub fn declare(&mut self, names: &[String]) -> Result<(), DeclareError> {
+        check_declaration(names)?;
+        self.declared = names.iter().map(|n| n.to_ascii_lowercase()).collect();
+        Ok(())
+    }
+
+    /// Refuses a set that holds a member whose name was not declared, naming the first one.
+    fn declared_only(&self, members: &[Member]) -> Result<(), SeamError> {
+        match members
+            .iter()
+            .find(|m| !self.declared.contains(&m.name.to_ascii_lowercase()))
+        {
+            Some(member) => Err(SeamError::Undeclared {
+                name: member.name.clone(),
+            }),
+            None => Ok(()),
         }
     }
 
@@ -252,7 +283,9 @@ impl<T: Transport> Registry<T> {
     /// `Duplicate` when nothing had to be uploaded: the group is already open with every declared
     /// file stored, is past open, or the numbers are held by a group that stands. `Staged` when
     /// bytes were added. The same set sent again resumes the same group; a different set that
-    /// shares a member is refused by the registry (`on_overlap: refuse`) and ends nothing.
+    /// shares a member is refused by the registry (`on_overlap: refuse`) and ends nothing. A set
+    /// that holds a name the release did not declare is refused whole with
+    /// `SeamError::Undeclared`, before anything is sent.
     pub fn stage(
         &mut self,
         caller: &Caller<'_>,
@@ -271,6 +304,7 @@ impl<T: Transport> Registry<T> {
         members: &[Member],
         files: &[SetFile<'_>],
     ) -> Result<StageAnswer, Early> {
+        self.declared_only(members)?;
         if self.overlap_ignored {
             return Err(refuse().into());
         }

@@ -41,7 +41,11 @@ fn an_abort_by_the_staged_set_deletes_the_group_that_set_names() {
         reg.transport().lines(),
         [format!("DELETE {}", group_path(&id))]
     );
-    assert!(reg.transport().log[0].authorized);
+    // The delete carries the caller's own token as the bearer.
+    assert_eq!(
+        reg.transport().log[0].bearer,
+        Some(format!("Bearer {}", String::from_utf8_lossy(TOKEN)))
+    );
 }
 
 #[test]

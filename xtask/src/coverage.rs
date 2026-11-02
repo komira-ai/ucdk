@@ -301,6 +301,7 @@ pub fn run(root: &Path, runner: &dyn Runner) -> (Vec<Finding>, Vec<String>) {
         root,
     );
     let toolchain = format!("+{NIGHTLY}");
+    // `--no-fail-fast`: a run with several failing tests shows all of them, not the first binary's.
     let llvm_cov = Cmd::new(
         "cargo",
         &[
@@ -308,6 +309,7 @@ pub fn run(root: &Path, runner: &dyn Runner) -> (Vec<Finding>, Vec<String>) {
             "llvm-cov",
             "--branch",
             "--workspace",
+            "--no-fail-fast",
             "--features",
             "ucdk-capi/test-clock",
             "--locked",

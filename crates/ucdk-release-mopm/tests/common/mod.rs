@@ -160,6 +160,8 @@ pub struct Logged {
     pub body: String,
     /// The request carried a bearer token.
     pub authorized: bool,
+    /// The value of the `authorization` header, as sent.
+    pub bearer: Option<String>,
 }
 
 /// A registry written by hand: each route is a method and a path with the replies it gives in
@@ -213,6 +215,12 @@ impl Transport for Fake {
                 .headers
                 .iter()
                 .any(|h| matches!(h.value, HeaderValue::Secret(_))),
+            bearer: request.headers.iter().find_map(|h| match &h.value {
+                HeaderValue::Secret(secret) if h.name == "authorization" => {
+                    Some(String::from_utf8_lossy(secret.expose()).into_owned())
+                }
+                _ => None,
+            }),
         });
         for (method, at, clock, by) in &self.bumps {
             if *method == request.method && *at == path {
@@ -259,8 +267,20 @@ pub fn group_config() -> Config {
     c
 }
 
+/// The names the tests' releases declare.
+pub fn declared() -> Vec<String> {
+    vec!["alpha".to_owned()]
+}
+
+/// A registry on `fake` and `clock` that was told the names of [`declared`].
+pub fn declared_registry(fake: Fake, config: Config, clock: &ManualClock) -> Registry<Fake> {
+    let mut reg = Registry::new(fake, config, Box::new(clock.clone()));
+    reg.declare(&declared()).unwrap();
+    reg
+}
+
 pub fn registry(fake: Fake, clock: &ManualClock) -> Registry<Fake> {
-    Registry::new(fake, group_config(), Box::new(clock.clone()))
+    declared_registry(fake, group_config(), clock)
 }
 
 /// The members of the set `owned`.
@@ -441,6 +461,7 @@ pub fn err_kind(error: &SeamError) -> &'static str {
         SeamError::InFlight(_) => "in_flight",
         SeamError::Unknown(_) => "unknown",
         SeamError::GrantRefused(_) => "grant_refused",
+        SeamError::Undeclared { .. } => "undeclared",
     }
 }
 
