@@ -419,6 +419,38 @@ impl FakeRegistry {
         self.staged.contains_key(&coordinate_key(coordinate))
     }
 
+    /// An abort of `ks` for a caller that arranges state and holds coordinates and no items; it
+    /// is the abort `Publisher::abort` makes of the coordinates of its items on a registry
+    /// addressed by coordinate, and gives back the staged state of `ks` whatever group it is in.
+    pub fn abort_by_coordinates(&mut self, g: &Grant, ks: &[Coordinate]) -> Result<(), SeamError> {
+        let keys: Vec<String> = ks.iter().map(coordinate_key).collect();
+        self.abort_keys(g, &keys)
+    }
+
+    fn abort_keys(&mut self, g: &Grant, keys: &[String]) -> Result<(), SeamError> {
+        self.abort_in(g, keys, None)
+    }
+
+    /// The abort both entry points make: the log line, the gate and the grant check, then the
+    /// staged state of `keys` is given back; when `group` is given, only the state staged under
+    /// that group, so a registry addressed by group gives back nothing for another set.
+    fn abort_in(
+        &mut self,
+        g: &Grant,
+        keys: &[String],
+        group: Option<&str>,
+    ) -> Result<(), SeamError> {
+        self.calls.push(format!("abort {}", keys.join(",")));
+        self.gate()?;
+        self.admit(g, Need::Stage, keys)?;
+        for key in keys {
+            if group.is_none_or(|group| self.staged.get(key).is_some_and(|s| s.group == group)) {
+                self.staged.remove(key);
+            }
+        }
+        Ok(())
+    }
+
     pub fn is_yanked(&self, coordinate: &Coordinate) -> bool {
         self.committed
             .get(&coordinate_key(coordinate))
@@ -636,15 +668,11 @@ impl Publisher for FakeRegistry {
         Ok(StageAnswer::Staged)
     }
 
-    fn abort(&mut self, g: &Grant, ks: &[Coordinate]) -> Result<(), SeamError> {
-        let keys: Vec<String> = ks.iter().map(coordinate_key).collect();
-        self.calls.push(format!("abort {}", keys.join(",")));
-        self.gate()?;
-        self.admit(g, Need::Stage, &keys)?;
-        for key in &keys {
-            self.staged.remove(key);
-        }
-        Ok(())
+    fn abort(&mut self, g: &Grant, set: &[StageItem<'_>]) -> Result<(), SeamError> {
+        // A registry addressed by group finds the staged state by the group of the whole set, as
+        // its observe does: an abort of another set, a subset or a superset, gives back nothing.
+        let group = self.group_addressed.then(|| group_of(set));
+        self.abort_in(g, &keys(set), group.as_deref())
     }
 
     fn commit(&mut self, g: &Grant, items: &[StageItem<'_>]) -> Result<CommitAnswer, SeamError> {

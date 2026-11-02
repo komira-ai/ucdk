@@ -207,7 +207,7 @@ fn a_read_grant_observes_and_can_neither_stage_nor_commit() {
     assert_eq!(w.registry.fetch(&read, &set.coords[0]), Ok(None));
     assert_eq!(w.registry.stage(&read, &items).err(), denied);
     assert_eq!(w.registry.commit(&read, &items).err(), denied);
-    assert_eq!(w.registry.abort(&read, &set.coords).err(), denied);
+    assert_eq!(w.registry.abort(&read, &items).err(), denied);
     assert_eq!(w.registry.yank(&read, &set.coords[0], "no").err(), denied);
     assert_eq!(w.registry.stage_log().len(), 1);
     assert!(w.registry.commit_log().is_empty());
@@ -425,9 +425,105 @@ fn abort_gives_staged_state_back_and_never_touches_a_committed_coordinate() {
     let (mut w, set) = staged(&["a", "b"]);
     w.registry.present_different(&set.coords[1], b"held");
     let g = w.grant(GrantPhase::Stage, &set.coords);
-    w.registry.abort(&g, &set.coords).unwrap();
+    let blobs = set.blobs();
+    w.registry.abort(&g, &set.items(&blobs)).unwrap();
     assert!(!w.registry.is_staged(&set.coords[0]));
     assert_eq!(w.registry.bytes(&set.coords[1]), Some(&b"held"[..]));
+}
+
+#[test]
+fn an_abort_of_declared_items_gives_back_those_and_an_empty_set_gives_back_nothing() {
+    let (mut w, set) = staged(&["a", "b", "c"]);
+    let g = w.grant(GrantPhase::Stage, &set.coords);
+    assert_eq!(w.registry.abort(&g, &[]), Ok(()));
+    assert!(set.coords.iter().all(|c| w.registry.is_staged(c)));
+    let blobs = set.blobs();
+    let items = set.items(&blobs);
+    assert_eq!(w.registry.abort(&g, &items[..2]), Ok(()));
+    assert!(!w.registry.is_staged(&set.coords[0]));
+    assert!(!w.registry.is_staged(&set.coords[1]));
+    assert!(w.registry.is_staged(&set.coords[2]));
+}
+
+/// A world with `a` and `b` staged as one set and `c` committed, the abort of the test's
+/// entry point, and what the abort is expected to give back.
+fn aborting(abort: fn(&mut World, &Grant, &Set) -> Result<(), SeamError>) {
+    let (mut w, set) = staged(&["a", "b"]);
+    let held = Set::of(&["c"]);
+    let (blobs, g) = (held.blobs(), w.grant(GrantPhase::Stage, &held.coords));
+    w.registry.stage(&g, &held.items(&blobs)).unwrap();
+    assert_eq!(commit(&mut w, &held), Ok(CommitAnswer::Committed));
+    let unchanged = |w: &World| {
+        assert!(set.coords.iter().all(|c| w.registry.is_staged(c)));
+        assert_eq!(w.registry.bytes(&held.coords[0]), Some(&b"c"[..]));
+    };
+    let denied = Err(SeamError::GrantRefused(GrantFault::Denied));
+    let read = w.grant(GrantPhase::Read, &set.coords);
+    assert_eq!(abort(&mut w, &read, &set), denied);
+    unchanged(&w);
+    let commit_grant = w.grant(GrantPhase::Commit, &set.coords);
+    assert_eq!(abort(&mut w, &commit_grant, &set), denied);
+    unchanged(&w);
+    let g = w.grant(GrantPhase::Stage, &set.coords);
+    assert_eq!(abort(&mut w, &g, &set), Ok(()));
+    assert!(set.coords.iter().all(|c| !w.registry.is_staged(c)));
+    assert_eq!(w.registry.bytes(&held.coords[0]), Some(&b"c"[..]));
+    // Every abort is logged, the refused ones too, with the coordinates in the order of the call.
+    let line = format!(
+        "abort {},{}",
+        coordinate_key_of(&set, 0),
+        coordinate_key_of(&set, 1)
+    );
+    let aborts: Vec<&String> = w
+        .registry
+        .call_log()
+        .iter()
+        .filter(|l| l.starts_with("abort"))
+        .collect();
+    assert_eq!(aborts, [&line, &line, &line]);
+}
+
+#[test]
+fn an_abort_of_items_logs_checks_and_gives_back_by_their_coordinates() {
+    aborting(|w, g, set| {
+        let blobs = set.blobs();
+        w.registry.abort(g, &set.items(&blobs))
+    });
+}
+
+#[test]
+fn an_abort_by_coordinates_logs_checks_and_gives_back_as_an_abort_of_the_items_does() {
+    aborting(|w, g, set| w.registry.abort_by_coordinates(g, &set.coords));
+}
+
+#[test]
+fn an_empty_abort_by_coordinates_answers_ok_and_changes_nothing() {
+    let (mut w, set) = staged(&["a", "b"]);
+    let held = Set::of(&["c"]);
+    let (blobs, g) = (held.blobs(), w.grant(GrantPhase::Stage, &held.coords));
+    w.registry.stage(&g, &held.items(&blobs)).unwrap();
+    assert_eq!(commit(&mut w, &held), Ok(CommitAnswer::Committed));
+    let g = w.grant(GrantPhase::Stage, &set.coords);
+    assert_eq!(w.registry.abort_by_coordinates(&g, &[]), Ok(()));
+    assert!(set.coords.iter().all(|c| w.registry.is_staged(c)));
+    assert_eq!(w.registry.bytes(&held.coords[0]), Some(&b"c"[..]));
+    assert_eq!(w.registry.call_log().last(), Some(&"abort ".to_owned()));
+}
+
+#[test]
+fn the_abort_log_names_the_coordinates_in_the_order_of_the_call() {
+    let (mut w, set) = staged(&["a", "b"]);
+    let g = w.grant(GrantPhase::Stage, &set.coords);
+    let reversed = [set.coords[1].clone(), set.coords[0].clone()];
+    w.registry.abort_by_coordinates(&g, &reversed).unwrap();
+    assert_eq!(
+        w.registry.call_log().last(),
+        Some(&format!(
+            "abort {},{}",
+            coordinate_key_of(&set, 1),
+            coordinate_key_of(&set, 0)
+        ))
+    );
 }
 
 #[test]
@@ -722,6 +818,110 @@ mod grouped {
             &clock,
             FakeRegistry::new(&clock, LOCATION).group_addressed(),
         )
+    }
+
+    fn stage(w: &mut World, set: &Set) {
+        let (blobs, g) = (set.blobs(), w.grant(GrantPhase::Stage, &set.coords));
+        assert_eq!(
+            w.registry.stage(&g, &set.items(&blobs)),
+            Ok(StageAnswer::Staged)
+        );
+    }
+
+    fn abort(w: &mut World, set: &Set) {
+        let (blobs, g) = (set.blobs(), w.grant(GrantPhase::Stage, &set.coords));
+        assert_eq!(w.registry.abort(&g, &set.items(&blobs)), Ok(()));
+    }
+
+    #[test]
+    fn an_abort_gives_back_the_group_of_its_exact_set_and_nothing_of_another_set() {
+        let mut w = world();
+        let (pair, alone, held) = (Set::of(&["a", "b"]), Set::of(&["c"]), Set::of(&["z"]));
+        stage(&mut w, &held);
+        assert_eq!(commit(&mut w, &held), Ok(CommitAnswer::Committed));
+        stage(&mut w, &pair);
+        stage(&mut w, &alone);
+        // A subset, a superset and a set of the same coordinates with other bytes are each
+        // another group: the abort answers Ok and gives back nothing.
+        let mut other_bytes = Set::of(&["a", "b"]);
+        other_bytes.bytes = vec![b"A".to_vec(), b"B".to_vec()];
+        for other in [Set::of(&["a"]), Set::of(&["a", "b", "c"]), other_bytes] {
+            abort(&mut w, &other);
+            assert!(pair.coords.iter().all(|c| w.registry.is_staged(c)));
+            assert!(w.registry.is_staged(&alone.coords[0]));
+        }
+        abort(&mut w, &pair);
+        assert!(pair.coords.iter().all(|c| !w.registry.is_staged(c)));
+        assert!(w.registry.is_staged(&alone.coords[0]));
+        assert_eq!(w.registry.bytes(&held.coords[0]), Some(&b"z"[..]));
+        // An abort of the set that was committed leaves its bytes.
+        abort(&mut w, &held);
+        assert_eq!(w.registry.bytes(&held.coords[0]), Some(&b"z"[..]));
+        assert!(w.registry.is_staged(&alone.coords[0]));
+    }
+
+    /// `{a, b}` and `{c}` staged and `{z}` committed on a grouped registry.
+    fn arranged() -> (World, Set, Set, Set) {
+        let mut w = world();
+        let (pair, alone, held) = (Set::of(&["a", "b"]), Set::of(&["c"]), Set::of(&["z"]));
+        stage(&mut w, &held);
+        assert_eq!(commit(&mut w, &held), Ok(CommitAnswer::Committed));
+        stage(&mut w, &pair);
+        stage(&mut w, &alone);
+        (w, pair, alone, held)
+    }
+
+    #[test]
+    fn an_empty_abort_by_either_entry_point_answers_ok_and_changes_nothing() {
+        let (mut w, pair, alone, held) = arranged();
+        let g = w.grant(GrantPhase::Stage, &pair.coords);
+        assert_eq!(w.registry.abort(&g, &[]), Ok(()));
+        assert_eq!(w.registry.abort_by_coordinates(&g, &[]), Ok(()));
+        assert!(pair.coords.iter().all(|c| w.registry.is_staged(c)));
+        assert!(w.registry.is_staged(&alone.coords[0]));
+        assert_eq!(w.registry.bytes(&held.coords[0]), Some(&b"z"[..]));
+        let aborts: Vec<&String> = w
+            .registry
+            .call_log()
+            .iter()
+            .filter(|l| l.starts_with("abort"))
+            .collect();
+        assert_eq!(aborts, ["abort ", "abort "]);
+    }
+
+    #[test]
+    fn an_abort_of_the_staged_items_in_another_order_finds_their_group_and_logs_that_order() {
+        let (mut w, pair, alone, held) = arranged();
+        let blobs = pair.blobs();
+        let mut items = pair.items(&blobs);
+        items.reverse();
+        let g = w.grant(GrantPhase::Stage, &pair.coords);
+        assert_eq!(w.registry.abort(&g, &items), Ok(()));
+        assert!(pair.coords.iter().all(|c| !w.registry.is_staged(c)));
+        assert!(w.registry.is_staged(&alone.coords[0]));
+        assert_eq!(w.registry.bytes(&held.coords[0]), Some(&b"z"[..]));
+        assert_eq!(
+            w.registry.call_log().last(),
+            Some(&format!(
+                "abort {},{}",
+                coordinate_key_of(&pair, 1),
+                coordinate_key_of(&pair, 0)
+            ))
+        );
+    }
+
+    #[test]
+    fn an_abort_by_coordinates_gives_back_the_staged_state_of_those_coordinates() {
+        let mut w = world();
+        let pair = Set::of(&["a", "b"]);
+        stage(&mut w, &pair);
+        let g = w.grant(GrantPhase::Stage, &pair.coords[..1]);
+        assert_eq!(
+            w.registry.abort_by_coordinates(&g, &pair.coords[..1]),
+            Ok(())
+        );
+        assert!(!w.registry.is_staged(&pair.coords[0]));
+        assert!(w.registry.is_staged(&pair.coords[1]));
     }
 
     #[test]

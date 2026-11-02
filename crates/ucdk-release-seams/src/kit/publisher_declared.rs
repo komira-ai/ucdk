@@ -99,7 +99,7 @@ fn a_declaration_between_a_stage_and_its_commit_governs_the_commit<R: PublisherR
             0,
         ));
         let grant = rig.grant(&p, GrantPhase::Stage, &set.coords);
-        must(p.abort(&grant, &set.coords), "an abort of refused state");
+        must(p.abort(&grant, &items), "an abort of refused state");
         same(
             observed_as_staged(rig, shape, &mut p, GrantPhase::Stage, &set, 0),
             Presence::Absent,

@@ -200,7 +200,7 @@ pub(super) fn a_coordinate_the_channel_cannot_hold_is_refused_before_anything_is
         if p.stages() {
             let grant = rig.grant(&p, GrantPhase::Stage, one);
             refused_as_channel(p.stage(&grant, &items), "a stage");
-            refused_as_channel(p.abort(&grant, one), "an abort");
+            refused_as_channel(p.abort(&grant, &items), "an abort");
         }
         let grant = rig.grant(&p, GrantPhase::Commit, one);
         refused_as_channel(p.commit(&grant, &items), "a commit");
