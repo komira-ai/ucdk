@@ -17,6 +17,9 @@ ucdk-ledger = { path = "../ucdk-ledger" }
 ucdk-release = { path = "../ucdk-release" }
 ucdk-release-proto = { path = "../ucdk-release-proto" }
 ucdk-release-seams = { path = "../ucdk-release-seams" }
+# Wipes the identity token, the request token and the minted token on drop, as the seam's
+# `Grant` does.
+zeroize.workspace = true
 # The blocking HTTP client the adapter of a later change is built on. Only the TLS plumbing is
 # enabled, not the default root store (`webpki-roots`, whose licence is not allowed here): the
 # trust anchors are one bundle file named in `Config`, never a built-in or platform store.

@@ -6,8 +6,8 @@
 //! next: the version, the phase, the exceptional mark, the registry location, the actor, the
 //! number of coordinates and the five fields of each, and last the token mopm minted. It is
 //! unauthenticated and private to this crate: the publisher trusts the grant source that built
-//! it. An [`Envelope`] is neither `Debug` nor `Clone` and its token is overwritten when it is
-//! dropped.
+//! it. An [`Envelope`] is neither `Debug`, `Display` nor `Clone`, and its token is overwritten
+//! with zeros by the `zeroize` crate when it is dropped.
 //!
 //! Every check here is client-side and sends nothing: a refused grant is
 //! `GrantRefused(Denied)` (the grant is not for this call) or `GrantRefused(Expired)`.
@@ -15,6 +15,7 @@
 use ucdk_release::codec::{GrantFault, GrantPhase};
 use ucdk_release_proto::v1::Coordinate;
 use ucdk_release_seams::{Grant, SeamError};
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 const VERSION: &str = "1";
 
@@ -33,13 +34,17 @@ pub struct Envelope {
     pub actor: String,
     /// Every coordinate the grant covers, by all five fields.
     pub coordinates: Vec<Coordinate>,
-    token: Vec<u8>,
+    token: Zeroizing<Vec<u8>>,
 }
 
-impl Drop for Envelope {
-    fn drop(&mut self) {
-        self.token.fill(0);
-    }
+// The token is held in `Zeroizing`, which wipes it on drop, so the envelope is wiped on drop too.
+// This marker is a promise the compiler does not check: every field of `Envelope` that holds a
+// secret must be `Zeroizing`, or be wiped by a `Drop` of its own, before it is added.
+impl ZeroizeOnDrop for Envelope {}
+
+/// The bytes [`put`] writes for a text of `len` bytes: its decimal length, a colon and the text.
+fn framed_len(len: usize) -> usize {
+    len.to_string().len() + 1 + len
 }
 
 fn put(out: &mut Vec<u8>, bytes: &[u8]) {
@@ -93,7 +98,7 @@ impl Envelope {
             registry,
             actor,
             coordinates,
-            token,
+            token: Zeroizing::new(token),
         }
     }
 
@@ -103,15 +108,36 @@ impl Envelope {
         (!self.token.is_empty()).then_some(self.token.as_slice())
     }
 
-    /// The bytes of the grant's secret.
-    pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::new();
+    /// The bytes of the grant's secret. They hold the token, so they are wiped on drop, and the
+    /// buffer is sized once so that no reallocation leaves a copy of the token behind.
+    pub fn encode(&self) -> Zeroizing<Vec<u8>> {
+        let count = self.coordinates.len().to_string();
+        let texts = [
+            VERSION.len(),
+            phase_word(self.phase).len(),
+            1,
+            self.registry.len(),
+            self.actor.len(),
+            count.len(),
+            self.token.len(),
+        ];
+        let fields = self.coordinates.iter().flat_map(|c| {
+            [
+                c.channel.len(),
+                c.r#type.to_string().len(),
+                c.name.len(),
+                c.version.len(),
+                c.platform.len(),
+            ]
+        });
+        let size: usize = texts.into_iter().chain(fields).map(framed_len).sum();
+        let mut out = Zeroizing::new(Vec::with_capacity(size));
         put(&mut out, VERSION.as_bytes());
         put(&mut out, phase_word(self.phase).as_bytes());
         put(&mut out, if self.exceptional { b"1" } else { b"0" });
         put(&mut out, self.registry.as_bytes());
         put(&mut out, self.actor.as_bytes());
-        put(&mut out, self.coordinates.len().to_string().as_bytes());
+        put(&mut out, count.as_bytes());
         for c in &self.coordinates {
             put(&mut out, c.channel.as_bytes());
             put(&mut out, c.r#type.to_string().as_bytes());

@@ -766,6 +766,7 @@ dependencies = [
  "ucdk-release-proto",
  "ucdk-release-seams",
  "ureq",
+ "zeroize",
 ]
 
 [[package]]

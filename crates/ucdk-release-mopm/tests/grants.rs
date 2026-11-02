@@ -43,7 +43,7 @@ fn envelope(phase: GrantPhase, coordinates: Vec<Coordinate>) -> Envelope {
 }
 
 fn grant(phase: GrantPhase, coordinates: Vec<Coordinate>, expires_ms: u64) -> Grant {
-    Grant::issued(envelope(phase, coordinates).encode(), expires_ms)
+    Grant::issued(envelope(phase, coordinates).encode().to_vec(), expires_ms)
 }
 
 fn call<'a>(verb: Verb, coordinates: &'a [&'a Coordinate]) -> Use<'a> {
@@ -172,7 +172,7 @@ fn bytes_that_are_not_an_envelope_are_malformed() {
             frame(&[b"1", b"read", b"0", b"r", b"a", b"0", b"t"]),
         ),
     ];
-    let mut trailing = good.clone();
+    let mut trailing = good.to_vec();
     trailing.push(b'x');
     cases.push(("trailing bytes", trailing));
     cases.push(("truncated", good[..good.len() - 3].to_vec()));

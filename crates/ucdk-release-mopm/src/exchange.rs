@@ -25,6 +25,7 @@ use ucdk_release::codec::{GrantFault, GrantPhase};
 use ucdk_release_proto::v1::push_identity::Kind;
 use ucdk_release_proto::v1::{Coordinate, Reason, Visibility};
 use ucdk_release_seams::{Grant, GrantRequest, GrantSource, SeamError};
+use zeroize::Zeroizing;
 
 use crate::config::{Config, MOPM_TOKEN_TTL};
 use crate::errors::{error_code, rate_limited};
@@ -58,16 +59,8 @@ pub struct GrantSourceConfig {
     pub actor: ActorForm,
 }
 
-struct Wiped(Vec<u8>);
-
-impl Drop for Wiped {
-    fn drop(&mut self) {
-        self.0.fill(0);
-    }
-}
-
 struct Minted {
-    token: Wiped,
+    token: Zeroizing<Vec<u8>>,
     expires_ms: u64,
 }
 
@@ -203,8 +196,8 @@ fn interpret(
     let Some(Value::String(token)) = map.remove("token") else {
         return Err(unreadable());
     };
-    let token = Wiped(token.into_bytes());
-    let visible = !token.0.is_empty() && token.0.iter().all(u8::is_ascii_graphic);
+    let token = Zeroizing::new(token.into_bytes());
+    let visible = !token.is_empty() && token.iter().all(u8::is_ascii_graphic);
     let stated = map
         .get("expires_at")
         .and_then(Value::as_str)
@@ -242,19 +235,24 @@ fn read_exchange(
 }
 
 /// The request body of an exchange: the identity token and the `(name, version)` pairs. The
-/// token is checked to be base64url and dots, so it needs no escaping.
-fn exchange_body(jwt: &[u8], asked: &BTreeSet<(String, String)>) -> Wiped {
+/// token is checked to be base64url and dots, so it needs no escaping. The body is sized once,
+/// so that no reallocation leaves a copy of the token behind, and it is wiped on drop.
+fn exchange_body(jwt: &[u8], asked: &BTreeSet<(String, String)>) -> Zeroizing<Vec<u8>> {
+    const OPEN: &[u8] = br#"{"jwt":""#;
+    const MIDDLE: &[u8] = br#"","packages":"#;
     let packages: Vec<Value> = asked
         .iter()
         .map(|(name, version)| serde_json::json!({ "name": name, "version": version }))
         .collect();
-    let mut body = Vec::with_capacity(jwt.len() + 64);
-    body.extend_from_slice(br#"{"jwt":""#);
+    let packages = Value::Array(packages).to_string();
+    let size = OPEN.len() + jwt.len() + MIDDLE.len() + packages.len() + 1;
+    let mut body = Zeroizing::new(Vec::with_capacity(size));
+    body.extend_from_slice(OPEN);
     body.extend_from_slice(jwt);
-    body.extend_from_slice(br#"","packages":"#);
-    body.extend_from_slice(Value::Array(packages).to_string().as_bytes());
+    body.extend_from_slice(MIDDLE);
+    body.extend_from_slice(packages.as_bytes());
     body.push(b'}');
-    Wiped(body)
+    body
 }
 
 pub struct MopmGrantSource<T, I, C> {
@@ -294,7 +292,7 @@ impl<T: Transport, I: IdentitySource, C: Clock> MopmGrantSource<T, I, C> {
                 Header::plain("content-type", "application/json"),
                 Header::plain("accept", "application/json"),
             ],
-            body: &body.0,
+            body: &body,
         };
         let mut response = self
             .transport
@@ -373,8 +371,14 @@ impl<T: Transport + Send, I: IdentitySource + Send, C: Clock> GrantSource
             req.repository.location.clone(),
             actor,
             req.coordinates.to_vec(),
-            std::mem::take(&mut minted.token.0),
+            std::mem::take(&mut *minted.token),
         );
-        Ok(Grant::issued(envelope.encode(), minted.expires_ms))
+        // The encoded buffer moves into the grant, which wipes it on drop; what is left behind
+        // is an empty vector.
+        let mut secret = envelope.encode();
+        Ok(Grant::issued(
+            std::mem::take(&mut *secret),
+            minted.expires_ms,
+        ))
     }
 }

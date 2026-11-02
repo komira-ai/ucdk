@@ -3,7 +3,7 @@
 //! before it is spent.
 //!
 //! An [`IdentityToken`] is a signed JWT that the issuer accepts once. It is neither `Debug` nor
-//! `Display` nor `Clone`, and it is overwritten when dropped. This crate reads its claims (the
+//! `Display` nor `Clone`, and the `zeroize` crate overwrites it with zeros when it is dropped. This crate reads its claims (the
 //! issuer verifies the signature, not this crate) so that ucdk is stricter than the issuer and
 //! never looser: [`check_identity`] refuses a token for another issuer, audience, subject or
 //! environment, one that differs from a pinned claim, one that is expired or not yet valid, one
@@ -14,6 +14,7 @@ use std::fmt;
 
 use serde_json::{Map, Value};
 use ucdk_ledger::MAX_CLOCK_SKEW;
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 use crate::transport::{Header, Method, Request, Transport};
 use crate::url::Url;
@@ -38,16 +39,15 @@ pub trait IdentitySource {
     fn identity_token(&mut self, audience: &str) -> Result<IdentityToken, IdentityUnavailable>;
 }
 
-/// A signed identity token. The bytes are overwritten when it is dropped.
+/// A signed identity token. The bytes are overwritten with zeros when it is dropped.
 pub struct IdentityToken {
-    jwt: Vec<u8>,
+    jwt: Zeroizing<Vec<u8>>,
 }
 
-impl Drop for IdentityToken {
-    fn drop(&mut self) {
-        self.jwt.fill(0);
-    }
-}
+// The bytes are held in `Zeroizing`, which wipes them on drop, so the token is wiped on drop too.
+// This marker is a promise the compiler does not check: every field of `IdentityToken` that holds
+// a secret must be `Zeroizing`, or be wiped by a `Drop` of its own, before it is added.
+impl ZeroizeOnDrop for IdentityToken {}
 
 fn base64url(text: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(text.len() * 3 / 4);
@@ -78,7 +78,9 @@ fn base64url(text: &[u8]) -> Option<Vec<u8>> {
 impl IdentityToken {
     /// A token of the form `header.payload.signature`, each part base64url, at most 8192
     /// bytes: a text that cannot be, is refused here, and so never reaches a request body.
+    /// The bytes are wiped on drop whether the text is accepted or refused.
     pub fn new(jwt: Vec<u8>) -> Result<Self, IdentityUnavailable> {
+        let jwt = Zeroizing::new(jwt);
         let alphabet = jwt
             .iter()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
@@ -227,18 +229,18 @@ pub fn check_identity(
 pub struct GithubIdentity<T: Transport> {
     transport: T,
     url: Url,
-    request_token: Vec<u8>,
+    request_token: Zeroizing<Vec<u8>>,
 }
 
-impl<T: Transport> Drop for GithubIdentity<T> {
-    fn drop(&mut self) {
-        self.request_token.fill(0);
-    }
-}
+// The request token is held in `Zeroizing`, which wipes it on drop; the same promise as on
+// `IdentityToken` holds for every field added here.
+impl<T: Transport> ZeroizeOnDrop for GithubIdentity<T> {}
 
 impl<T: Transport> GithubIdentity<T> {
-    /// `None` for a request token that is not header-safe.
+    /// `None` for a request token that is not header-safe. The request token is wiped on drop
+    /// whether it is accepted or refused.
     pub fn new(transport: T, url: Url, request_token: Vec<u8>) -> Option<Self> {
+        let request_token = Zeroizing::new(request_token);
         let usable = Header::bearer(&request_token).is_some();
         usable.then_some(Self {
             transport,
