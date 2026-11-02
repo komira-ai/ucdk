@@ -16,13 +16,13 @@ fn bytes(value: &Value) -> Vec<u8> {
 
 #[test]
 fn a_package_record_lists_its_versions_with_their_states() {
-    let body = bytes(&json!({"versions": [
+    let body = bytes(&json!({"name": "alpha", "versions": [
         {"version": "1.0.1", "state": "published"},
         {"version": "1.0.0", "state": "yanked"},
         {"version": "0.9.0", "state": "tombstoned"},
     ]}));
     assert_eq!(
-        parse_package(&body),
+        parse_package(&body, "alpha"),
         Some(vec![
             ("1.0.1".to_owned(), VersionState::Published),
             ("1.0.0".to_owned(), VersionState::Yanked),
@@ -30,7 +30,7 @@ fn a_package_record_lists_its_versions_with_their_states() {
         ])
     );
     assert_eq!(
-        parse_package(&bytes(&json!({"versions": []}))),
+        parse_package(&bytes(&json!({"name": "alpha", "versions": []})), "alpha"),
         Some(vec![])
     );
     for bad in [
@@ -41,9 +41,9 @@ fn a_package_record_lists_its_versions_with_their_states() {
         json!({"versions": [{"version": "1.0.0", "state": "pending"}]}),
         json!({"versions": [{"version": 1, "state": "published"}]}),
     ] {
-        assert_eq!(parse_package(&bytes(&bad)), None, "{bad}");
+        assert_eq!(parse_package(&bytes(&bad), "alpha"), None, "{bad}");
     }
-    assert_eq!(parse_package(b"not json"), None);
+    assert_eq!(parse_package(b"not json", "alpha"), None);
 }
 
 #[test]

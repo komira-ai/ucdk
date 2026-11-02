@@ -162,26 +162,35 @@ impl Url {
         }
     }
 
-    /// This URL with `query` as its query. The caller encodes the query.
+    /// This URL with `query` as its query, in place of any query it had; an empty `query` is no
+    /// query. The caller encodes the query.
     #[must_use]
     pub fn with_query(&self, query: &str) -> Url {
         Url {
             origin: self.origin.clone(),
             path: self.path.clone(),
-            query: Some(query.to_owned()),
+            query: (!query.is_empty()).then(|| query.to_owned()),
         }
     }
 
     /// The URL at the same origin whose path is `segments`, each percent-encoded as one path
-    /// segment, with no query: a location that does not hang under this URL's own path.
+    /// segment, with no query (any query this URL had is dropped): a location that does not hang
+    /// under this URL's own path. With no segments the path is `/`.
     #[must_use]
     pub fn rooted(&self, segments: &[&str]) -> Url {
-        Url {
+        let url = Url {
             origin: self.origin.clone(),
             path: String::new(),
             query: None,
         }
-        .join(segments)
+        .join(segments);
+        if url.path.is_empty() {
+            return Url {
+                path: "/".to_owned(),
+                ..url
+            };
+        }
+        url
     }
 
     /// The URL with its query replaced by `<redacted>`: safe to print and to put in an error.

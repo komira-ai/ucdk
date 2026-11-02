@@ -7,6 +7,8 @@
 //! only and may lag. A read that fails fails the whole call: it is never taken for an absent
 //! answer and a partial list is never returned.
 
+use std::collections::BTreeSet;
+
 use ucdk_release::codec::GrantFault;
 use ucdk_release::publish::{Held, Presence};
 use ucdk_release_proto::v1::{ArtifactType, Coordinate};
@@ -14,7 +16,7 @@ use ucdk_release_seams::{ListScope, Listed, SeamError};
 
 use super::{Caller, Registry, refuse, unexpected};
 use crate::answers::{Group, GroupStatus, RecordFile, VersionRecord, VersionState};
-use crate::errors::{Mapped, Op, error_code, map_reply, map_schema_violation, map_transport};
+use crate::errors::{Op, error_code, map_reply, map_schema_violation, map_transport};
 use crate::grammar::valid_name;
 use crate::group_id::group_id;
 use crate::listing::{parse_index, parse_package, parse_page, valid_prefix};
@@ -73,33 +75,38 @@ fn member_of<'a>(set: &'a [Member], k: &Key) -> Option<&'a Member> {
     })
 }
 
-/// What the group read says of `k`: `Staged` only for an open group that lists exactly the declared
-/// files of `k`'s member, every one stored; the digest is the declared one. A member the group lists
-/// no files for is not reserved yet. A listing of other files than the declared ones is a broken
-/// response, because the group id is a function of the set.
+/// What the group read says of `k`: `Staged` only for an open group that lists `k`'s member once,
+/// with exactly the declared files of that member (each declared file once, nothing else), every
+/// one stored; the digest is the declared one. A member the group lists no files for is not
+/// reserved yet. A member listed twice, or a listing of other files than the declared ones, is a
+/// broken response, because the group id is a function of the set.
 fn staged(group: &Group, member: &Member, k: &Key) -> Result<Presence, SeamError> {
-    let listed = group
-        .members
-        .iter()
-        .find(|g| {
-            (g.name.as_str(), g.version.as_str()) == (member.name.as_str(), member.version.as_str())
-        })
-        .filter(|g| !g.files.is_empty());
-    let Some(listed) = listed else {
+    let broken =
+        || map_schema_violation(Op::Read, "a group lists files other than the declared ones");
+    let mut matching = group.members.iter().filter(|g| {
+        (g.name.as_str(), g.version.as_str()) == (member.name.as_str(), member.version.as_str())
+    });
+    let listed = matching.next();
+    if matching.next().is_some() {
+        return Err(broken());
+    }
+    let Some(listed) = listed.filter(|g| !g.files.is_empty()) else {
         return Ok(Presence::Absent);
     };
-    let exact = listed.files.len() == member.files.len()
-        && listed.files.iter().all(|f| {
-            member.files.iter().any(|d| {
-                (d.subdir, d.file_name.as_str(), d.sha256.as_str(), d.size)
-                    == (f.subdir, f.filename.as_str(), f.sha256.as_str(), f.size)
-            })
-        });
-    if !exact {
-        return Err(map_schema_violation(
-            Op::Read,
-            "a group lists files other than the declared ones",
-        ));
+    let mut got: Vec<_> = listed
+        .files
+        .iter()
+        .map(|f| (f.subdir, f.filename.as_str(), f.sha256.as_str(), f.size))
+        .collect();
+    let mut want: Vec<_> = member
+        .files
+        .iter()
+        .map(|d| (d.subdir, d.file_name.as_str(), d.sha256.as_str(), d.size))
+        .collect();
+    got.sort_unstable();
+    want.sort_unstable();
+    if got != want {
+        return Err(broken());
     }
     let stored = listed.files.iter().all(|f| f.uploaded == Some(true));
     let declared = member.files.iter().find(|f| f.subdir == k.subdir);
@@ -171,8 +178,9 @@ impl<T: Transport> Registry<T> {
     }
 
     /// Every coordinate of `name` the channel holds, of any version and platform, yanked ones
-    /// included, each with its digest. It compares nothing. A package nobody published, and a
-    /// claimed package with no version, is an empty list. The package record lists the versions and
+    /// included, each with its digest. It compares nothing. A package nobody published (a 404
+    /// `package_not_found`, and no other answer) and a claimed package with no version are an
+    /// empty list, and then the sparse index is not read. The package record lists the versions and
     /// the sparse index gives the digests, a cache that can lag the record by a minute, so a
     /// version it does not show yet is read from its own record and never left out. A version a
     /// failed group burned holds no file and is not listed. If any read fails the call fails, and a
@@ -190,12 +198,19 @@ impl<T: Transport> Registry<T> {
             .transport
             .send(&request)
             .map_err(|e| map_transport(Op::Read, &e))?;
-        let versions = match map_reply(Op::Read, &response, self.config.retry_after_ceiling) {
-            None => parse_package(&response.body)
-                .ok_or_else(|| map_schema_violation(Op::Read, "a package record"))?,
-            Some(Mapped::Missing) => return Ok(Vec::new()),
-            Some(other) => return Err(unexpected(other)),
-        };
+        if response.status == 404
+            && error_code(&response.body).as_deref() == Some("package_not_found")
+        {
+            return Ok(Vec::new());
+        }
+        if let Some(mapped) = map_reply(Op::Read, &response, self.config.retry_after_ceiling) {
+            return Err(unexpected(mapped));
+        }
+        let versions = parse_package(&response.body, name)
+            .ok_or_else(|| map_schema_violation(Op::Read, "a package record"))?;
+        if versions.is_empty() {
+            return Ok(Vec::new());
+        }
         if versions.len() > self.config.newest_versions {
             return Err(SeamError::Permanent(
                 "the package lists more versions than the configured cap".to_owned(),
@@ -222,16 +237,20 @@ impl<T: Transport> Registry<T> {
         Ok(found)
     }
 
-    /// The latest published version of every package of the channel whose name starts with the
-    /// prefix, each file with its digest. For reports only: a package whose newest published
-    /// version is a yanked or tombstoned one has no latest and is left out, and an older version is
-    /// never listed, which is the lag a report allows. A failed read fails the call, and more pages
-    /// than [`MAX_LIST_PAGES`] is an error.
+    /// The latest published version, as the search names it, of every package of the channel whose
+    /// name starts with the prefix, each file with its digest. For reports only: when a newer
+    /// version was withdrawn, the latest is the newest one still published, possibly older; a
+    /// package with no published version has no latest and is left out; and a latest whose record
+    /// is not there yet or is no longer published (withdrawn between the search and the record
+    /// read) is left out, which is the lag a report allows. A package the search names twice, or
+    /// an empty cursor, is a broken response. A failed read fails the call, and more pages than
+    /// [`MAX_LIST_PAGES`] is an error.
     pub fn list(&mut self, scope: &ListScope) -> Result<Vec<Listed>, SeamError> {
         if scope.channel != self.config.channel || !valid_prefix(&scope.prefix) {
             return Err(refuse());
         }
         let mut latest: Vec<(String, String)> = Vec::new();
+        let mut seen = BTreeSet::new();
         let mut cursor = String::new();
         for _ in 0..MAX_LIST_PAGES {
             let mut query = format!("sort=name&limit={PAGE}&q={}", encode_segment(&scope.prefix));
@@ -249,12 +268,17 @@ impl<T: Transport> Registry<T> {
             }
             let page = parse_page(&response.body)
                 .ok_or_else(|| map_schema_violation(Op::Read, "a page of packages"))?;
-            latest.extend(
-                page.packages
-                    .into_iter()
-                    .filter(|(name, _)| name.starts_with(&scope.prefix))
-                    .filter_map(|(name, version)| version.map(|v| (name, v))),
-            );
+            for (name, version) in page.packages {
+                if !seen.insert(name.clone()) {
+                    return Err(map_schema_violation(
+                        Op::Read,
+                        "the search names a package twice",
+                    ));
+                }
+                if let Some(version) = version.filter(|_| name.starts_with(&scope.prefix)) {
+                    latest.push((name, version));
+                }
+            }
             match page.next_cursor {
                 Some(next) => cursor = next,
                 None => return self.listed(&scope.channel, &latest),
@@ -266,7 +290,7 @@ impl<T: Transport> Registry<T> {
     }
 
     /// The files of the latest version of each of `latest`, read from its record. A record that
-    /// is not there yet is lag and is left out.
+    /// is not there yet, or that is no longer published, is lag and is left out.
     fn listed(
         &mut self,
         channel: &str,
@@ -274,7 +298,8 @@ impl<T: Transport> Registry<T> {
     ) -> Result<Vec<Listed>, SeamError> {
         let mut out = Vec::new();
         for (name, version) in latest {
-            if let Some(record) = self.read_record(name, version)? {
+            let record = self.read_record(name, version)?;
+            if let Some(record) = record.filter(|r| r.state == VersionState::Published) {
                 out.extend(record.files.iter().map(|f| Listed {
                     coordinate: coordinate(channel, name, version, f.subdir),
                     held: held(f),

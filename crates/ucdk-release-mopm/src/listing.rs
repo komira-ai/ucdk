@@ -8,11 +8,17 @@ use std::collections::BTreeSet;
 use serde_json::Value;
 
 use crate::answers::{VersionRecord, VersionState, parse_record};
+use crate::grammar::{valid_name, valid_version};
 
 /// The versions `GET /packages/{name}` lists, newest first, yanked and tombstoned ones included:
-/// each with the state the package record gives it.
-pub fn parse_package(body: &[u8]) -> Option<Vec<(String, VersionState)>> {
+/// each with the state the package record gives it. The record names `name`, every version is one
+/// mopm accepts and none is listed twice; unknown keys are ignored.
+pub fn parse_package(body: &[u8], name: &str) -> Option<Vec<(String, VersionState)>> {
     let value: Value = serde_json::from_slice(body).ok()?;
+    if value.get("name").and_then(Value::as_str) != Some(name) {
+        return None;
+    }
+    let mut seen = BTreeSet::new();
     value
         .get("versions")
         .and_then(Value::as_array)
@@ -20,7 +26,10 @@ pub fn parse_package(body: &[u8]) -> Option<Vec<(String, VersionState)>> {
             versions
                 .iter()
                 .map(|v| {
-                    let version = v.get("version").and_then(Value::as_str);
+                    let version = v
+                        .get("version")
+                        .and_then(Value::as_str)
+                        .filter(|v| valid_version(v) && seen.insert(v.to_owned()));
                     let state = v
                         .get("state")
                         .and_then(Value::as_str)
@@ -32,7 +41,8 @@ pub fn parse_package(body: &[u8]) -> Option<Vec<(String, VersionState)>> {
 }
 
 /// One page of `GET /packages`: each package with its latest published version, if it has one,
-/// and the cursor of the next page.
+/// and the cursor of the next page. Every name and version is one mopm accepts, a cursor is never
+/// empty (it would read the first page again), and unknown keys are ignored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Page {
     pub packages: Vec<(String, Option<String>)>,
@@ -48,10 +58,13 @@ pub fn parse_page(body: &[u8]) -> Option<Page> {
             packages
                 .iter()
                 .map(|p| {
-                    let name = p.get("name").and_then(Value::as_str)?;
+                    let name = p
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .filter(|n| valid_name(n))?;
                     let latest = match p.get("latest") {
                         Some(Value::Null) => Some(None),
-                        Some(Value::String(v)) => Some(Some(v.clone())),
+                        Some(Value::String(v)) if valid_version(v) => Some(Some(v.clone())),
                         _ => None,
                     };
                     latest.map(|latest| (name.to_owned(), latest))
@@ -60,7 +73,7 @@ pub fn parse_page(body: &[u8]) -> Option<Page> {
         });
     let next = match value.get("next_cursor") {
         Some(Value::Null) => Some(None),
-        Some(Value::String(cursor)) => Some(Some(cursor.clone())),
+        Some(Value::String(cursor)) if !cursor.is_empty() => Some(Some(cursor.clone())),
         _ => None,
     };
     match (packages, next) {
