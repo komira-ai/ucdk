@@ -438,6 +438,21 @@ impl Ledger for FileLedger {
         Ok(lease)
     }
 
+    fn acquire_if(
+        &self,
+        holder: &str,
+        ttl: Duration,
+        token: &Token,
+        fence: Fence,
+    ) -> Result<Lease, LeaseError> {
+        // The document is read inside the lock, so the precondition and the grant are one step.
+        let txn = self.begin()?;
+        let mut next = txn.document.doc.clone();
+        let lease = next.acquire_if(self.inner.clock.now_millis(), holder, ttl, token, fence)?;
+        txn.persist(&next).map_err(LeaseError::Unavailable)?;
+        Ok(lease)
+    }
+
     fn renew(&self, fence: Fence, ttl: Duration) -> Result<Lease, LedgerError> {
         let txn = self.begin()?;
         let mut next = txn.document.doc.clone();

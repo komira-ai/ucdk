@@ -4,6 +4,7 @@
 //! records the tests write, both ledgers behind one type, a ledger that can be made to fail,
 //! and a counter with a hook that stands in for the calls a lease guards.
 
+pub mod hook;
 pub mod release;
 
 use std::collections::BTreeSet;
@@ -153,6 +154,16 @@ impl Ledger for AnyLedger {
         self.inner().acquire(holder, ttl)
     }
 
+    fn acquire_if(
+        &self,
+        holder: &str,
+        ttl: Duration,
+        token: &Token,
+        fence: Fence,
+    ) -> Result<Lease, LeaseError> {
+        self.inner().acquire_if(holder, ttl, token, fence)
+    }
+
     fn renew(&self, fence: Fence, ttl: Duration) -> Result<Lease, LedgerError> {
         self.inner().renew(fence, ttl)
     }
@@ -174,7 +185,12 @@ pub struct FlakyLedger {
     fail_reads: AtomicBool,
     fail_acquire: AtomicBool,
     lose_acquire_answer: AtomicBool,
+    lose_acquire_if_answer: AtomicBool,
     fail_release: AtomicBool,
+    acquire_calls: AtomicU64,
+    acquire_if_calls: AtomicU64,
+    acquire_if_error: Mutex<Option<LeaseError>>,
+    acquire_error: Mutex<Option<LeaseError>>,
 }
 
 impl FlakyLedger {
@@ -195,7 +211,12 @@ impl FlakyLedger {
             fail_reads: AtomicBool::default(),
             fail_acquire: AtomicBool::default(),
             lose_acquire_answer: AtomicBool::default(),
+            lose_acquire_if_answer: AtomicBool::default(),
             fail_release: AtomicBool::default(),
+            acquire_calls: AtomicU64::default(),
+            acquire_if_calls: AtomicU64::default(),
+            acquire_if_error: Mutex::new(None),
+            acquire_error: Mutex::new(None),
         }
     }
 
@@ -235,9 +256,35 @@ impl FlakyLedger {
         self.lose_acquire_answer.store(on, Ordering::SeqCst);
     }
 
+    /// Makes every `acquire_if` reach the ledger and then fail as unavailable, as when the
+    /// conditional grant landed and its answer was lost.
+    pub fn lose_acquire_if_answer(&self, on: bool) {
+        self.lose_acquire_if_answer.store(on, Ordering::SeqCst);
+    }
+
     /// Makes every release fail as unavailable, whether or not the lease is given back.
     pub fn fail_release(&self, on: bool) {
         self.fail_release.store(on, Ordering::SeqCst);
+    }
+
+    /// The plain `acquire` calls made so far.
+    pub fn acquire_calls(&self) -> u64 {
+        self.acquire_calls.load(Ordering::SeqCst)
+    }
+
+    /// The conditional grants that reached the ledger so far.
+    pub fn acquire_if_calls(&self) -> u64 {
+        self.acquire_if_calls.load(Ordering::SeqCst)
+    }
+
+    /// Makes every `acquire` answer `error`, without reaching the ledger.
+    pub fn fail_acquire_with(&self, error: Option<LeaseError>) {
+        *self.acquire_error.lock().expect("lock") = error;
+    }
+
+    /// Makes every `acquire_if` answer `error`, without reaching the ledger.
+    pub fn fail_acquire_if(&self, error: Option<LeaseError>) {
+        *self.acquire_if_error.lock().expect("lock") = error;
     }
 }
 
@@ -265,11 +312,33 @@ impl Ledger for FlakyLedger {
     }
 
     fn acquire(&self, holder: &str, ttl: Duration) -> Result<Lease, LeaseError> {
+        self.acquire_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(error) = self.acquire_error.lock().expect("lock").clone() {
+            return Err(error);
+        }
         if self.fail_acquire.load(Ordering::SeqCst) {
             return Err(LeaseError::Unavailable("the lease is down".to_owned()));
         }
         let lease = self.inner.acquire(holder, ttl)?;
         if self.lose_acquire_answer.load(Ordering::SeqCst) {
+            return Err(LeaseError::Unavailable("the answer was lost".to_owned()));
+        }
+        Ok(lease)
+    }
+
+    fn acquire_if(
+        &self,
+        holder: &str,
+        ttl: Duration,
+        token: &Token,
+        fence: Fence,
+    ) -> Result<Lease, LeaseError> {
+        if let Some(error) = self.acquire_if_error.lock().expect("lock").clone() {
+            return Err(error);
+        }
+        self.acquire_if_calls.fetch_add(1, Ordering::SeqCst);
+        let lease = self.inner.acquire_if(holder, ttl, token, fence)?;
+        if self.lose_acquire_if_answer.load(Ordering::SeqCst) {
             return Err(LeaseError::Unavailable("the answer was lost".to_owned()));
         }
         Ok(lease)

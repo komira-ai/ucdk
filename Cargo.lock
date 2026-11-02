@@ -745,6 +745,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucdk-release-engine"
+version = "0.0.0"
+dependencies = [
+ "sha2",
+ "ucdk-api",
+ "ucdk-core",
+ "ucdk-ledger",
+ "ucdk-release",
+ "ucdk-release-fake",
+ "ucdk-release-proto",
+ "ucdk-release-seams",
+]
+
+[[package]]
 name = "ucdk-release-fake"
 version = "0.0.0"
 dependencies = [
@@ -760,6 +774,7 @@ name = "ucdk-release-mopm"
 version = "0.0.0"
 dependencies = [
  "rustls",
+ "serde",
  "serde_json",
  "sha2",
  "ucdk-core",
@@ -768,6 +783,7 @@ dependencies = [
  "ucdk-release-proto",
  "ucdk-release-seams",
  "ureq",
+ "zeroize",
 ]
 
 [[package]]

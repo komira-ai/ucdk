@@ -222,6 +222,16 @@ impl Ledger for HookedLedger {
         self.inner.acquire(holder, ttl)
     }
 
+    fn acquire_if(
+        &self,
+        holder: &str,
+        ttl: Duration,
+        token: &Token,
+        fence: Fence,
+    ) -> Result<Lease, LeaseError> {
+        self.inner.acquire_if(holder, ttl, token, fence)
+    }
+
     fn renew(&self, fence: Fence, ttl: Duration) -> Result<Lease, LedgerError> {
         self.inner.renew(fence, ttl)
     }

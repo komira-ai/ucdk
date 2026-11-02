@@ -197,6 +197,208 @@ fn every_accepted_write_moves_the_token_even_when_it_changes_nothing() {
     });
 }
 
+// ---- the conditional grant -----------------------------------------------------------------
+
+#[test]
+fn acquire_if_grants_when_the_token_and_fence_are_unchanged() {
+    on_every_clocked_ledger("acquire_if_grants", |ledger, clock| {
+        let first = ledger.acquire("alice", TTL).expect("acquire");
+        let token = ledger.read().expect("read").token;
+        let written = ledger
+            .write_fenced(first.fence, &token, Change::Put(record("app/run")))
+            .expect("write");
+        // The lease lapsed while alice was busy, and nobody touched the ledger since.
+        move_to(clock, START + 61_000);
+        let again = ledger
+            .acquire_if("alice", TTL, &written, first.fence)
+            .expect("granted");
+        assert_eq!(again.fence.value(), first.fence.value() + 1);
+        assert_eq!(again.holder, "alice");
+        assert_eq!(again.expires_at, START + 61_000 + 60_000);
+        let read = ledger.read().expect("read");
+        assert_eq!(read.token, written, "a grant does not move the token");
+        assert_eq!(read.fence, again.fence);
+        assert_eq!(read.lease.expect("held").expires_at, again.expires_at);
+    });
+}
+
+#[test]
+fn acquire_if_refuses_a_changed_token() {
+    on_every_clocked_ledger("acquire_if_token", |ledger, _| {
+        let lease = ledger.acquire("alice", TTL).expect("acquire");
+        let read = ledger.read().expect("read");
+        ledger
+            .write_fenced(lease.fence, &read.token, Change::Put(record("app/run")))
+            .expect("write");
+        let before = ledger.read().expect("read");
+        let refused = ledger.acquire_if("alice", TTL, &read.token, lease.fence);
+        assert_eq!(refused, Err(LeaseError::Changed));
+        assert_eq!(ledger.read().expect("read"), before, "nothing changed");
+    });
+}
+
+#[test]
+fn acquire_if_refuses_a_grant_made_since_even_to_the_same_holder() {
+    on_every_clocked_ledger("acquire_if_fence", |ledger, _| {
+        let first = ledger.acquire("alice", TTL).expect("acquire");
+        let token = ledger.read().expect("read").token;
+        // A second attempt of the same holder took the lease; the document is as it was.
+        let second = ledger.acquire("alice", TTL).expect("acquire");
+        assert_eq!(ledger.read().expect("read").token, token);
+        let before = ledger.read().expect("read");
+        let refused = ledger.acquire_if("alice", TTL, &token, first.fence);
+        assert_eq!(refused, Err(LeaseError::Changed));
+        assert_eq!(ledger.read().expect("read"), before, "nothing changed");
+        assert_eq!(before.fence, second.fence, "the later grant stands");
+    });
+}
+
+#[test]
+fn acquire_if_still_refuses_another_holders_live_lease() {
+    on_every_clocked_ledger("acquire_if_held", |ledger, _| {
+        let lease = ledger.acquire("alice", TTL).expect("acquire");
+        let stale = ledger.read().expect("read").token;
+        // A fenced write moves the document token; the fence bob presents is the current one,
+        // so only his token is stale.
+        ledger
+            .write_fenced(lease.fence, &stale, Change::Put(record("app/run")))
+            .expect("write");
+        let before = ledger.read().expect("read");
+        assert_ne!(before.token, stale, "the token moved");
+        let refused = ledger.acquire_if("bob", TTL, &stale, before.fence);
+        assert!(
+            matches!(refused, Err(LeaseError::Held { ref holder, .. }) if holder == "alice"),
+            "{refused:?}"
+        );
+        assert_eq!(ledger.read().expect("read"), before, "nothing changed");
+    });
+}
+
+#[test]
+fn acquire_if_refuses_another_holder_until_the_skew_bound_has_passed() {
+    on_every_clocked_ledger("acquire_if_skew", |ledger, clock| {
+        let lease = ledger.acquire("alice", TTL).expect("acquire");
+        let read = ledger.read().expect("read");
+        let skew = MAX_CLOCK_SKEW.as_millis() as u64;
+        // Just inside the bound: lapsed, and still alice's.
+        for at in [lease.expires_at, lease.expires_at + skew - 1] {
+            move_to(clock, at);
+            let before = ledger.read().expect("read");
+            let refused = ledger.acquire_if("bob", TTL, &read.token, read.fence);
+            assert!(
+                matches!(refused, Err(LeaseError::Held { ref holder, .. }) if holder == "alice"),
+                "at {at}: {refused:?}"
+            );
+            assert_eq!(
+                ledger.read().expect("read"),
+                before,
+                "nothing changed at {at}"
+            );
+        }
+        // At the bound: granted, under the next fence, without moving the token.
+        move_to(clock, lease.expires_at + skew);
+        let granted = ledger
+            .acquire_if("bob", TTL, &read.token, read.fence)
+            .expect("granted past the bound");
+        assert_eq!(granted.holder, "bob");
+        assert_eq!(granted.fence.value(), lease.fence.value() + 1);
+        let after = ledger.read().expect("read");
+        assert_eq!(after.token, read.token);
+        assert_eq!(after.fence, granted.fence);
+        assert_eq!(after.lease.expect("held").holder, "bob");
+    });
+}
+
+#[test]
+fn acquire_if_grants_another_holder_after_a_release() {
+    on_every_clocked_ledger("acquire_if_released", |ledger, _| {
+        let lease = ledger.acquire("alice", TTL).expect("acquire");
+        let read = ledger.read().expect("read");
+        ledger.release(lease.fence).expect("release");
+        let granted = ledger
+            .acquire_if("bob", TTL, &read.token, read.fence)
+            .expect("granted at once");
+        assert_eq!(granted.holder, "bob");
+        assert_eq!(granted.fence.value(), lease.fence.value() + 1);
+        let after = ledger.read().expect("read");
+        assert_eq!(after.fence, granted.fence);
+        assert_eq!(after.lease.expect("held").holder, "bob");
+        // A second conditional grant from the same reading finds the fence moved.
+        let before = ledger.read().expect("read");
+        assert_eq!(
+            ledger
+                .acquire_if("carol", TTL, &read.token, read.fence)
+                .map(|_| ()),
+            Err(LeaseError::Held {
+                holder: "bob".to_owned(),
+                remaining: TTL + MAX_CLOCK_SKEW
+            })
+        );
+        assert_eq!(ledger.read().expect("read"), before);
+    });
+}
+
+/// Two handles on one ledger make a conditional grant from the same reading at the same time.
+fn race(
+    first: &dyn Ledger,
+    second: &dyn Ledger,
+    holders: [&str; 2],
+) -> Vec<Result<(), LeaseError>> {
+    let read = first.read().expect("read");
+    let gate = std::sync::Barrier::new(2);
+    std::thread::scope(|scope| {
+        let attempts = [first, second].map(|ledger| (ledger, &read, &gate));
+        let handles: Vec<_> = attempts
+            .into_iter()
+            .zip(holders)
+            .map(|((ledger, read, gate), holder)| {
+                scope.spawn(move || {
+                    gate.wait();
+                    ledger
+                        .acquire_if(holder, TTL, &read.token, read.fence)
+                        .map(|_| ())
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("the attempt did not panic"))
+            .collect()
+    })
+}
+
+#[test]
+fn of_two_acquire_ifs_on_one_token_and_fence_exactly_one_is_granted() {
+    let memory = MemoryLedger::new();
+    let scratch = Scratch::new("acquire_if_race");
+    let file = FileLedger::open(scratch.file()).expect("open");
+    let other = FileLedger::open(scratch.file()).expect("open a second handle");
+    let runs = [
+        race(&memory, &memory.clone(), ["alice", "alice"]),
+        race(&file, &other, ["alice", "alice"]),
+    ];
+    for outcomes in runs {
+        let granted = outcomes.iter().filter(|o| o.is_ok()).count();
+        assert_eq!(granted, 1, "{outcomes:?}");
+        // The same holder: the loser sees a grant made since, not a holder.
+        assert!(outcomes.contains(&Err(LeaseError::Changed)), "{outcomes:?}");
+    }
+    // Two holders: still exactly one, and the loser is told who holds the lease.
+    let rival = MemoryLedger::new();
+    let outcomes = race(&rival, &rival.clone(), ["alice", "bob"]);
+    assert_eq!(
+        outcomes.iter().filter(|o| o.is_ok()).count(),
+        1,
+        "{outcomes:?}"
+    );
+    assert!(
+        outcomes
+            .iter()
+            .any(|o| matches!(o, Err(LeaseError::Held { .. }))),
+        "{outcomes:?}"
+    );
+}
+
 // ---- release records ---------------------------------------------------------------------------
 // A release record is a record of the ledger like any other: the codec fills the tag, the readable
 // name and the payload, and the ledger keeps them. Each test below writes through the helpers of

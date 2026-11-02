@@ -88,6 +88,17 @@ impl Ledger for MemoryLedger {
             .acquire(self.inner.clock.now_millis(), holder, ttl)
     }
 
+    fn acquire_if(
+        &self,
+        holder: &str,
+        ttl: Duration,
+        token: &Token,
+        fence: Fence,
+    ) -> Result<Lease, LeaseError> {
+        self.document()
+            .acquire_if(self.inner.clock.now_millis(), holder, ttl, token, fence)
+    }
+
     fn renew(&self, fence: Fence, ttl: Duration) -> Result<Lease, LedgerError> {
         self.document()
             .renew(self.inner.clock.now_millis(), fence, ttl)

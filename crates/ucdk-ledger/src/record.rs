@@ -220,6 +220,20 @@ pub trait Ledger: Send + Sync {
     /// It does not change the document's token.
     fn acquire(&self, holder: &str, ttl: Duration) -> Result<Lease, LeaseError>;
 
+    /// [`Ledger::acquire`] with a precondition that is checked in the same step as the grant:
+    /// the document is still at `token` and the highest fence ever granted is `fence`.
+    /// Otherwise the answer is [`LeaseError::Changed`] and nothing changes. Another holder's
+    /// live lease is still [`LeaseError::Held`], and is judged first. A read followed by a
+    /// separate `acquire` would leave a window in which another holder is granted the lease
+    /// between the two, so a caller that needs the precondition never calls them in that order.
+    fn acquire_if(
+        &self,
+        holder: &str,
+        ttl: Duration,
+        token: &Token,
+        fence: Fence,
+    ) -> Result<Lease, LeaseError>;
+
     /// Extends the lease of `fence` to `ttl` from now. Refused when the fence is not the current
     /// one or the lease has lapsed.
     fn renew(&self, fence: Fence, ttl: Duration) -> Result<Lease, LedgerError>;

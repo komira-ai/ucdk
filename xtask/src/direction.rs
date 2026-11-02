@@ -15,10 +15,11 @@ use std::path::Path;
 
 use crate::{Finding, purity};
 
-/// Each crate, with the crates it must never depend on. A crate named here that does not exist
-/// yet (`ucdk-release-engine`) is a row that holds from the day it is added.
-pub const LAYERS: [(&str, &[&str]); 5] = [
+/// Each crate, with the crates it must never depend on. A row may name a crate that does not
+/// exist yet; it holds from the day the crate is added.
+pub const LAYERS: [(&str, &[&str]); 6] = [
     ("ucdk-core", &["ucdk-ledger"]),
+    ("ucdk-ledger", &["ucdk-release-engine"]),
     (
         "ucdk-release-proto",
         &["ucdk-ledger", "ucdk-release-engine"],

@@ -5,6 +5,8 @@
 
 use std::fmt;
 
+use zeroize::{ZeroizeOnDrop, Zeroizing};
+
 use crate::url::Url;
 
 /// Sends one request. An adapter enforces the transport invariants: `https` only, redirects off,
@@ -16,12 +18,15 @@ pub trait Transport {
 }
 
 /// Bytes that must never be printed or copied: neither `Debug` nor `Display` nor `Clone`, and
-/// overwritten when dropped.
-pub struct Secret(Vec<u8>);
+/// overwritten with zeros by the `zeroize` crate when dropped.
+pub struct Secret(Zeroizing<Vec<u8>>);
+
+// The bytes are held in `Zeroizing`, which wipes them on drop, so the secret is wiped too.
+impl ZeroizeOnDrop for Secret {}
 
 impl Secret {
     pub fn new(bytes: Vec<u8>) -> Self {
-        Self(bytes)
+        Self(Zeroizing::new(bytes))
     }
 
     /// `Bearer <token>`, built here so the only copy of the token outside the grant is in a
@@ -30,7 +35,7 @@ impl Secret {
     pub fn bearer(token: &[u8]) -> Option<Self> {
         let visible = !token.is_empty() && token.iter().all(u8::is_ascii_graphic);
         visible.then(|| {
-            let mut value = Vec::with_capacity(7 + token.len());
+            let mut value = Zeroizing::new(Vec::with_capacity(7 + token.len()));
             value.extend_from_slice(b"Bearer ");
             value.extend_from_slice(token);
             Self(value)
@@ -40,12 +45,6 @@ impl Secret {
     /// The bytes. Only an adapter writing them to the wire has a reason to read them.
     pub fn expose(&self) -> &[u8] {
         &self.0
-    }
-}
-
-impl Drop for Secret {
-    fn drop(&mut self) {
-        self.0.fill(0);
     }
 }
 
@@ -200,3 +199,20 @@ impl fmt::Display for TransportError {
 }
 
 impl std::error::Error for TransportError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Compiles only for a buffer the `zeroize` crate wipes on drop.
+    fn wiped(_: &Zeroizing<Vec<u8>>) {}
+
+    #[test]
+    fn a_secret_and_a_bearer_are_wiped_storage_sized_once() {
+        wiped(&Secret::new(b"s".to_vec()).0);
+        let bearer = Secret::bearer(b"token").unwrap();
+        wiped(&bearer.0);
+        // Sized once: no reallocation left a copy of the token behind.
+        assert_eq!(bearer.0.capacity(), bearer.0.len());
+    }
+}
