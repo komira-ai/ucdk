@@ -92,6 +92,14 @@ struct Stage<'a> {
     deadline: u64,
 }
 
+/// The retryable failures of the `PUT`s of one file so far, and the last of them. It lives as long
+/// as the file's upload, so a refresh of the URLs does not give the file a new allowance.
+#[derive(Default)]
+struct Tries {
+    failed: u32,
+    last: String,
+}
+
 /// The latest create answer and when it came.
 struct Upload {
     created: Created,
@@ -508,11 +516,12 @@ impl<T: Transport> Registry<T> {
         bytes: &[u8],
     ) -> Result<bool, Early> {
         let mut refreshed = false;
+        let mut tries = Tries::default();
         loop {
             let Some(target) = upload.created.pending(member, file) else {
                 return Ok(false);
             };
-            match self.put(stage, upload.at, target, bytes) {
+            match self.put(stage, upload.at, target, bytes, &mut tries) {
                 Ok(()) => return Ok(true),
                 Err(Put::Aged) => self.refresh(stage, upload)?,
                 Err(Put::Expired) if !refreshed => {
@@ -530,7 +539,8 @@ impl<T: Transport> Registry<T> {
     }
 
     /// `PUT` of the bytes to the URL the create answer gave (at `at`), with its headers and no
-    /// token. A connect failure, a timeout and a 500, 502, 503 or 504 are retried `retries` times;
+    /// token. A connect failure, a timeout and a 500, 502, 503 or 504 are retried until the file
+    /// has failed so `retries` + 1 times in all, counted in `tries` across refreshes of its URL;
     /// a 429 is `RateLimited` by its `Retry-After` (a refusal above the configured ceiling) and
     /// never retried here. No attempt starts once the answer is half the URL life old (`Aged`), or
     /// on headers that hold the caller's credential.
@@ -540,6 +550,7 @@ impl<T: Transport> Registry<T> {
         at: u64,
         target: &Target,
         bytes: &[u8],
+        tries: &mut Tries,
     ) -> Result<(), Put> {
         if !self.config.allows_file_origin(&target.url) {
             return Err(Put::Failed(SeamError::Transient(
@@ -556,8 +567,7 @@ impl<T: Transport> Registry<T> {
                     .to_owned(),
             )));
         }
-        let mut last = String::new();
-        for _ in 0..=self.config.retries {
+        loop {
             self.within(stage.deadline).map_err(Put::Failed)?;
             if self.clock.now_millis().saturating_sub(at) >= URL_REFRESH_MS {
                 return Err(Put::Aged);
@@ -582,7 +592,7 @@ impl<T: Transport> Registry<T> {
                     )));
                 }
                 Ok(r) if RETRY_STATUSES.contains(&r.status) => {
-                    last = format!("storage answered {}", r.status);
+                    tries.last = format!("storage answered {}", r.status);
                 }
                 Ok(r) => {
                     return Err(Put::Failed(SeamError::Transient(format!(
@@ -590,13 +600,16 @@ impl<T: Transport> Registry<T> {
                         r.status
                     ))));
                 }
-                Err(e) => last = e.to_string(),
+                Err(e) => tries.last = e.to_string(),
+            }
+            tries.failed = tries.failed.saturating_add(1);
+            if tries.failed > self.config.retries {
+                return Err(Put::Failed(SeamError::Transient(format!(
+                    "an upload failed after {} tries: {}",
+                    tries.failed, tries.last
+                ))));
             }
         }
-        Err(Put::Failed(SeamError::Transient(format!(
-            "an upload failed after {} tries: {last}",
-            self.config.retries.saturating_add(1)
-        ))))
     }
 
     /// Gives back the staged state of the set `members`: the group its id names. The set is exact,

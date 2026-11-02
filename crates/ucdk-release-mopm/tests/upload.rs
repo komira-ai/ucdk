@@ -764,3 +764,66 @@ fn a_refresh_answer_with_a_credential_or_an_unusable_header_puts_nothing_more() 
         );
     }
 }
+
+#[test]
+fn the_retries_of_a_file_are_counted_across_a_refresh_for_age() {
+    let (_, members, id) = world();
+    let clock = ManualClock::at(START);
+    // The first file takes 120 s; each failing attempt on the second takes 30 s, so its second
+    // attempt finds the answer 150 s old and the URLs are renewed between its attempts.
+    let fake = no_group(&id)
+        .on(
+            Method::Post,
+            GROUPS,
+            vec![created(&id, &members, &[]), created(&id, &members, &[])],
+        )
+        .on(Method::Put, &put_path("linux-64"), vec![ok(200)])
+        .on(Method::Put, &put_path("noarch"), vec![ok(503)])
+        .bump(Method::Put, &put_path("linux-64"), &clock, secs(120))
+        .bump(Method::Put, &put_path("noarch"), &clock, secs(30));
+    let (result, reg) = stage_with(fake, wide(), &clock);
+    // retries = 2: three attempts in all, one before the refresh and two after it.
+    assert_eq!(
+        result,
+        Err(SeamError::Transient(
+            "an upload failed after 3 tries: storage answered 503".to_owned()
+        ))
+    );
+    assert_eq!(
+        reg.transport().lines(),
+        with_puts(&id, &[lin(), noa(), format!("POST {GROUPS}"), noa(), noa()])
+    );
+}
+
+#[test]
+fn an_expired_url_renews_the_urls_without_spending_the_retries_of_the_file() {
+    let (_, members, id) = world();
+    let fake = no_group(&id)
+        .on(
+            Method::Post,
+            GROUPS,
+            vec![created(&id, &members, &[]), created(&id, &members, &[])],
+        )
+        .on(Method::Put, &put_path("linux-64"), vec![ok(200)])
+        .on(
+            Method::Put,
+            &put_path("noarch"),
+            vec![ok(503), ok(403), ok(503)],
+        );
+    let (result, reg) = stage_on(fake);
+    // The 403 is the one renewal the design allows; the two 503s before and after it and the
+    // third failure make the three tries of the file.
+    assert_eq!(
+        result,
+        Err(SeamError::Transient(
+            "an upload failed after 3 tries: storage answered 503".to_owned()
+        ))
+    );
+    assert_eq!(
+        reg.transport().lines(),
+        with_puts(
+            &id,
+            &[lin(), noa(), noa(), format!("POST {GROUPS}"), noa(), noa()]
+        )
+    );
+}

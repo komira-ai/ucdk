@@ -182,8 +182,8 @@ fn stored(file: &MemberFile) -> FileFact {
 impl Created {
     /// Whether a finished answer (not `reserving`) answers the declared set `members` and nothing
     /// else. An open group lists each declared member once, and each of its declared files once,
-    /// stored or with a target; a group past open (`validating`, `committed`, `visible`) lists
-    /// declared members only, with no files. Any other status, a member or file missing, given
+    /// stored or with a target; a group past open (`validating`, `committed`, `visible`) lists each
+    /// declared member once, with no files. Any other status, a member or file missing, given
     /// twice or not declared does not answer the set, and nothing is uploaded on it. A member of an
     /// open group that lists no files is not read as stored: mopm answers `skip_identical` with no
     /// files only for a group past open, and a set whose files are all stored is `Duplicate` by the
@@ -219,10 +219,11 @@ impl Created {
                     })
             }
             GroupStatus::Validating | GroupStatus::Committed | GroupStatus::Visible => {
-                once && self
-                    .members
-                    .iter()
-                    .all(|a| a.files.is_empty() && declared(a).is_some())
+                once && self.members.len() == members.len()
+                    && self
+                        .members
+                        .iter()
+                        .all(|a| a.files.is_empty() && declared(a).is_some())
             }
             _ => false,
         }
