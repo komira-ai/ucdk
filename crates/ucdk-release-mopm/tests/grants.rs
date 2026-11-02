@@ -253,7 +253,7 @@ fn a_type_at_either_end_of_its_range_and_unicode_texts_round_trip() {
         let original = Envelope::new(
             GrantPhase::Stage,
             false,
-            "https://r\u{e9}.example.com".to_owned(),
+            "https://registry.example.com/r\u{e9}".to_owned(),
             "u:\u{e9}".to_owned(),
             vec![c.clone()],
             TOKEN.to_vec(),
@@ -261,7 +261,7 @@ fn a_type_at_either_end_of_its_range_and_unicode_texts_round_trip() {
         .unwrap();
         let back = Envelope::decode(&original.encode()).unwrap();
         assert_eq!(back.coordinates, [c], "{type}");
-        assert_eq!(back.registry, "https://r\u{e9}.example.com");
+        assert_eq!(back.registry, "https://registry.example.com/r\u{e9}");
         assert_eq!(back.actor, "u:\u{e9}");
     }
 }
