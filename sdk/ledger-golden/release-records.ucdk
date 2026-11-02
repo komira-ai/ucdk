@@ -35,7 +35,7 @@ state confirmed
 output audience registry
 output channel stable
 output coordinates 6666666666666666666666666666666666666666666666666666666666666666
-output expires_ms 1700000300000
+output expires_ms 1790000300000
 output outcome granted
 output phase commit
 output repository file
@@ -73,7 +73,7 @@ output build 41
 output commit abc123
 output machine 1111111111111111111111111111111111111111111111111111111111111111
 output revision 0123456789abcdef
-output timestamp 1700000000000
+output timestamp 1790000000000
 output version 1.2.3
 record seal/kai4lchlavr5u2gukx7ry43ljni
 kind seal
@@ -89,6 +89,6 @@ output inputs 5555555555555555555555555555555555555555555555555555555555555555
 output machine demo
 output run run-7
 output set 2222222222222222222222222222222222222222222222222222222222222222
-output timestamp 1700000000000
+output timestamp 1790000000000
 output version 1.2.3
-end 7 63ba7199559df4aa
+end 7 c500ca808d6279a7

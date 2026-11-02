@@ -538,13 +538,37 @@ fn each_of_the_five_fields_is_its_length_a_colon_and_the_field() {
         assert_eq!(text, framed, "{c:?}");
         assert_eq!(unframed(&text), fields, "{c:?}");
     }
-    // The type is the artifact type's number, framed like the other fields.
-    let mut c = coordinate("s", "n", "v", "p");
-    c.r#type = ArtifactType::Oci as i32;
-    assert_eq!(
-        unframed(&coordinate_text(&c))[1],
-        (ArtifactType::Oci as i32).to_string()
-    );
+}
+
+#[test]
+fn the_type_is_framed_as_its_raw_number_known_or_not() {
+    // The type is the number the coordinate holds, in decimal with its sign, never mapped to a
+    // known artifact type: unspecified, unknown, negative and the bounds of an i32 are framed as
+    // they are, and read back to the same number.
+    for (number, text) in [
+        (ArtifactType::Unspecified as i32, "0"),
+        (ArtifactType::File as i32, "1"),
+        (ArtifactType::Oci as i32, "2"),
+        (ArtifactType::Npm as i32, "5"),
+        (6, "6"),
+        (1234, "1234"),
+        (-1, "-1"),
+        (-42, "-42"),
+        (i32::MAX, "2147483647"),
+        (i32::MIN, "-2147483648"),
+    ] {
+        let mut c = coordinate("s", "n", "v", "p");
+        c.r#type = number;
+        let framed = coordinate_text(&c);
+        assert_eq!(
+            framed,
+            format!("1:s{}:{text}1:n1:v1:p", text.len()),
+            "{number}"
+        );
+        let fields = unframed(&framed);
+        assert_eq!(fields, ["s", text, "n", "v", "p"], "{number}");
+        assert_eq!(fields[1].parse::<i32>(), Ok(number));
+    }
 }
 
 #[test]

@@ -6,6 +6,7 @@
 //! then run into the next, whatever characters it holds, so two different lists of texts are
 //! never the same bytes.
 
+use ucdk_release::codec::coordinate_text;
 use ucdk_release_proto::v1::Coordinate;
 
 /// Appends `text` as its length, a `:` and the text.
@@ -16,19 +17,11 @@ fn put(out: &mut String, text: &str) {
 }
 
 /// The text a coordinate is kept under: its five fields in a fixed order, each with its length.
-/// Two coordinates share a key only when every field is equal.
+/// Two coordinates share a key only when every field is equal. It is the release codec's
+/// [`coordinate_text`], the text a publication record keeps, so the fake registry and the ledger
+/// name a coordinate alike.
 pub fn coordinate_key(c: &Coordinate) -> String {
-    let mut key = String::new();
-    for field in [
-        c.channel.as_str(),
-        &c.r#type.to_string(),
-        &c.name,
-        &c.version,
-        &c.platform,
-    ] {
-        put(&mut key, field);
-    }
-    key
+    coordinate_text(c)
 }
 
 /// What a grant says it covers.

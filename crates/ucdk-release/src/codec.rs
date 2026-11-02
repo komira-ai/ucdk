@@ -97,7 +97,8 @@ impl Encoded {
 
 /// The readable name of a published coordinate, as a publication record keeps it: its five
 /// fields in a fixed order (channel, type, name, version, platform), each as its length in
-/// bytes, a `:` and the field, the same framing the fake registry keeps its coordinates under.
+/// bytes, a `:` and the field. The type is the raw number of the artifact type, an unknown one
+/// included, in decimal. The fake registry keeps its coordinates under this same text.
 /// No character joins two fields, so a `/` in a name or a version cannot move from one field to
 /// the next, and two coordinates share a text only when every field is equal.
 pub fn coordinate_text(c: &Coordinate) -> String {

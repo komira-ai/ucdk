@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::release::{
-    every_release_record, golden_records, grant, granted, publication, put_release, read_release,
-    refused, run, seal,
+    every_release_record, golden_records, grant, granted, publication, publication_at, put_release,
+    read_release, refused, run, seal,
 };
 use common::{Scratch, confirmed, path, put, record};
 use ucdk_ledger::{
@@ -18,6 +18,7 @@ use ucdk_ledger::{
 };
 use ucdk_release::codec::{Phase, keys_of};
 use ucdk_release::transitions::Kind;
+use ucdk_release_proto::v1::{ArtifactType, Coordinate};
 
 /// Runs `check` on a fresh ledger of each kind.
 fn on_every_ledger(name: &str, check: impl Fn(&dyn Ledger)) {
@@ -358,5 +359,78 @@ fn every_release_record_comes_back_identical_from_every_ledger() {
             put_release(&ledger, &release, origin, state)
         };
         assert_eq!(read_release(&reopened(&scratch), &at), Some(wanted), "{at}");
+    }
+}
+
+fn coordinate(channel: &str, name: &str, version: &str, platform: &str) -> Coordinate {
+    Coordinate {
+        channel: channel.to_owned(),
+        r#type: ArtifactType::File as i32,
+        name: name.to_owned(),
+        version: version.to_owned(),
+        platform: platform.to_owned(),
+    }
+}
+
+#[test]
+fn framed_coordinates_of_any_text_are_kept_by_the_file_ledger_side_by_side() {
+    // Publications whose framed coordinates hold non-ASCII text, spaces, tabs, line breaks,
+    // percent signs, `=`, `,`, colons and digits, and two coordinates that a `/` join would spell
+    // alike, are written together into one file, read back from a handle opened afresh, and each
+    // is the record it was at a path of its own.
+    let coordinates = [
+        coordinate("stable", "t\u{f6}\u{f6}l", "1.0", "linux-x86_64"),
+        coordinate("st\u{e9}ble", "\u{1f980}", "\u{2163}", "\u{7a0b}"),
+        coordinate("stable", "two words", "1.0\tbeta", " p "),
+        coordinate("stable", "line\nbreak", "1.0\r\n", "p\n"),
+        coordinate("stable", "100%", "%25", "a=b,c"),
+        coordinate("3:abc", "12:", "1:2", "0:"),
+        coordinate("stable", "a/b", "c", "p"),
+        coordinate("stable", "a", "b/c", "p"),
+    ];
+    let scratch = Scratch::new("release-framed");
+    let records: Vec<_> = coordinates.iter().map(publication_at).collect();
+    let at: Vec<_> = {
+        let ledger = FileLedger::open(scratch.file()).expect("open");
+        records
+            .iter()
+            .map(|r| put_release(&ledger, r, Origin::Created, State::Confirmed))
+            .collect()
+    };
+    let distinct: std::collections::BTreeSet<_> = at.iter().collect();
+    assert_eq!(
+        distinct.len(),
+        records.len(),
+        "every coordinate has a path of its own"
+    );
+    let ledger = reopened(&scratch);
+    assert_eq!(ledger.read().expect("read").records.len(), records.len());
+    for (path, record) in at.iter().zip(&records) {
+        assert_eq!(
+            read_release(&ledger, path),
+            Some((record.clone(), Origin::Created, State::Confirmed)),
+            "{path}"
+        );
+    }
+    // The file is still lines of the format: a line break in a coordinate is escaped.
+    let text = std::fs::read_to_string(scratch.file()).expect("the file");
+    for line in text.lines() {
+        let tag = line.split(' ').next().expect("a tag");
+        assert!(
+            [
+                "ucdk-ledger",
+                "version",
+                "fence",
+                "end",
+                "record",
+                "kind",
+                "name",
+                "origin",
+                "state",
+                "output"
+            ]
+            .contains(&tag),
+            "a line outside the format: {line:?}"
+        );
     }
 }

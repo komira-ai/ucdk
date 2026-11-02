@@ -70,6 +70,10 @@ pub fn read_release(ledger: &dyn Ledger, path: &RecordPath) -> Option<(Release, 
     Some((release_record(record), record.origin, record.state))
 }
 
+/// The instant the fixtures' runs and seals are stamped with, in milliseconds since the epoch;
+/// the grant they hold expires five minutes after it.
+pub const AT: u64 = 1_790_000_000_000;
+
 fn hash(c: char) -> Hash256 {
     Hash256::from_hex(&c.to_string().repeat(64)).expect("a hash")
 }
@@ -82,7 +86,7 @@ pub fn run() -> Release {
         version: "1.2.3".to_owned(),
         build: 41,
         commit: "abc123".to_owned(),
-        timestamp: 1_700_000_000_000,
+        timestamp: AT,
     })
 }
 
@@ -124,7 +128,7 @@ pub fn seal() -> Release {
         version: "1.2.3".to_owned(),
         build: 41,
         commit: "abc123".to_owned(),
-        timestamp: 1_700_000_000_000,
+        timestamp: AT,
         run: "run-7".to_owned(),
         attempt: 2,
     })
@@ -149,7 +153,7 @@ pub fn grant(n: u32, answer: Option<GrantAnswer>) -> Release {
 
 pub fn granted() -> GrantAnswer {
     GrantAnswer::Granted {
-        expires_ms: 1_700_000_300_000,
+        expires_ms: AT + 300_000,
     }
 }
 
@@ -230,6 +234,30 @@ pub fn every_release_record() -> Vec<(Release, Origin, State)> {
         ),
         (validation(true), Origin::Created, State::Confirmed),
         (validation(false), Origin::Created, State::Intent),
+        (
+            match publication(None) {
+                Release::Publication(p) => Release::Publication(Publication {
+                    coordinate: tool("1.2.3+hotfix.1"),
+                    exceptional: true,
+                    ..p
+                }),
+                other => other,
+            },
+            Origin::Created,
+            State::Confirmed,
+        ),
     ]);
     all
+}
+
+/// A publication of `c`, as the ledger tests write one: the golden publication with its
+/// coordinate replaced.
+pub fn publication_at(c: &Coordinate) -> Release {
+    match publication(None) {
+        Release::Publication(p) => Release::Publication(Publication {
+            coordinate: coordinate_text(c),
+            ..p
+        }),
+        other => other,
+    }
 }
