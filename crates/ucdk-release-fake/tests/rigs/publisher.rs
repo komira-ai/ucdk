@@ -158,6 +158,18 @@ impl Flawed {
         g: &Grant,
         ks: &[Coordinate],
     ) -> Result<(), SeamError> {
+        self.abort_of(g, ks, None)
+    }
+
+    /// An abort of `ks`; with `set`, the declared items they came from, which the channel passes
+    /// to the registry when it is addressed by group, so the staged state is found by the group
+    /// of the whole set and an abort of another set gives back nothing.
+    fn abort_of(
+        &mut self,
+        g: &Grant,
+        ks: &[Coordinate],
+        set: Option<&[StageItem<'_>]>,
+    ) -> Result<(), SeamError> {
         self.calls += 1;
         if self.holds_none_of(ks) {
             return Err(SeamError::Refused(Reason::Channel));
@@ -178,7 +190,11 @@ impl Flawed {
         let regranted = self.regrant(g, Needs::Stage);
         let g = regranted.as_ref().unwrap_or(g);
         let lax = self.lax_write(g, Call::Abort, ks);
-        self.inner.abort(lax.as_ref().unwrap_or(g), ks)
+        let g = lax.as_ref().unwrap_or(g);
+        match set {
+            Some(set) if self.grouped() => self.inner.abort_items(g, set),
+            _ => self.inner.abort(g, ks),
+        }
     }
 
     /// Whether one of `ks` is a coordinate the channel cannot hold.
@@ -652,7 +668,7 @@ impl Publisher for Flawed {
 
     fn abort(&mut self, g: &Grant, set: &[StageItem<'_>]) -> Result<(), SeamError> {
         let ks: Vec<Coordinate> = set.iter().map(|i| i.coordinate.clone()).collect();
-        self.abort_coordinates(g, &ks)
+        self.abort_of(g, &ks, Some(set))
     }
 
     fn commit(&mut self, g: &Grant, items: &[StageItem<'_>]) -> Result<CommitAnswer, SeamError> {
