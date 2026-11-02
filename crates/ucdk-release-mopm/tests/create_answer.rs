@@ -497,3 +497,63 @@ fn number_taken_stops_reading_records_once_a_read_has_spent_the_stage_budget() {
         ]
     );
 }
+
+#[test]
+fn a_create_answer_past_open_with_no_members_is_malformed() {
+    let (_, members, id) = world();
+    for status in ["validating", "committed", "visible"] {
+        let mut answer = created_json(&id, status, &members, &[]);
+        members_of(&mut answer).clear();
+        assert_malformed_and_nothing_put(&answer, status);
+    }
+}
+
+#[test]
+fn a_create_answer_past_open_that_omits_one_member_of_two_is_malformed() {
+    let (owned, members, id) = two_members();
+    for status in ["validating", "committed", "visible"] {
+        for omitted in 0..2 {
+            let mut answer = created_json(&id, status, &members, &[]);
+            members_of(&mut answer).remove(omitted);
+            let fake = no_group(&id).on(Method::Post, GROUPS, vec![json_reply(200, &answer)]);
+            let reg = two_name_registry(fake, &ManualClock::at(START));
+            let (result, reg) = stage_with(reg, &owned, &members);
+            assert_eq!(result, malformed(), "{status} without member {omitted}");
+            assert_eq!(
+                reg.transport().lines(),
+                [format!("GET {}", group_path(&id)), format!("POST {GROUPS}")],
+                "{status} without member {omitted}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_refresh_that_answers_the_group_past_open_with_members_missing_is_malformed() {
+    let (owned, members, id) = world();
+    let mut past = created_json(&id, "validating", &members, &[]);
+    members_of(&mut past).clear();
+    let fake = no_group(&id)
+        .on(
+            Method::Post,
+            GROUPS,
+            vec![
+                json_reply(201, &open_answer(&id, &members)),
+                json_reply(200, &past),
+            ],
+        )
+        .on(Method::Put, &put_path("linux-64"), vec![ok(200)])
+        .on(Method::Put, &put_path("noarch"), vec![ok(403)]);
+    let (result, reg) = stage_of(fake, &owned, &members);
+    assert_eq!(result, malformed());
+    assert_eq!(
+        reg.transport().lines(),
+        [
+            format!("GET {}", group_path(&id)),
+            format!("POST {GROUPS}"),
+            format!("PUT {}", put_path("linux-64")),
+            format!("PUT {}", put_path("noarch")),
+            format!("POST {GROUPS}"),
+        ]
+    );
+}
