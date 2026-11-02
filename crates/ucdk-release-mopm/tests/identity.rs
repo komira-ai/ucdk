@@ -500,6 +500,16 @@ fn an_audience_already_in_the_request_url_is_replaced_and_every_other_parameter_
         ("?", "?audience=new"),
         ("?a=1&&b=2", "?a=1&b=2&audience=new"),
         ("?api-version=2.0", "?api-version=2.0&audience=new"),
+        // However the name is escaped, it is the same name.
+        ("?%61udience=old", "?audience=new"),
+        ("?%61UDIENCE=old", "?%61UDIENCE=old&audience=new"),
+        ("?aud%69ence=old&%61%75dience", "?audience=new"),
+        (
+            "?audience%=x&%audience=y",
+            "?audience%=x&%audience=y&audience=new",
+        ),
+        ("?%6=x&%zz=y&%", "?%6=x&%zz=y&%&audience=new"),
+        ("?+=x", "?+=x&audience=new"),
     ];
     for (query, expected) in cases {
         assert_eq!(
