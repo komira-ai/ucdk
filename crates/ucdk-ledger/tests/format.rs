@@ -6,6 +6,7 @@ mod common;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
+use common::release::{golden_records, put_release};
 use common::{Scratch, path, put};
 use ucdk_core::{Locator, Tag};
 use ucdk_ledger::{Change, FileLedger, Origin, Record, State, escape_token};
@@ -67,4 +68,38 @@ fn escape_token_is_the_function_the_file_writer_uses() {
     assert_eq!(escape_token("Az09._-/:"), "Az09._-/:");
     assert_eq!(escape_token("a=b,c%"), "a%3Db%2Cc%25");
     assert_eq!(escape_token("\u{e9}"), "%C3%A9");
+}
+
+#[test]
+fn format_1_1_is_still_written() {
+    // A file that holds release records of every kind this change writes starts with the 1.1
+    // header, and its lines are the lines of the format and no others: record, kind, name, origin,
+    // state and output. A state or a tag the release side added would show here.
+    let scratch = Scratch::new("format-1-1");
+    let ledger = FileLedger::open(scratch.file()).expect("open");
+    for (release, origin, state) in golden_records() {
+        put_release(&ledger, &release, origin, state);
+    }
+    drop(ledger);
+    let text = fs::read_to_string(scratch.file()).expect("the file");
+    assert_eq!(text.lines().next(), Some("ucdk-ledger 1.1"));
+    let known = ["record", "kind", "name", "origin", "state", "output"];
+    let header = ["ucdk-ledger", "version", "fence", "end"];
+    for line in text.lines() {
+        let tag = line.split(' ').next().expect("a tag");
+        assert!(
+            known.contains(&tag) || header.contains(&tag),
+            "a line outside the format: {line}"
+        );
+    }
+    let states: BTreeSet<&str> = text
+        .lines()
+        .filter_map(|l| l.strip_prefix("state "))
+        .collect();
+    assert_eq!(states, BTreeSet::from(["confirmed", "intent"]));
+    let origins: BTreeSet<&str> = text
+        .lines()
+        .filter_map(|l| l.strip_prefix("origin "))
+        .collect();
+    assert_eq!(origins, BTreeSet::from(["adopted", "created"]));
 }

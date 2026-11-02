@@ -13,8 +13,8 @@ use ucdk_release_seams::kit::{
     Arrangement, ChannelShape, Payload, PublisherRig, ReadStep, Sibling,
 };
 use ucdk_release_seams::{
-    CommitAnswer, CommitUnit, Grant, ListScope, Listed, Publisher, SeamError, StageAnswer,
-    StageItem, YankUnit,
+    CommitAnswer, CommitUnit, DeclareError, Grant, ListScope, Listed, Publisher, SeamError,
+    StageAnswer, StageItem, YankUnit,
 };
 
 use super::publisher::{FakePublisherRig, Flawed};
@@ -260,6 +260,10 @@ impl Publisher for Holed {
         self.base.yank_unit()
     }
 
+    fn declare(&mut self, names: &[String]) -> Result<(), DeclareError> {
+        self.base.declare(names)
+    }
+
     fn observe(
         &mut self,
         g: &Grant,
@@ -305,9 +309,11 @@ impl Publisher for Holed {
         result
     }
 
-    fn abort(&mut self, g: &Grant, ks: &[Coordinate]) -> Result<(), SeamError> {
+    fn abort(&mut self, g: &Grant, set: &[StageItem<'_>]) -> Result<(), SeamError> {
+        let ks: Vec<Coordinate> = set.iter().map(|i| i.coordinate.clone()).collect();
+        let ks = ks.as_slice();
         let sent = self.base.sent();
-        let result = self.base.abort(g, ks);
+        let result = self.base.abort(g, set);
         if let Hole::RefusedAbortDropsStaged(whose) = self.hole
             && self.shape.group_addressed
             && Self::refused(&result)

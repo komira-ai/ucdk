@@ -509,13 +509,19 @@ pub(super) fn a_sibling_is_another_coordinate_to_stage_commit_and_observe<R: Pub
 
 /// An abort gives back the staged state of the coordinates it names and of no sibling of theirs
 /// that differs in a field; what it gave back can be staged again. Staged state is observed told
-/// the set it was staged in, as a channel addressed by group finds it only so.
+/// the set it was staged in, as a channel addressed by group finds it only so. On such a channel
+/// the abort must name the exact set that was staged, so only a sibling staged in a set of its own
+/// is held there: a sibling the channel takes only in one set with the base shares its group, and
+/// an abort of the base alone names another set.
 pub(super) fn an_abort_reaches_only_the_coordinates_it_names<R: PublisherRig>(
     rig: &R,
     shape: &ChannelShape,
 ) {
     let base = rig.coordinate("a");
     for sibling in siblings_beside(rig, &base) {
+        if shape.group_addressed && sibling.placement == Placement::SameSet {
+            continue;
+        }
         let mut p = built(rig, shape);
         let named = Set::at(rig, vec![base.clone()]);
         let sets = sets_beside(rig, &base, &sibling);
@@ -523,7 +529,8 @@ pub(super) fn an_abort_reaches_only_the_coordinates_it_names<R: PublisherRig>(
             stage(rig, &mut p, set);
         }
         let grant = rig.grant(&p, GrantPhase::Stage, &named.coords);
-        must(p.abort(&grant, &named.coords), "abort");
+        let blobs = named.blobs();
+        must(p.abort(&grant, &named.items(&blobs)), "abort");
         let (staged_with, at) = holder_of(&sets, &base);
         same(
             observed(rig, &mut p, GrantPhase::Stage, staged_with, at),
@@ -547,7 +554,8 @@ fn an_abort_leaves_a_committed_coordinate_it_does_not_name_alone<R: PublisherRig
     publish(rig, &mut p, &committed);
     stage(rig, &mut p, &staged);
     let grant = rig.grant(&p, GrantPhase::Stage, &staged.coords);
-    must(p.abort(&grant, &staged.coords), "abort");
+    let blobs = staged.blobs();
+    must(p.abort(&grant, &staged.items(&blobs)), "abort");
     present_held(looked(rig, shape, &mut p, &committed.coords[0]));
     same(
         fetched(rig, &mut p, &committed.coords[0]),
@@ -569,7 +577,8 @@ fn an_abort_leaves_a_committed_coordinate_it_does_not_name_alone<R: PublisherRig
         publish(rig, &mut p, &held);
         stage(rig, &mut p, &named);
         let grant = rig.grant(&p, GrantPhase::Stage, &named.coords);
-        must(p.abort(&grant, &named.coords), "abort");
+        let blobs = named.blobs();
+        must(p.abort(&grant, &named.items(&blobs)), "abort");
         present_held(looked(rig, shape, &mut p, &base));
         same(
             fetched(rig, &mut p, &base),

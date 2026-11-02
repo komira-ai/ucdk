@@ -499,3 +499,120 @@ fn pr_body_attribution_link_is_allowed() {
     assert_eq!(found.len(), 1, "{found:?}");
     assert_eq!(found[0].subject, "pull request body:4");
 }
+
+/// Catches the shared core failing the lint, and the exception for it reaching further than
+/// the one line it is for: the word rule does not read the first line of rule T9 in the core's copy
+/// or between the markers of `AGENTS.md`, and reads that line everywhere else, and every other
+/// line of the core; the other rules still read T9's line.
+#[test]
+fn the_word_rule_skips_only_rule_t9_of_the_shared_core() {
+    let word = join(&["mu", "tant"]);
+    let t9 = format!("- T9 BLOCK. No {word} tables.\n");
+    let t8 = format!("- T8 BLOCK. A {word} here.\n");
+    let agents =
+        |core: &str| format!("intro\n<!-- shared-core:begin -->\n{core}<!-- shared-core:end -->\n");
+    let copy = "docs/agents/shared_core.md";
+    assert_eq!(
+        check_tree(&[
+            file(copy, &format!("x\n{t9}")),
+            file("AGENTS.md", &agents(&t9))
+        ]),
+        vec![]
+    );
+    let read = [
+        // Before the core, and with no end marker (so no core).
+        file("AGENTS.md", &format!("{t9}{}", agents(""))),
+        file(
+            "AGENTS.md",
+            &format!("intro\n<!-- shared-core:begin -->\n{t9}"),
+        ),
+        // In a file that is neither.
+        file("docs/agents/notes.md", &t9),
+        file("CONTRIBUTING.md", &t9),
+        // A line of the core that is not rule T9's, or does not start with it.
+        file("AGENTS.md", &agents(&t8)),
+        file(copy, &t8),
+        file(copy, &format!("  {t9}")),
+        // A second line of the core that starts as T9's.
+        file(copy, &format!("{t9}{t9}")),
+        file("AGENTS.md", &agents(&format!("{t9}{t9}"))),
+    ];
+    let found: Vec<_> = check_tree(&read)
+        .into_iter()
+        .map(|f| (f.rule, f.subject))
+        .collect();
+    let at = |s: &str| ("lint-word", s.to_owned());
+    assert_eq!(
+        found,
+        [
+            at("AGENTS.md:1"),
+            at("AGENTS.md:3"),
+            at("docs/agents/notes.md:1"),
+            at("CONTRIBUTING.md:1"),
+            at("AGENTS.md:3"),
+            at(&format!("{copy}:1")),
+            at(&format!("{copy}:1")),
+            at(&format!("{copy}:2")),
+            at("AGENTS.md:4"),
+        ]
+    );
+    // A date on T9's line in the copy is still refused.
+    let dated = format!("- T9 BLOCK. On {}-{:02}-{:02}.\n", 2025, 10, 5);
+    let found: Vec<_> = check_tree(&[file(copy, &dated)])
+        .into_iter()
+        .map(|f| (f.rule, f.subject))
+        .collect();
+    assert_eq!(found, [("lint-date", format!("{copy}:1"))]);
+}
+
+/// Catches the exception reaching into the two-line scan, or hiding a finding next to it: the
+/// word rule reads no wrapped pair that holds T9's line (so its own words stay ignored), and
+/// reads the pairs after it; a date wrapped onto T9's line, or from it onto the next, is
+/// still refused, reported at the pair's first line.
+#[test]
+fn wrapped_findings_around_rule_t9_of_the_shared_core() {
+    let copy = "docs/agents/shared_core.md";
+    let word = join(&["mu", "tant"]);
+    let went = join(&["we", "nt"]);
+    let red = join(&["r", "ed"]);
+    let rules = |path: &str, text: &str| -> Vec<(&'static str, String)> {
+        check_tree(&[file(path, text)])
+            .into_iter()
+            .map(|f| (f.rule, f.subject))
+            .collect()
+    };
+    // Line 1 wraps a date onto T9's line; T9's line wraps the phrase onto line 3; lines 4 and 5
+    // wrap it again, away from T9.
+    let text = format!(
+        "- T8 BLOCK. On October\n- T9 BLOCK. 2025 no {word} and {went}\n{red} after\nthen {went}\n{red} again\n"
+    );
+    assert_eq!(
+        rules(copy, &text),
+        [
+            ("lint-date", format!("{copy}:1")),
+            ("lint-word", format!("{copy}:4")),
+        ]
+    );
+    // The same lines in the core of AGENTS.md, which starts on its line 3.
+    let agents = format!("intro\n<!-- shared-core:begin -->\n{text}<!-- shared-core:end -->\n");
+    assert_eq!(
+        rules("AGENTS.md", &agents),
+        [
+            ("lint-date", "AGENTS.md:3".to_owned()),
+            ("lint-word", "AGENTS.md:6".to_owned()),
+        ]
+    );
+    // A date wrapped from T9's line onto the next.
+    assert_eq!(
+        rules(
+            copy,
+            &format!("- T9 BLOCK. {word} in October\n2025 was the year\n")
+        ),
+        [("lint-date", format!("{copy}:1"))]
+    );
+    // Outside the core the phrase wrapped from such a line is refused, with its own words.
+    assert_eq!(
+        rules("notes.md", &format!("- T9 BLOCK. {word} {went}\n{red}\n")),
+        [("lint-word", "notes.md:1".to_owned()),]
+    );
+}
