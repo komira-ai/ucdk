@@ -71,6 +71,9 @@ kit_tests!(
     a_sealed_version_refuses_a_later_platform_and_observes_it_absent,
     a_burned_coordinate_is_neither_absent_nor_present_nor_committable,
     a_registry_that_echoes_the_declared_digest_fails_readback,
+    a_publisher_refuses_to_stage_or_commit_an_artifact_the_release_did_not_declare,
+    a_publisher_never_told_any_names_refuses,
+    a_declaration_that_is_not_plain_distinct_names_is_refused_and_changes_nothing,
     the_declarations_of_a_rig_hold_of_what_it_builds,
 );
 
@@ -84,7 +87,7 @@ fn the_whole_kit_passes_on_the_fake() {
 }
 
 /// The conforming fake does not seal a version, so it skips the scenario about one, says why, and
-/// passes the other forty-five.
+/// passes the other forty-eight.
 #[test]
 fn the_fake_that_does_not_seal_a_version_skips_that_scenario_and_passes_the_rest() {
     let report = run_publisher_kit(&FakePublisherRig::conforming());
@@ -98,7 +101,7 @@ fn the_fake_that_does_not_seal_a_version_skips_that_scenario_and_passes_the_rest
 
 /// A rig that takes every default of the kit's hooks has the literal coordinates and bytes of the
 /// kit, holds every coordinate, seals no version and burns no number, so the three scenarios
-/// about those are skipped for it, with the reason, and it passes the other forty-three.
+/// about those are skipped for it, with the reason, and it passes the other forty-six.
 #[test]
 fn a_rig_that_takes_the_default_of_every_hook_passes_what_it_can_run() {
     let report = run_publisher_kit(&PlainRig::new());

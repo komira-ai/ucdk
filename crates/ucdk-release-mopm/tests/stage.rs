@@ -70,8 +70,12 @@ fn a_new_set_is_created_and_each_file_is_put_with_its_headers_and_no_token() {
         ]
     );
     let log = &reg.transport().log;
+    // The group calls carry the caller's own token as the bearer, and the uploads carry none.
+    let bearer = Some(format!("Bearer {}", String::from_utf8_lossy(TOKEN)));
+    assert_eq!((&log[0].bearer, &log[1].bearer), (&bearer, &bearer));
     assert!(log[0].authorized && log[1].authorized);
     assert!(!log[2].authorized && !log[3].authorized);
+    assert_eq!((&log[2].bearer, &log[3].bearer), (&None, &None));
     assert!(log[2].query && log[3].query);
     assert_eq!(log[2].body.len(), 1000);
     // The create declares the set, and it never supersedes.
@@ -439,7 +443,7 @@ fn an_answer_older_than_half_the_url_life_is_repeated_before_the_next_put() {
     let files = set_files(&owned, &bytes);
     let mut cfg = group_config();
     cfg.upload_budget = Duration::from_secs(3000);
-    let mut reg = Registry::new(fake, cfg, Box::new(clock));
+    let mut reg = declared_registry(fake, cfg, &clock);
     assert_eq!(
         reg.stage(&caller(), &members, &files),
         Ok(StageAnswer::Staged)
@@ -472,7 +476,7 @@ fn a_stage_that_runs_out_of_budget_stops_between_files_and_one_with_no_budget_se
     );
     let bytes = file_bytes();
     let files = set_files(&owned, &bytes);
-    let mut reg = Registry::new(fake, group_config(), Box::new(clock));
+    let mut reg = declared_registry(fake, group_config(), &clock);
     let result = reg.stage(&caller(), &members, &files);
     assert_eq!(stage_kind(&result), "transient");
     assert_eq!(reg.transport().count(Method::Put, &put_path("linux-64")), 1);
@@ -480,7 +484,7 @@ fn a_stage_that_runs_out_of_budget_stops_between_files_and_one_with_no_budget_se
     // No time at all: the first request is not sent.
     let mut cfg = group_config();
     cfg.upload_budget = Duration::ZERO;
-    let mut reg = Registry::new(Fake::default(), cfg, Box::new(fresh()));
+    let mut reg = declared_registry(Fake::default(), cfg, &fresh());
     let result = reg.stage(&caller(), &members, &files);
     assert_eq!(stage_kind(&result), "transient");
     assert!(reg.transport().log.is_empty());

@@ -65,7 +65,11 @@ fn table() -> Vec<Row> {
             staging,
             &[DUP_OTHER],
         ),
-        (Wrong::Flaw(F::AbortDoesNothing), staging, &[ABORT]),
+        (
+            Wrong::Flaw(F::AbortDoesNothing),
+            staging,
+            &[ABORT, UNDECLARED],
+        ),
         // A yank by version yanks one platform, every platform of every version, or ignores the
         // grant; a yanked coordinate cannot be fetched.
         (
@@ -261,6 +265,8 @@ fn fetches() -> Vec<Row> {
                 DUPLICATE_SET,
                 VANISHED,
                 BECOMING,
+                UNDECLARED,
+                PLAIN_NAMES,
             ],
         ),
         (
@@ -281,6 +287,8 @@ fn fetches() -> Vec<Row> {
                 VANISHED,
                 BECOMING,
                 ECHO,
+                UNDECLARED,
+                PLAIN_NAMES,
             ],
         ),
         (
@@ -297,6 +305,8 @@ fn fetches() -> Vec<Row> {
                 NOT_STAGING,
                 BECOMING,
                 ECHO,
+                UNDECLARED,
+                PLAIN_NAMES,
             ],
         ),
         (

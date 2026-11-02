@@ -9,8 +9,8 @@ use ucdk_release_fake::{FakeRegistry, coordinate_key};
 use ucdk_release_proto::v1::{ArtifactType, Coordinate, Reason};
 use ucdk_release_seams::kit::{ChannelShape, LOCATION, federated_repository};
 use ucdk_release_seams::{
-    CommitAnswer, CommitUnit, Grant, ListScope, Listed, Publisher, SeamError, StageAnswer,
-    StageItem, YankUnit,
+    CommitAnswer, CommitUnit, DeclareError, Grant, ListScope, Listed, Publisher, SeamError,
+    StageAnswer, StageItem, YankUnit, check_declaration,
 };
 
 use super::publisher_access::{Needs, covering_every, covers_last};
@@ -37,6 +37,8 @@ pub struct Flawed {
     /// A private channel refuses `fetch`, `newest` and `list` to a stage grant and a commit grant,
     /// which are for `observe` only.
     refuses_writer_reads: bool,
+    /// A declaration was accepted.
+    told: bool,
     pub(super) flaw: Option<Flaw>,
     pub(super) shape: ChannelShape,
     seals: bool,
@@ -81,6 +83,7 @@ impl Flawed {
             banned,
             paired: Vec::new(),
             refuses_writer_reads: false,
+            told: false,
             flaw,
             shape,
             seals,
@@ -155,6 +158,18 @@ impl Flawed {
         g: &Grant,
         ks: &[Coordinate],
     ) -> Result<(), SeamError> {
+        self.abort_of(g, ks, None)
+    }
+
+    /// An abort of `ks`; with `set`, the declared items they came from, which the channel passes
+    /// to the registry when it is addressed by group, so the staged state is found by the group
+    /// of the whole set and an abort of another set gives back nothing.
+    fn abort_of(
+        &mut self,
+        g: &Grant,
+        ks: &[Coordinate],
+        set: Option<&[StageItem<'_>]>,
+    ) -> Result<(), SeamError> {
         self.calls += 1;
         if self.holds_none_of(ks) {
             return Err(SeamError::Refused(Reason::Channel));
@@ -175,7 +190,11 @@ impl Flawed {
         let regranted = self.regrant(g, Needs::Stage);
         let g = regranted.as_ref().unwrap_or(g);
         let lax = self.lax_write(g, Call::Abort, ks);
-        self.inner.abort(lax.as_ref().unwrap_or(g), ks)
+        let g = lax.as_ref().unwrap_or(g);
+        match set {
+            Some(set) if self.grouped() => self.inner.abort_items(g, set),
+            _ => self.inner.abort(g, ks),
+        }
     }
 
     /// Whether one of `ks` is a coordinate the channel cannot hold.
@@ -271,6 +290,26 @@ impl Flawed {
             }
         }
         found
+    }
+
+    /// A stub that takes what it is given for declared: it declares the names of the items of a
+    /// call itself, when it ignores declarations, or when it was never told any.
+    fn admit(&mut self, items: &[StageItem<'_>]) {
+        if self.is(Flaw::UndeclaredNamesAreAccepted)
+            || (self.is(Flaw::AdmitsWhenNeverTold) && !self.told)
+        {
+            let names: Vec<String> = items.iter().map(|i| i.coordinate.name.clone()).collect();
+            let mut unique: Vec<String> = Vec::new();
+            for name in names {
+                if !unique.contains(&name) {
+                    unique.push(name);
+                }
+            }
+            // The names are those of coordinates the kit built, which are valid names.
+            self.inner
+                .declare(&unique)
+                .expect("the names of the kit's coordinates are valid");
+        }
     }
 
     /// What the registry holds for `k`, staged or committed, as it sees it itself.
@@ -369,6 +408,23 @@ impl Publisher for Flawed {
         } else {
             YankUnit::Coordinate
         }
+    }
+
+    fn declare(&mut self, names: &[String]) -> Result<(), DeclareError> {
+        if self.is(Flaw::UndeclaredNamesAreAccepted) {
+            return Ok(());
+        }
+        if self.is(Flaw::DeclareSkipsValidation) {
+            let valid: Vec<String> = names
+                .iter()
+                .filter(|n| check_declaration(std::slice::from_ref(n)).is_ok())
+                .cloned()
+                .collect();
+            self.told = true;
+            return self.inner.declare(&valid);
+        }
+        self.told = true;
+        self.inner.declare(names)
     }
 
     fn observe(
@@ -562,6 +618,7 @@ impl Publisher for Flawed {
             .first()
             .and_then(|item| self.staged_bytes(item.coordinate));
         self.remember(items);
+        self.admit(items);
         let stranger_in =
             self.writer_for_a_stranger(Flaw::StrangerMayStage, g, GrantPhase::Stage, &coordinates);
         let g = stranger_in.as_ref().unwrap_or(g);
@@ -611,7 +668,7 @@ impl Publisher for Flawed {
 
     fn abort(&mut self, g: &Grant, set: &[StageItem<'_>]) -> Result<(), SeamError> {
         let ks: Vec<Coordinate> = set.iter().map(|i| i.coordinate.clone()).collect();
-        self.abort_coordinates(g, &ks)
+        self.abort_of(g, &ks, Some(set))
     }
 
     fn commit(&mut self, g: &Grant, items: &[StageItem<'_>]) -> Result<CommitAnswer, SeamError> {
@@ -633,6 +690,7 @@ impl Publisher for Flawed {
             return Err(SeamError::Refused(Reason::Channel));
         }
         self.remember(items);
+        self.admit(items);
         let stranger_in = self.writer_for_a_stranger(
             Flaw::StrangerMayCommit,
             g,

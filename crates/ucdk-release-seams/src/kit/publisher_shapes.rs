@@ -475,6 +475,8 @@ pub(super) fn the_declarations_of_a_rig_hold_of_what_it_builds<R: PublisherRig>(
         let labels: Vec<String> = (0..LARGEST_SET).map(|i| format!("g{i}")).collect();
         let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
         let set = Set::of(rig, &labels);
+        let names: Vec<String> = set.coords.iter().map(|c| c.name.clone()).collect();
+        must(p.declare(&names), "the declaration of the largest set");
         publish(rig, &mut p, &set);
         for k in &set.coords {
             present_held(stranger(&mut p, k));

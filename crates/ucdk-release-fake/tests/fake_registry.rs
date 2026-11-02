@@ -9,11 +9,13 @@ use common::*;
 use sha2::{Digest as _, Sha256};
 use ucdk_core::{Hash256, ManualClock};
 use ucdk_release::codec::{GrantFault, GrantPhase};
+use ucdk_release::identity::{ContentIdentity, IdentityMatch, identity_matches};
 use ucdk_release::publish::{Held, Presence};
 use ucdk_release_fake::{FakeRegistry, Read, Scopes};
 use ucdk_release_proto::v1::{ArtifactType, Coordinate, Reason};
 use ucdk_release_seams::{
-    Blob, CommitAnswer, CommitUnit, Grant, ListScope, Publisher, SeamError, StageAnswer, StageItem,
+    Blob, CommitAnswer, CommitUnit, DeclareError, Grant, ListScope, Publisher, SeamError,
+    StageAnswer, StageItem,
 };
 
 fn sha(bytes: &[u8]) -> String {
@@ -319,6 +321,21 @@ fn no_digest_exposed_reports_a_held_coordinate_with_no_digest() {
 }
 
 #[test]
+fn a_held_coordinate_with_no_digest_exposed_has_no_common_field_with_ours() {
+    let (mut w, set) = staged(&["a"]);
+    commit(&mut w, &set).unwrap();
+    w.registry.no_digest_exposed();
+    let Presence::Present(held) = stranger(&mut w, &set, 0) else {
+        panic!("held");
+    };
+    let ours = ContentIdentity::of_sha256(&sha(b"a"));
+    assert_eq!(
+        identity_matches(&ours, &ContentIdentity::of_sha256(&held.digest)),
+        IdentityMatch::NoCommonField
+    );
+}
+
+#[test]
 fn observes_after_the_nth_are_unreadable() {
     let (mut w, set) = staged(&["a"]);
     w.registry.unreadable_after(1);
@@ -428,6 +445,87 @@ fn an_abort_of_declared_items_gives_back_those_and_an_empty_set_gives_back_nothi
     assert!(w.registry.is_staged(&set.coords[2]));
 }
 
+/// A world with `a` and `b` staged as one set and `c` committed, the abort of the test's
+/// entry point, and what the abort is expected to give back.
+fn aborting(abort: fn(&mut World, &Grant, &Set) -> Result<(), SeamError>) {
+    let (mut w, set) = staged(&["a", "b"]);
+    let held = Set::of(&["c"]);
+    let (blobs, g) = (held.blobs(), w.grant(GrantPhase::Stage, &held.coords));
+    w.registry.stage(&g, &held.items(&blobs)).unwrap();
+    assert_eq!(commit(&mut w, &held), Ok(CommitAnswer::Committed));
+    let unchanged = |w: &World| {
+        assert!(set.coords.iter().all(|c| w.registry.is_staged(c)));
+        assert_eq!(w.registry.bytes(&held.coords[0]), Some(&b"c"[..]));
+    };
+    let denied = Err(SeamError::GrantRefused(GrantFault::Denied));
+    let read = w.grant(GrantPhase::Read, &set.coords);
+    assert_eq!(abort(&mut w, &read, &set), denied);
+    unchanged(&w);
+    let commit_grant = w.grant(GrantPhase::Commit, &set.coords);
+    assert_eq!(abort(&mut w, &commit_grant, &set), denied);
+    unchanged(&w);
+    let g = w.grant(GrantPhase::Stage, &set.coords);
+    assert_eq!(abort(&mut w, &g, &set), Ok(()));
+    assert!(set.coords.iter().all(|c| !w.registry.is_staged(c)));
+    assert_eq!(w.registry.bytes(&held.coords[0]), Some(&b"c"[..]));
+    // Every abort is logged, the refused ones too, with the coordinates in the order of the call.
+    let line = format!(
+        "abort {},{}",
+        coordinate_key_of(&set, 0),
+        coordinate_key_of(&set, 1)
+    );
+    let aborts: Vec<&String> = w
+        .registry
+        .call_log()
+        .iter()
+        .filter(|l| l.starts_with("abort"))
+        .collect();
+    assert_eq!(aborts, [&line, &line, &line]);
+}
+
+#[test]
+fn an_abort_of_items_logs_checks_and_gives_back_by_their_coordinates() {
+    aborting(|w, g, set| {
+        let blobs = set.blobs();
+        w.registry.abort(g, &set.items(&blobs))
+    });
+}
+
+#[test]
+fn an_abort_by_coordinates_logs_checks_and_gives_back_as_an_abort_of_the_items_does() {
+    aborting(|w, g, set| w.registry.abort_by_coordinates(g, &set.coords));
+}
+
+#[test]
+fn an_empty_abort_by_coordinates_answers_ok_and_changes_nothing() {
+    let (mut w, set) = staged(&["a", "b"]);
+    let held = Set::of(&["c"]);
+    let (blobs, g) = (held.blobs(), w.grant(GrantPhase::Stage, &held.coords));
+    w.registry.stage(&g, &held.items(&blobs)).unwrap();
+    assert_eq!(commit(&mut w, &held), Ok(CommitAnswer::Committed));
+    let g = w.grant(GrantPhase::Stage, &set.coords);
+    assert_eq!(w.registry.abort_by_coordinates(&g, &[]), Ok(()));
+    assert!(set.coords.iter().all(|c| w.registry.is_staged(c)));
+    assert_eq!(w.registry.bytes(&held.coords[0]), Some(&b"c"[..]));
+    assert_eq!(w.registry.call_log().last(), Some(&"abort ".to_owned()));
+}
+
+#[test]
+fn the_abort_log_names_the_coordinates_in_the_order_of_the_call() {
+    let (mut w, set) = staged(&["a", "b"]);
+    let g = w.grant(GrantPhase::Stage, &set.coords);
+    let reversed = [set.coords[1].clone(), set.coords[0].clone()];
+    w.registry.abort_by_coordinates(&g, &reversed).unwrap();
+    assert_eq!(
+        w.registry.call_log().last(),
+        Some(&format!(
+            "abort {},{}",
+            coordinate_key_of(&set, 1),
+            coordinate_key_of(&set, 0)
+        ))
+    );
+}
+
 #[test]
 fn staged_state_of_another_writer_blocks_a_stage_and_is_not_seen() {
     let mut w = World::new();
@@ -469,6 +567,7 @@ fn an_open_channel_admits_a_write_with_no_grant_and_a_closed_one_does_not() {
     let set = Set::of(&["a"]);
     let blobs = set.blobs();
     let mut open = FakeRegistry::new(&clock, LOCATION).without_staging().open();
+    open.declare(&["a".to_owned()]).expect("a declaration");
     assert_eq!(
         open.commit(&Grant::none(), &set.items(&blobs)),
         Ok(CommitAnswer::Committed)
@@ -721,6 +820,110 @@ mod grouped {
         )
     }
 
+    fn stage(w: &mut World, set: &Set) {
+        let (blobs, g) = (set.blobs(), w.grant(GrantPhase::Stage, &set.coords));
+        assert_eq!(
+            w.registry.stage(&g, &set.items(&blobs)),
+            Ok(StageAnswer::Staged)
+        );
+    }
+
+    fn abort(w: &mut World, set: &Set) {
+        let (blobs, g) = (set.blobs(), w.grant(GrantPhase::Stage, &set.coords));
+        assert_eq!(w.registry.abort(&g, &set.items(&blobs)), Ok(()));
+    }
+
+    #[test]
+    fn an_abort_gives_back_the_group_of_its_exact_set_and_nothing_of_another_set() {
+        let mut w = world();
+        let (pair, alone, held) = (Set::of(&["a", "b"]), Set::of(&["c"]), Set::of(&["z"]));
+        stage(&mut w, &held);
+        assert_eq!(commit(&mut w, &held), Ok(CommitAnswer::Committed));
+        stage(&mut w, &pair);
+        stage(&mut w, &alone);
+        // A subset, a superset and a set of the same coordinates with other bytes are each
+        // another group: the abort answers Ok and gives back nothing.
+        let mut other_bytes = Set::of(&["a", "b"]);
+        other_bytes.bytes = vec![b"A".to_vec(), b"B".to_vec()];
+        for other in [Set::of(&["a"]), Set::of(&["a", "b", "c"]), other_bytes] {
+            abort(&mut w, &other);
+            assert!(pair.coords.iter().all(|c| w.registry.is_staged(c)));
+            assert!(w.registry.is_staged(&alone.coords[0]));
+        }
+        abort(&mut w, &pair);
+        assert!(pair.coords.iter().all(|c| !w.registry.is_staged(c)));
+        assert!(w.registry.is_staged(&alone.coords[0]));
+        assert_eq!(w.registry.bytes(&held.coords[0]), Some(&b"z"[..]));
+        // An abort of the set that was committed leaves its bytes.
+        abort(&mut w, &held);
+        assert_eq!(w.registry.bytes(&held.coords[0]), Some(&b"z"[..]));
+        assert!(w.registry.is_staged(&alone.coords[0]));
+    }
+
+    /// `{a, b}` and `{c}` staged and `{z}` committed on a grouped registry.
+    fn arranged() -> (World, Set, Set, Set) {
+        let mut w = world();
+        let (pair, alone, held) = (Set::of(&["a", "b"]), Set::of(&["c"]), Set::of(&["z"]));
+        stage(&mut w, &held);
+        assert_eq!(commit(&mut w, &held), Ok(CommitAnswer::Committed));
+        stage(&mut w, &pair);
+        stage(&mut w, &alone);
+        (w, pair, alone, held)
+    }
+
+    #[test]
+    fn an_empty_abort_by_either_entry_point_answers_ok_and_changes_nothing() {
+        let (mut w, pair, alone, held) = arranged();
+        let g = w.grant(GrantPhase::Stage, &pair.coords);
+        assert_eq!(w.registry.abort(&g, &[]), Ok(()));
+        assert_eq!(w.registry.abort_by_coordinates(&g, &[]), Ok(()));
+        assert!(pair.coords.iter().all(|c| w.registry.is_staged(c)));
+        assert!(w.registry.is_staged(&alone.coords[0]));
+        assert_eq!(w.registry.bytes(&held.coords[0]), Some(&b"z"[..]));
+        let aborts: Vec<&String> = w
+            .registry
+            .call_log()
+            .iter()
+            .filter(|l| l.starts_with("abort"))
+            .collect();
+        assert_eq!(aborts, ["abort ", "abort "]);
+    }
+
+    #[test]
+    fn an_abort_of_the_staged_items_in_another_order_finds_their_group_and_logs_that_order() {
+        let (mut w, pair, alone, held) = arranged();
+        let blobs = pair.blobs();
+        let mut items = pair.items(&blobs);
+        items.reverse();
+        let g = w.grant(GrantPhase::Stage, &pair.coords);
+        assert_eq!(w.registry.abort(&g, &items), Ok(()));
+        assert!(pair.coords.iter().all(|c| !w.registry.is_staged(c)));
+        assert!(w.registry.is_staged(&alone.coords[0]));
+        assert_eq!(w.registry.bytes(&held.coords[0]), Some(&b"z"[..]));
+        assert_eq!(
+            w.registry.call_log().last(),
+            Some(&format!(
+                "abort {},{}",
+                coordinate_key_of(&pair, 1),
+                coordinate_key_of(&pair, 0)
+            ))
+        );
+    }
+
+    #[test]
+    fn an_abort_by_coordinates_gives_back_the_staged_state_of_those_coordinates() {
+        let mut w = world();
+        let pair = Set::of(&["a", "b"]);
+        stage(&mut w, &pair);
+        let g = w.grant(GrantPhase::Stage, &pair.coords[..1]);
+        assert_eq!(
+            w.registry.abort_by_coordinates(&g, &pair.coords[..1]),
+            Ok(())
+        );
+        assert!(!w.registry.is_staged(&pair.coords[0]));
+        assert!(w.registry.is_staged(&pair.coords[1]));
+    }
+
     #[test]
     fn staged_state_is_found_only_through_the_set_it_was_staged_under() {
         let mut w = world();
@@ -804,10 +1007,10 @@ mod grouped {
 }
 
 /// The standard coordinate with its name and version replaced.
-fn named(name: &str, version: &str) -> Coordinate {
+fn named(version: &str, platform: &str) -> Coordinate {
     Coordinate {
-        name: name.to_owned(),
         version: version.to_owned(),
+        platform: platform.to_owned(),
         ..coordinate("a")
     }
 }
@@ -1001,4 +1204,122 @@ fn a_burned_committed_coordinate_is_no_longer_readable_listable_or_yankable() {
     assert!(!w.registry.is_yanked(&set.coords[0]));
     assert!(matches!(stranger(&mut w, &set, 1), Presence::Present(_)));
     assert_eq!(w.registry.bytes(&set.coords[1]), Some(&b"b"[..]));
+}
+
+fn stage_of(w: &mut World, set: &Set) -> Result<StageAnswer, SeamError> {
+    let (blobs, g) = (set.blobs(), w.grant(GrantPhase::Stage, &set.coords));
+    let items = set.items(&blobs);
+    w.registry.stage(&g, &items)
+}
+
+fn undeclared(name: &str) -> SeamError {
+    SeamError::Undeclared {
+        name: name.to_owned(),
+    }
+}
+
+#[test]
+fn an_artifact_of_an_undeclared_name_is_refused_by_stage_and_commit_naming_it() {
+    let mut w = World::new();
+    w.registry
+        .declare(&["a".to_owned()])
+        .expect("a declaration");
+    let z = Set::of(&["z"]);
+    assert_eq!(stage_of(&mut w, &z), Err(undeclared("z")));
+    assert_eq!(commit(&mut w, &z), Err(undeclared("z")));
+    assert_eq!(stranger(&mut w, &z, 0), Presence::Absent);
+    assert_eq!(w.registry.bytes(&z.coords[0]), None);
+}
+
+#[test]
+fn a_set_with_one_undeclared_member_is_refused_whole() {
+    let mut w = World::new();
+    w.registry
+        .declare(&["a".to_owned()])
+        .expect("a declaration");
+    let both = Set::of(&["a", "z"]);
+    assert_eq!(stage_of(&mut w, &both), Err(undeclared("z")));
+    assert_eq!(commit(&mut w, &both), Err(undeclared("z")));
+    let a = Set::of(&["a"]);
+    assert_eq!(stage_of(&mut w, &a), Ok(StageAnswer::Staged));
+    assert_eq!(commit(&mut w, &a), Ok(CommitAnswer::Committed));
+    assert_eq!(w.registry.bytes(&a.coords[0]), Some(&b"a"[..]));
+}
+
+#[test]
+fn declared_names_compare_ignoring_ascii_case_and_an_empty_declaration_admits_nothing() {
+    let mut w = World::new();
+    w.registry
+        .declare(&["A".to_owned()])
+        .expect("a declaration");
+    let a = Set::of(&["a"]);
+    assert_eq!(stage_of(&mut w, &a), Ok(StageAnswer::Staged));
+    w.registry.declare(&[]).expect("a declaration");
+    assert_eq!(commit(&mut w, &a), Err(undeclared("a")));
+    w.registry
+        .declare(&["a".to_owned()])
+        .expect("a declaration");
+    assert_eq!(commit(&mut w, &a), Ok(CommitAnswer::Committed));
+}
+
+#[test]
+fn a_registry_that_was_never_told_the_declared_names_refuses_every_stage_and_commit() {
+    let clock = ManualClock::at(1_000_000);
+    let mut w = World::told_nothing(&clock, FakeRegistry::new(&clock, LOCATION));
+    let z = Set::of(&["z"]);
+    assert_eq!(stage_of(&mut w, &z), Err(undeclared("z")));
+    assert_eq!(commit(&mut w, &z), Err(undeclared("z")));
+    assert_eq!(w.registry.bytes(&z.coords[0]), None);
+}
+
+#[test]
+fn a_declaration_that_is_not_plain_distinct_names_is_refused_naming_the_entry() {
+    let mut registry = FakeRegistry::new(&ManualClock::at(1), LOCATION);
+    let list = |names: &[&str]| names.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
+    assert_eq!(
+        registry.declare(&list(&["a", ""])),
+        Err(DeclareError::Empty { index: 1 })
+    );
+    assert_eq!(
+        registry.declare(&list(&["a b"])),
+        Err(DeclareError::Whitespace {
+            name: "a b".to_owned()
+        })
+    );
+    assert_eq!(
+        registry.declare(&list(&["a/b"])),
+        Err(DeclareError::Slash {
+            name: "a/b".to_owned()
+        })
+    );
+    assert_eq!(
+        registry.declare(&list(&["a", "A"])),
+        Err(DeclareError::Duplicate {
+            name: "A".to_owned()
+        })
+    );
+    assert_eq!(registry.declare(&list(&["a", "b"])), Ok(()));
+}
+
+#[test]
+fn the_registry_keeps_a_coordinate_under_the_text_a_publication_record_keeps() {
+    // One framing for both: the key the fake registry and its grants use is the release codec's
+    // coordinate text, so a coordinate in the ledger and in the registry is named alike.
+    for (channel, kind, name) in [
+        ("stable", ArtifactType::File as i32, "tool"),
+        ("st\u{e9}ble", ArtifactType::Oci as i32, "a/b"),
+        ("", -7, "1:x"),
+    ] {
+        let c = Coordinate {
+            channel: channel.to_owned(),
+            r#type: kind,
+            name: name.to_owned(),
+            version: "1.2.3".to_owned(),
+            platform: "linux-x86_64".to_owned(),
+        };
+        assert_eq!(
+            ucdk_release_fake::coordinate_key(&c),
+            ucdk_release::codec::coordinate_text(&c)
+        );
+    }
 }

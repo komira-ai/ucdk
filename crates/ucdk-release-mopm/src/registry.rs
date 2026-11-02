@@ -8,34 +8,42 @@
 //! set is another group. Each call takes the set as [`Member`]s, which [`members`] checks before
 //! any request is built, and a [`Caller`], the actor and the bearer token a grant carries.
 //!
+//! `stage` uploads only names the release declared ([`Registry::declare`]), as the `Publisher`
+//! contract requires: a registry never told any names refuses every stage. `abort` is not refused
+//! for a name.
+//!
 //! [`members`]: crate::members
+
+use std::collections::BTreeSet;
 
 use serde_json::{Value, json};
 use ucdk_core::{Clock, millis};
 use ucdk_release::codec::GrantFault;
 use ucdk_release_proto::v1::Reason;
-use ucdk_release_seams::{SeamError, StageAnswer};
+use ucdk_release_seams::{DeclareError, SeamError, StageAnswer, check_declaration};
 
 use crate::answers::{
     Created, Group, GroupStatus, Target, VersionRecord, VersionState, parse_created, parse_group,
     parse_record,
 };
 use crate::config::{Call, Config};
+use crate::echo::echoes_credential;
 use crate::errors::{ConflictAnswer, ConflictReason, Mapped, Op, error_code, map_reply};
-use crate::errors::{map_schema_violation, map_transport};
+use crate::errors::{map_schema_violation, map_transport, rate_limited};
 use crate::group_id::group_id;
 use crate::mapping::{Member, MemberFile};
 use crate::platform::Subdir;
 use crate::requests::get;
-use crate::transport::{Header, Method, Request, Response, Transport};
+use crate::transport::{Header, Method, Request, Response, Secret, Transport};
 use crate::url::Url;
 
 mod observe;
 
 pub use observe::MAX_LIST_PAGES;
 
-/// A presigned upload URL lives at most 300 seconds. A `PUT` starts only on an answer younger than
-/// half of that, and otherwise the identical create is repeated first for fresh URLs.
+/// A presigned upload URL lives at most 300 seconds. Every `PUT` attempt, a retry included, starts
+/// only on an answer younger than half of that; an answer this old or older is replaced first by
+/// the identical create, for fresh URLs.
 const URL_REFRESH_MS: u64 = 150_000;
 
 /// The statuses of a storage `PUT` that are retried.
@@ -75,6 +83,8 @@ impl From<SeamError> for Early {
 enum Put {
     /// Storage refused the URL: it is expired.
     Expired,
+    /// The answer that gave the URL is half its life old: no attempt was sent on it.
+    Aged,
     Failed(SeamError),
 }
 
@@ -136,6 +146,8 @@ pub struct Registry<T: Transport> {
     /// A create under `on_overlap: refuse` listed a superseded group, which contradicts the
     /// contract: this registry does not honour the option, and no later stage is sent.
     overlap_ignored: bool,
+    /// The names the release declared, lower-cased: `stage` refuses any other.
+    declared: BTreeSet<String>,
 }
 
 impl<T: Transport> Registry<T> {
@@ -145,6 +157,29 @@ impl<T: Transport> Registry<T> {
             config,
             clock,
             overlap_ignored: false,
+            declared: BTreeSet::new(),
+        }
+    }
+
+    /// States the names of the artifacts the release declared, replacing any earlier declaration.
+    /// The declaration is checked whole by [`check_declaration`]; one that is refused changes
+    /// nothing. Names compare ignoring ASCII case and nothing else.
+    pub fn declare(&mut self, names: &[String]) -> Result<(), DeclareError> {
+        check_declaration(names)?;
+        self.declared = names.iter().map(|n| n.to_ascii_lowercase()).collect();
+        Ok(())
+    }
+
+    /// Refuses a set that holds a member whose name was not declared, naming the first one.
+    fn declared_only(&self, members: &[Member]) -> Result<(), SeamError> {
+        match members
+            .iter()
+            .find(|m| !self.declared.contains(&m.name.to_ascii_lowercase()))
+        {
+            Some(member) => Err(SeamError::Undeclared {
+                name: member.name.clone(),
+            }),
+            None => Ok(()),
         }
     }
 
@@ -243,11 +278,19 @@ impl<T: Transport> Registry<T> {
         }
     }
 
-    /// The record of every member's version, in the order of `members`.
-    fn records(&mut self, members: &[Member]) -> Result<Vec<Option<VersionRecord>>, SeamError> {
+    /// The record of every member's version, in the order of `members`. The stage's budget is
+    /// checked before each read, so no read starts once it is spent.
+    fn records(
+        &mut self,
+        members: &[Member],
+        deadline: u64,
+    ) -> Result<Vec<Option<VersionRecord>>, SeamError> {
         members
             .iter()
-            .map(|m| self.read_record(&m.name, &m.version))
+            .map(|m| {
+                self.within(deadline)?;
+                self.read_record(&m.name, &m.version)
+            })
             .collect()
     }
 
@@ -256,7 +299,10 @@ impl<T: Transport> Registry<T> {
     /// `Duplicate` when nothing had to be uploaded: the group is already open with every declared
     /// file stored, is past open, or the numbers are held by a group that stands. `Staged` when
     /// bytes were added. The same set sent again resumes the same group; a different set that
-    /// shares a member is refused by the registry (`on_overlap: refuse`) and ends nothing.
+    /// shares a member is refused by the registry (`on_overlap: refuse`) and ends nothing. A set
+    /// that holds a name the release did not declare is refused whole with
+    /// `SeamError::Undeclared`, and an empty set (which has nothing to stage, and which mopm would
+    /// refuse as an invalid request) is `Permanent`, both before anything is sent.
     pub fn stage(
         &mut self,
         caller: &Caller<'_>,
@@ -275,6 +321,12 @@ impl<T: Transport> Registry<T> {
         members: &[Member],
         files: &[SetFile<'_>],
     ) -> Result<StageAnswer, Early> {
+        if members.is_empty() {
+            return Err(
+                SeamError::Permanent("an empty set has nothing to stage".to_owned()).into(),
+            );
+        }
+        self.declared_only(members)?;
         if self.overlap_ignored {
             return Err(refuse().into());
         }
@@ -340,8 +392,8 @@ impl<T: Transport> Registry<T> {
     fn created(&mut self, stage: &Stage<'_>, response: &Response) -> Result<Created, Early> {
         if let Some(mapped) = map_reply(Op::Create, response, self.config.retry_after_ceiling) {
             return Err(match mapped {
-                Mapped::Duplicate => self.after_version_exists(stage.members),
-                Mapped::Conflict(reason) => self.after_conflict(stage.members, reason),
+                Mapped::Duplicate => self.after_version_exists(stage),
+                Mapped::Conflict(reason) => self.after_conflict(stage, reason),
                 other => Early::Fail(unexpected(other)),
             });
         }
@@ -354,23 +406,28 @@ impl<T: Transport> Registry<T> {
             self.overlap_ignored = true;
             return Err(refuse().into());
         }
+        if !created.reserving && !created.answers(stage.members) {
+            return Err(map_schema_violation(
+                Op::Create,
+                "a group create that does not answer the declared set",
+            )
+            .into());
+        }
         Ok(created)
     }
 
     /// 409 `version_exists`: the numbers are held, yanked or burned. A tombstoned record is a held
     /// number (the engine's observe reads it as burned). A published or yanked version that lacks
-    /// a requested coordinate is sealed with another file set, which `Refused` says; every other
-    /// case is `Duplicate`.
-    fn after_version_exists(&mut self, members: &[Member]) -> Early {
-        let records = match self.records(members) {
+    /// a requested coordinate is sealed with another file set, which `Refused` says, whatever the
+    /// other members' records show (a member with no record yet beside it included: repeating
+    /// cannot change a sealed version). Otherwise a member with no record is `Transient`, since
+    /// the answer cannot be checked, and every other case is `Duplicate`.
+    fn after_version_exists(&mut self, stage: &Stage<'_>) -> Early {
+        let members = stage.members;
+        let records = match self.records(members, stage.deadline) {
             Ok(records) => records,
             Err(error) => return Early::Fail(error),
         };
-        if records.iter().any(Option::is_none) {
-            return Early::Fail(SeamError::Transient(
-                "mopm says the version exists but its record cannot be read".to_owned(),
-            ));
-        }
         let sealed_otherwise = members.iter().zip(&records).any(|(m, record)| {
             record.as_ref().is_some_and(|r| {
                 r.state != VersionState::Tombstoned && !m.files.iter().all(|f| holds(r, f))
@@ -379,15 +436,21 @@ impl<T: Transport> Registry<T> {
         if sealed_otherwise {
             return Early::Fail(refuse());
         }
+        if records.iter().any(Option::is_none) {
+            return Early::Fail(SeamError::Transient(
+                "mopm says the version exists but its record cannot be read".to_owned(),
+            ));
+        }
         Early::Answer(StageAnswer::Duplicate)
     }
 
     /// 409 `group_conflict`: the class of its reason, and for `number_taken` a read of the records.
-    fn after_conflict(&mut self, members: &[Member], reason: ConflictReason) -> Early {
+    fn after_conflict(&mut self, stage: &Stage<'_>, reason: ConflictReason) -> Early {
+        let members = stage.members;
         match reason.answer() {
             ConflictAnswer::Duplicate => Early::Answer(StageAnswer::Duplicate),
             ConflictAnswer::Fail(error) => Early::Fail(error),
-            ConflictAnswer::DuplicateIfHeld => match self.records(members) {
+            ConflictAnswer::DuplicateIfHeld => match self.records(members, stage.deadline) {
                 Err(error) => Early::Fail(error),
                 Ok(records) => {
                     let held = members.iter().zip(&records).all(|(m, record)| {
@@ -448,16 +511,14 @@ impl<T: Transport> Registry<T> {
         (member, file): (&Member, &MemberFile),
         bytes: &[u8],
     ) -> Result<bool, Early> {
-        if self.clock.now_millis().saturating_sub(upload.at) > URL_REFRESH_MS {
-            self.refresh(stage, upload)?;
-        }
         let mut refreshed = false;
         loop {
             let Some(target) = upload.created.pending(member, file) else {
                 return Ok(false);
             };
-            match self.put(target, bytes, stage.deadline) {
+            match self.put(stage, upload.at, target, bytes) {
                 Ok(()) => return Ok(true),
+                Err(Put::Aged) => self.refresh(stage, upload)?,
                 Err(Put::Expired) if !refreshed => {
                     refreshed = true;
                     self.refresh(stage, upload)?;
@@ -472,17 +533,39 @@ impl<T: Transport> Registry<T> {
         }
     }
 
-    /// `PUT` of the bytes to the URL the create answer gave, with its headers and no token. A
-    /// connect failure, a timeout and a 5xx are retried `retries` times.
-    fn put(&mut self, target: &Target, bytes: &[u8], deadline: u64) -> Result<(), Put> {
+    /// `PUT` of the bytes to the URL the create answer gave (at `at`), with its headers and no
+    /// token. A connect failure, a timeout and a 500, 502, 503 or 504 are retried `retries` times;
+    /// a 429 is `RateLimited` by its `Retry-After` (a refusal above the configured ceiling) and
+    /// never retried here. No attempt starts once the answer is half the URL life old (`Aged`), or
+    /// on headers that hold the caller's credential.
+    fn put(
+        &mut self,
+        stage: &Stage<'_>,
+        at: u64,
+        target: &Target,
+        bytes: &[u8],
+    ) -> Result<(), Put> {
         if !self.config.allows_file_origin(&target.url) {
             return Err(Put::Failed(SeamError::Transient(
                 "an upload URL names an origin that is not configured".to_owned(),
             )));
         }
+        let credential = Secret::new(stage.caller.token.to_vec());
+        if target.headers.iter().any(|(name, value)| {
+            echoes_credential(name.as_bytes(), &credential)
+                || echoes_credential(value.as_bytes(), &credential)
+        }) {
+            return Err(Put::Failed(SeamError::Permanent(
+                "the upload headers mopm gave hold the caller's credential; nothing was put"
+                    .to_owned(),
+            )));
+        }
         let mut last = String::new();
         for _ in 0..=self.config.retries {
-            self.within(deadline).map_err(Put::Failed)?;
+            self.within(stage.deadline).map_err(Put::Failed)?;
+            if self.clock.now_millis().saturating_sub(at) >= URL_REFRESH_MS {
+                return Err(Put::Aged);
+            }
             let request = Request {
                 method: Method::Put,
                 url: target.url.clone(),
@@ -496,6 +579,12 @@ impl<T: Transport> Registry<T> {
             match self.transport.send(&request) {
                 Ok(r) if r.is_success() => return Ok(()),
                 Ok(r) if r.status == 403 => return Err(Put::Expired),
+                Ok(r) if r.status == 429 => {
+                    return Err(Put::Failed(rate_limited(
+                        &r,
+                        self.config.retry_after_ceiling,
+                    )));
+                }
                 Ok(r) if RETRY_STATUSES.contains(&r.status) => {
                     last = format!("storage answered {}", r.status);
                 }

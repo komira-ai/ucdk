@@ -122,6 +122,16 @@ impl Client {
         self.registry.abort_by_coordinates(g, ks)
     }
 
+    /// An abort of the declared items, which a registry addressed by group finds by their group.
+    pub(super) fn abort_items(
+        &mut self,
+        g: &Grant,
+        set: &[StageItem<'_>],
+    ) -> Result<(), SeamError> {
+        self.check(g, Needs::Stage, &keys_of(set))?;
+        self.registry.abort(g, set)
+    }
+
     pub(super) fn commit(
         &mut self,
         g: &Grant,

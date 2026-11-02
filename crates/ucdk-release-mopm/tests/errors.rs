@@ -54,6 +54,7 @@ fn kind(mapped: &Mapped) -> &'static str {
         Mapped::Failed(SeamError::InFlight(_)) => "in_flight",
         Mapped::Failed(SeamError::Unknown(_)) => "unknown",
         Mapped::Failed(SeamError::GrantRefused(_)) => "grant_refused",
+        Mapped::Failed(SeamError::Undeclared { .. }) => "undeclared",
     }
 }
 
@@ -484,4 +485,20 @@ fn nothing_but_the_status_and_the_code_reaches_an_error() {
             }
         }
     }
+}
+
+#[test]
+fn a_read_answer_naming_a_missing_package_or_version_is_missing_only_on_a_404() {
+    for code in ["package_not_found", "version_not_found"] {
+        assert_eq!(map(Op::Read, &answer(404, code)), Mapped::Missing, "{code}");
+        assert_eq!(
+            kind(&map(Op::Read, &answer(500, code))),
+            "transient",
+            "{code}"
+        );
+        assert_eq!(map(Op::Read, &answer(401, code)), denied(), "{code}");
+        let limited = response(429, &[("retry-after", "7")], &error_body(code));
+        assert_eq!(map(Op::Read, &limited), ticks(7), "{code}");
+    }
+    assert_eq!(map(Op::Read, &answer(401, "token_expired")), expired());
 }

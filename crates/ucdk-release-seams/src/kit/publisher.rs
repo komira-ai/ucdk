@@ -13,6 +13,7 @@
 //! commits, sets and the declarations of a rig.
 
 use ucdk_release::codec::GrantPhase;
+use ucdk_release::identity::{ContentIdentity, IdentityMatch, identity_matches};
 use ucdk_release::publish::{Held, Presence};
 use ucdk_release_proto::v1::Stamped;
 
@@ -21,8 +22,8 @@ use super::publisher_list::publisher_scenarios;
 use super::publisher_more as more;
 use super::publisher_rig::{
     Arrangement, ChannelShape, PublisherRig, Set, built, commit, fetched, held_by_another,
-    is_yanked, looked, observed, observed_as_staged, present_held, publish, stage, staged_held,
-    stranger,
+    is_yanked, looked, observed, observed_as_staged, present_held, publish, sha, stage,
+    staged_held, stranger,
 };
 use super::{Report, must, must_err, run_scenarios, same};
 use crate::{CommitAnswer, CommitUnit, Grant, ListScope, Publisher, StageAnswer};
@@ -371,6 +372,11 @@ pub(super) fn commit_over_present_different_leaves_old_bytes<R: PublisherRig>(
     );
 }
 
+/// An abort of the set an action staged gives that state back and nothing else: another staged
+/// set stays staged and a committed coordinate keeps its bytes, also when the abort is told the
+/// set that was committed. The abort names the exact set that was staged, so a channel addressed
+/// by a group derived from the whole set finds it; only a channel addressed by coordinate is also
+/// asked to abort a set that mixes a committed coordinate with a staged one, which no group holds.
 pub(super) fn abort_gives_staged_state_back_and_never_touches_a_committed_coordinate<
     R: PublisherRig,
 >(
@@ -386,23 +392,75 @@ pub(super) fn abort_gives_staged_state_back_and_never_touches_a_committed_coordi
     publish(rig, &mut p, &a);
     stage(rig, &mut p, &b);
     stage(rig, &mut p, &c);
-    let both = Set::of(rig, &["a", "b"]);
-    let grant = rig.grant(&p, GrantPhase::Stage, &both.coords);
-    let blobs = both.blobs();
-    must(p.abort(&grant, &both.items(&blobs)), "abort");
+    abort(rig, &mut p, &b);
     same(
         observed(rig, &mut p, GrantPhase::Stage, &b, 0),
         Presence::Absent,
-        "the staged coordinate after the abort",
+        &format!("the staged set after its abort ({shape:?})"),
     );
     staged_held(observed(rig, &mut p, GrantPhase::Stage, &c, 0));
-    present_held(looked(rig, shape, &mut p, &a.coords[0]));
-    same(
-        fetched(rig, &mut p, &a.coords[0]),
-        Some(a.bytes(0).to_vec()),
-        "the committed bytes after it",
+    committed_held(rig, shape, &mut p, &a, "after an abort of another set");
+    abort(rig, &mut p, &a);
+    committed_held(
+        rig,
+        shape,
+        &mut p,
+        &a,
+        "after an abort of the set committed",
     );
+    staged_held(observed(rig, &mut p, GrantPhase::Stage, &c, 0));
+    if !shape.group_addressed {
+        an_abort_of_a_committed_and_a_staged_coordinate_gives_back_only_the_staged(rig, shape);
+    }
     more::an_abort_reaches_only_the_coordinates_it_names(rig, shape);
+}
+
+/// On a channel addressed by coordinate, an abort that names a committed coordinate and a staged
+/// one together gives back the staged one and leaves the committed one with its bytes.
+fn an_abort_of_a_committed_and_a_staged_coordinate_gives_back_only_the_staged<R: PublisherRig>(
+    rig: &R,
+    shape: &ChannelShape,
+) {
+    let mut p = built(rig, shape);
+    let (a, b, c) = (
+        Set::of(rig, &["a"]),
+        Set::of(rig, &["b"]),
+        Set::of(rig, &["c"]),
+    );
+    publish(rig, &mut p, &a);
+    stage(rig, &mut p, &b);
+    stage(rig, &mut p, &c);
+    abort(rig, &mut p, &Set::of(rig, &["a", "b"]));
+    same(
+        observed(rig, &mut p, GrantPhase::Stage, &b, 0),
+        Presence::Absent,
+        &format!("the staged coordinate after the abort ({shape:?})"),
+    );
+    staged_held(observed(rig, &mut p, GrantPhase::Stage, &c, 0));
+    committed_held(rig, shape, &mut p, &a, "after an abort that named it");
+}
+
+/// An abort of the items of `set` with a stage grant for its coordinates.
+fn abort<R: PublisherRig>(rig: &R, p: &mut R::Publisher, set: &Set) {
+    let grant = rig.grant(p, GrantPhase::Stage, &set.coords);
+    let blobs = set.blobs();
+    must(p.abort(&grant, &set.items(&blobs)), "abort");
+}
+
+/// The one coordinate of the committed `set` is present and holds the bytes it was committed with.
+fn committed_held<R: PublisherRig>(
+    rig: &R,
+    shape: &ChannelShape,
+    p: &mut R::Publisher,
+    set: &Set,
+    when: &str,
+) {
+    present_held(looked(rig, shape, p, &set.coords[0]));
+    same(
+        fetched(rig, p, &set.coords[0]),
+        Some(set.bytes(0).to_vec()),
+        &format!("the committed bytes {when} ({shape:?})"),
+    );
 }
 
 /// What one commit call makes readable is what `commit_unit()` says, held both ways: a channel
@@ -486,9 +544,30 @@ pub(super) fn no_digest_exposed_is_refused<R: PublisherRig>(rig: &R, shape: &Cha
     rig.arrange(&mut p, &held_by_another(rig, &set.coords[0]));
     let held = present_held(looked(rig, shape, &mut p, &set.coords[0]));
     same(
-        held.digest,
+        held.digest.clone(),
         set.reseeded(rig, 1).digest(0),
         &format!("the digest a coordinate of another writer is reported with ({shape:?})"),
+    );
+    // The identity comparison reads that report as the bytes it holds and as no others, and never
+    // as a report with nothing to compare.
+    let reported = ContentIdentity::of_sha256(&held.digest);
+    same(
+        identity_matches(
+            &ContentIdentity::of_sha256(&set.reseeded(rig, 1).digest(0)),
+            &reported,
+        ),
+        IdentityMatch::Match,
+        &format!(
+            "the identity of the bytes of another writer against what is reported ({shape:?})"
+        ),
+    );
+    same(
+        identity_matches(
+            &ContentIdentity::of_sha256(&sha(b"bytes that nobody sent")),
+            &reported,
+        ),
+        IdentityMatch::Mismatch,
+        &format!("the identity of bytes nobody sent against what is reported ({shape:?})"),
     );
 }
 

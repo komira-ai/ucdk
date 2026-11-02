@@ -9,9 +9,9 @@ use std::time::Duration;
 use common::*;
 use ucdk_core::ManualClock;
 use ucdk_release::codec::GrantFault;
-use ucdk_release_mopm::{Caller, Member, Method, Registry, group_id};
+use ucdk_release_mopm::{Call, Caller, Member, Method, Registry, group_id};
 use ucdk_release_proto::v1::Reason;
-use ucdk_release_seams::SeamError;
+use ucdk_release_seams::{Backoff, SeamError};
 
 fn abort_kind(result: &Result<(), SeamError>) -> &'static str {
     match result {
@@ -41,7 +41,11 @@ fn an_abort_by_the_staged_set_deletes_the_group_that_set_names() {
         reg.transport().lines(),
         [format!("DELETE {}", group_path(&id))]
     );
-    assert!(reg.transport().log[0].authorized);
+    // The delete carries the caller's own token as the bearer.
+    assert_eq!(
+        reg.transport().log[0].bearer,
+        Some(format!("Bearer {}", String::from_utf8_lossy(TOKEN)))
+    );
 }
 
 #[test]
@@ -215,5 +219,137 @@ fn a_token_that_cannot_be_sent_is_refused_and_nothing_is_sent() {
     let mut reg = registry(Fake::default(), &ManualClock::at(1_000_000));
     let result = reg.abort(&spaced, &members);
     assert_eq!(result, Err(SeamError::GrantRefused(GrantFault::Denied)));
+    assert!(reg.transport().log.is_empty());
+}
+
+fn read_failure(inner: &SeamError) -> SeamError {
+    SeamError::Unknown(format!(
+        "the group could not be read after the abort: {inner:?}"
+    ))
+}
+
+/// The two answers of a delete after which the group is read.
+fn follow_ups() -> [(&'static str, Reply); 2] {
+    [
+        ("409 group_not_open", error_reply(409, "group_not_open")),
+        ("404 group_not_found", error_reply(404, "group_not_found")),
+    ]
+}
+
+#[test]
+fn a_failed_group_read_after_the_abort_is_unknown_and_carries_exactly_what_the_read_gave() {
+    let (_, members, id) = world();
+    let other_id = group_id("u:other", &members);
+    let malformed = SeamError::Permanent("malformed answer: a group read".to_owned());
+    let reads = [
+        (
+            error_reply(401, "token_expired"),
+            SeamError::GrantRefused(GrantFault::Expired),
+        ),
+        (
+            error_reply(401, "token_unknown"),
+            SeamError::GrantRefused(GrantFault::Denied),
+        ),
+        (
+            Ok(response(
+                429,
+                &[("retry-after", "7")],
+                &error_body("rate_limited"),
+            )),
+            SeamError::RateLimited(Backoff::after_millis(7000)),
+        ),
+        (
+            Ok(response(200, &[], r#"{"not":"a group"}"#)),
+            malformed.clone(),
+        ),
+        (
+            json_reply(200, &group_json(&other_id, "aborted", &members, &[])),
+            malformed,
+        ),
+    ];
+    for (name, delete) in follow_ups() {
+        for (read, inner) in &reads {
+            let fake = Fake::default()
+                .on(Method::Delete, &group_path(&id), vec![delete.clone()])
+                .on(Method::Get, &group_path(&id), vec![read.clone()]);
+            let (result, reg) = abort_of(fake, &members);
+            assert_eq!(result, Err(read_failure(inner)), "{name} then {inner:?}");
+            assert_eq!(
+                reg.transport().lines(),
+                [
+                    format!("DELETE {}", group_path(&id)),
+                    format!("GET {}", group_path(&id)),
+                ]
+            );
+        }
+    }
+}
+
+#[test]
+fn a_delete_that_spends_the_abort_budget_leaves_the_group_unread() {
+    let (_, members, id) = world();
+    let budget = group_config().budget(Call::Abort);
+    assert_eq!(budget, secs(15));
+    for (name, delete) in follow_ups() {
+        let clock = ManualClock::at(1_000_000);
+        let fake = Fake::default()
+            .on(Method::Delete, &group_path(&id), vec![delete])
+            .bump(Method::Delete, &group_path(&id), &clock, budget);
+        let mut reg = declared_registry(fake, group_config(), &clock);
+        assert_eq!(
+            reg.abort(&caller(), &members),
+            Err(SeamError::Unknown(
+                "the abort ran out of its time budget before the group could be read".to_owned()
+            )),
+            "{name}"
+        );
+        assert_eq!(
+            reg.transport().lines(),
+            [format!("DELETE {}", group_path(&id))],
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_delete_that_leaves_a_millisecond_of_the_abort_budget_still_reads_the_group() {
+    let (_, members, id) = world();
+    let budget = group_config().budget(Call::Abort);
+    for (name, delete) in follow_ups() {
+        let clock = ManualClock::at(1_000_000);
+        let fake = Fake::default()
+            .on(Method::Delete, &group_path(&id), vec![delete])
+            .on(
+                Method::Get,
+                &group_path(&id),
+                vec![error_reply(404, "group_not_found")],
+            )
+            .bump(
+                Method::Delete,
+                &group_path(&id),
+                &clock,
+                budget - Duration::from_millis(1),
+            );
+        let mut reg = declared_registry(fake, group_config(), &clock);
+        assert_eq!(reg.abort(&caller(), &members), Ok(()), "{name}");
+        assert_eq!(
+            reg.transport().lines(),
+            [
+                format!("DELETE {}", group_path(&id)),
+                format!("GET {}", group_path(&id)),
+            ],
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn an_abort_of_an_empty_set_by_a_caller_whose_token_cannot_be_sent_is_ok_and_sends_nothing() {
+    let spaced = Caller {
+        actor: ACTOR,
+        token: b"has a space",
+    };
+    let mut reg = registry(Fake::default(), &ManualClock::at(1_000_000));
+    assert_eq!(reg.abort(&spaced, &[]), Ok(()));
     assert!(reg.transport().log.is_empty());
 }

@@ -260,3 +260,96 @@ fn a_version_record_with_a_wrong_field_or_two_files_for_a_subdirectory_is_not_re
     // Two files for one subdirectory.
     assert!(broken(&|v| v["files"][1]["subdir"] = json!("linux-64")));
 }
+
+#[test]
+fn a_group_file_whose_uploaded_is_not_a_boolean_is_not_read() {
+    let members = set(&alpha());
+    let mut value = group_json(ID, "open", &members, &["linux-64"]);
+    value["members"][0]["files"][0]["uploaded"] = json!("yes");
+    assert_eq!(parse_group(&bytes(&value)), None);
+}
+
+#[test]
+fn an_open_group_needs_uploaded_on_every_file_and_a_group_past_open_does_not() {
+    let members = set(&alpha());
+    let mut open = group_json(ID, "open", &members, &["linux-64"]);
+    open["members"][0]["files"][1]
+        .as_object_mut()
+        .unwrap()
+        .remove("uploaded");
+    assert_eq!(parse_group(&bytes(&open)), None);
+    let validating = group_json(ID, "validating", &members, &[]);
+    let group = parse_group(&bytes(&validating)).unwrap();
+    assert_eq!(group.status, GroupStatus::Validating);
+    assert!(group.members[0].files.iter().all(|f| f.uploaded.is_none()));
+}
+
+#[test]
+fn a_create_answer_whose_reserving_is_not_an_object_of_two_counts_is_not_read() {
+    let members = set(&alpha());
+    let with = |reserving: Value| {
+        let mut value = created_json(ID, "open", &members, &[]);
+        value["reserving"] = reserving;
+        parse_created(&bytes(&value))
+    };
+    assert!(with(json!({"done": 0, "total": 1})).is_some());
+    assert!(with(json!(false)).is_none());
+    assert!(with(json!("yes")).is_none());
+    assert!(with(json!({"done": 0})).is_none());
+    assert!(with(json!({"total": 1})).is_none());
+    assert!(with(json!({"done": "0", "total": 1})).is_none());
+    assert!(with(json!({"done": 0, "total": "1"})).is_none());
+}
+
+#[test]
+fn a_create_answer_that_supersedes_a_group_by_an_id_that_is_not_one_is_not_read() {
+    let members = set(&alpha());
+    let mut value = created_json(ID, "open", &members, &[]);
+    value["superseded"] = json!(["grp_x"]);
+    assert!(parse_created(&bytes(&value)).is_none());
+    value["superseded"] = json!([OTHER, "grp_x"]);
+    assert!(parse_created(&bytes(&value)).is_none());
+}
+
+#[test]
+fn a_record_file_url_that_is_not_text_or_is_missing_on_a_sealed_version_is_not_read() {
+    let mut value = record_json("alpha", "1.0.0", "published", &["linux-64"]);
+    value["files"][0]["url"] = json!(7);
+    assert!(parse_record(&bytes(&value)).is_none());
+    for state in ["published", "yanked"] {
+        let mut value = record_json("alpha", "1.0.0", state, &["linux-64", "noarch"]);
+        value["files"][1].as_object_mut().unwrap().remove("url");
+        assert!(parse_record(&bytes(&value)).is_none(), "{state}");
+    }
+    let burned = record_json("alpha", "1.0.0", "tombstoned", &["linux-64"]);
+    let record = parse_record(&bytes(&burned)).unwrap();
+    assert_eq!(record.state, VersionState::Tombstoned);
+    assert_eq!(record.files[0].url, None);
+}
+
+#[test]
+fn a_field_a_later_registry_adds_to_a_body_is_tolerated_on_every_level() {
+    let members = set(&alpha());
+    let mut group = group_json(ID, "open", &members, &["linux-64"]);
+    group["future"] = json!(1);
+    group["members"][0]["future"] = json!(1);
+    group["members"][0]["files"][0]["future"] = json!(1);
+    let read = parse_group(&bytes(&group)).unwrap();
+    assert_eq!(read.id, ID);
+    assert_eq!(read.members[0].files.len(), 2);
+
+    let mut created = created_json(ID, "open", &members, &["noarch"]);
+    created["future"] = json!(1);
+    created["members"][0]["future"] = json!(1);
+    created["members"][0]["files"][0]["future"] = json!(1);
+    let read = parse_created(&bytes(&created)).unwrap();
+    assert_eq!(read.id, ID);
+    assert!(read.pending(&members[0], &members[0].files[0]).is_some());
+
+    let mut record = record_json("alpha", "1.0.0", "published", &["linux-64"]);
+    record["future"] = json!(1);
+    record["files"][0]["future"] = json!(1);
+    let read = parse_record(&bytes(&record)).unwrap();
+    assert_eq!(read.state, VersionState::Published);
+    assert_eq!(read.files.len(), 1);
+}
