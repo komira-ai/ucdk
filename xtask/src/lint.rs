@@ -398,10 +398,13 @@ fn scan(subject: &str, text: &str, word_exempt: &dyn Fn(usize) -> bool) -> Vec<F
         }
     }
     // A date or a phrase wrapped over two lines: the pair, reported at the first line, when
-    // neither line alone is a finding.
+    // neither line alone is a finding. The word rule reads no pair with an exempt line in it.
     for (n, pair) in lines.windows(2).enumerate() {
         let joined = format!("{} {}", pair[0], pair[1]);
         for (rule, detect) in RULES.iter().filter(|(r, _)| WRAPPED.contains(r)) {
+            if *rule == "lint-word" && (word_exempt(n) || word_exempt(n + 1)) {
+                continue;
+            }
             if let Some(found) = detect(&joined)
                 && detect(&pair[0]).is_none()
                 && detect(&pair[1]).is_none()
@@ -429,8 +432,8 @@ fn core_lines(path: &str, text: &str) -> Range<usize> {
 }
 
 /// The tree scan: `files` are (path, text) pairs. The word rule does not read the first line of
-/// rule T9 in the shared core, which names the words to forbid them; every other rule reads it, and
-/// the same line anywhere else is read by every rule.
+/// rule T9 in the shared core, nor a wrapped pair that holds it, since T9 names the words to
+/// forbid them; every other rule reads it, and the same line anywhere else is read by every rule.
 pub fn check_tree(files: &[(String, String)]) -> Vec<Finding> {
     files
         .iter()

@@ -564,3 +564,55 @@ fn the_word_rule_skips_only_rule_t9_of_the_shared_core() {
         .collect();
     assert_eq!(found, [("lint-date", format!("{copy}:1"))]);
 }
+
+/// Catches the exception reaching into the two-line scan, or hiding a finding next to it: the
+/// word rule reads no wrapped pair that holds T9's line (so its own words stay ignored), and
+/// reads the pairs after it; a date wrapped onto T9's line, or from it onto the next, is
+/// still refused, reported at the pair's first line.
+#[test]
+fn wrapped_findings_around_rule_t9_of_the_shared_core() {
+    let copy = "docs/agents/shared_core.md";
+    let word = join(&["mu", "tant"]);
+    let went = join(&["we", "nt"]);
+    let red = join(&["r", "ed"]);
+    let rules = |path: &str, text: &str| -> Vec<(&'static str, String)> {
+        check_tree(&[file(path, text)])
+            .into_iter()
+            .map(|f| (f.rule, f.subject))
+            .collect()
+    };
+    // Line 1 wraps a date onto T9's line; T9's line wraps the phrase onto line 3; lines 4 and 5
+    // wrap it again, away from T9.
+    let text = format!(
+        "- T8 BLOCK. On October\n- T9 BLOCK. 2025 no {word} and {went}\n{red} after\nthen {went}\n{red} again\n"
+    );
+    assert_eq!(
+        rules(copy, &text),
+        [
+            ("lint-date", format!("{copy}:1")),
+            ("lint-word", format!("{copy}:4")),
+        ]
+    );
+    // The same lines in the core of AGENTS.md, which starts on its line 3.
+    let agents = format!("intro\n<!-- shared-core:begin -->\n{text}<!-- shared-core:end -->\n");
+    assert_eq!(
+        rules("AGENTS.md", &agents),
+        [
+            ("lint-date", "AGENTS.md:3".to_owned()),
+            ("lint-word", "AGENTS.md:6".to_owned()),
+        ]
+    );
+    // A date wrapped from T9's line onto the next.
+    assert_eq!(
+        rules(
+            copy,
+            &format!("- T9 BLOCK. {word} in October\n2025 was the year\n")
+        ),
+        [("lint-date", format!("{copy}:1"))]
+    );
+    // Outside the core the phrase wrapped from such a line is refused, with its own words.
+    assert_eq!(
+        rules("notes.md", &format!("- T9 BLOCK. {word} {went}\n{red}\n")),
+        [("lint-word", "notes.md:1".to_owned()),]
+    );
+}

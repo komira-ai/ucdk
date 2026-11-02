@@ -9,6 +9,7 @@
 //! The functions read the texts and nothing else; `xtask/tests/agents_md.rs` holds the real
 //! files to them, and the public-repository lint finds the core's lines with [`core`].
 
+use std::fmt;
 use std::ops::Range;
 
 use crate::fetch::sha256_hex;
@@ -33,13 +34,77 @@ pub struct Core<'a> {
     pub lines: Range<usize>,
 }
 
+/// Why the shared core of an `AGENTS.md`, its copy or the copy's hash is refused. Its
+/// `Display` is the diagnostic a person reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentsError {
+    /// A marker line is not there exactly once: how many begin and end lines there are.
+    MarkerCount { begins: usize, ends: usize },
+    /// The end marker comes before the begin marker: the 1-based line of each.
+    MarkersOutOfOrder { begin: usize, end: usize },
+    /// The core differs from the copy. The first differing line, by its 1-based number in
+    /// `AGENTS.md` and in the copy, and that line with its newline in each (`None` past the end).
+    CoreDiffers {
+        agents_line: usize,
+        copy_line: usize,
+        agents: Option<String>,
+        copy: Option<String>,
+    },
+    /// The hash file is not the copy's `sha256sum` line: what it holds and what it should.
+    HashMismatch { found: String, want: String },
+}
+
+impl fmt::Display for AgentsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MarkerCount { begins, ends } => {
+                let wrong: Vec<String> = [(BEGIN, begins), (END, ends)]
+                    .into_iter()
+                    .filter(|(_, n)| **n != 1)
+                    .map(|(marker, n)| {
+                        format!("{AGENTS}: the line `{marker}` is there {n} times, not once")
+                    })
+                    .collect();
+                write!(f, "{}", wrong.join("\n"))
+            }
+            Self::MarkersOutOfOrder { begin, end } => write!(
+                f,
+                "{AGENTS}:{end}: the end of the shared core comes before its begin (line {begin})"
+            ),
+            Self::CoreDiffers {
+                agents_line,
+                copy_line,
+                agents,
+                copy,
+            } => {
+                let show = |line: &Option<String>| {
+                    line.as_ref()
+                        .map_or("the end of the text".to_owned(), |l| format!("{l:?}"))
+                };
+                write!(
+                    f,
+                    "{AGENTS}:{agents_line}: the shared core differs from {COPY}:{copy_line}: {AGENTS} has {}, the copy has {}",
+                    show(agents),
+                    show(copy)
+                )
+            }
+            Self::HashMismatch { found, want } => write!(
+                f,
+                "{HASH} is {found:?}, not {want:?} (run `sha256sum shared_core.md` in docs/agents)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AgentsError {}
+
 /// A marker line: its 1-based number, the byte offset where it starts and the one after it.
 type Marker = (usize, usize, usize);
 
 /// The shared core of `agents`: the text strictly between the line that is exactly [`BEGIN`]
 /// and the line that is exactly [`END`] (lines split at `\n` only, so a carriage return or a
 /// space makes a line no marker). Each marker must be there once, the begin before the end.
-pub fn core(agents: &str) -> Result<Core<'_>, Vec<String>> {
+pub fn core(agents: &str) -> Result<Core<'_>, AgentsError> {
     let (mut begins, mut ends): (Vec<Marker>, Vec<Marker>) = (Vec::new(), Vec::new());
     let mut start = 0;
     for (i, piece) in agents.split_inclusive('\n').enumerate() {
@@ -53,46 +118,37 @@ pub fn core(agents: &str) -> Result<Core<'_>, Vec<String>> {
         start += piece.len();
     }
     match (begins.as_slice(), ends.as_slice()) {
-        ([begin], [end]) if end.0 < begin.0 => Err(vec![format!(
-            "{AGENTS}:{}: the end of the shared core comes before its begin (line {})",
-            end.0, begin.0
-        )]),
+        ([begin], [end]) if end.0 < begin.0 => Err(AgentsError::MarkersOutOfOrder {
+            begin: begin.0,
+            end: end.0,
+        }),
         ([begin], [end]) => Ok(Core {
             text: &agents[begin.2..end.1],
             lines: begin.0 + 1..end.0,
         }),
-        _ => Err([(BEGIN, &begins), (END, &ends)]
-            .into_iter()
-            .filter(|(_, found)| found.len() != 1)
-            .map(|(marker, found)| {
-                format!(
-                    "{AGENTS}: the line `{marker}` is there {} times, not once",
-                    found.len()
-                )
-            })
-            .collect()),
+        _ => Err(AgentsError::MarkerCount {
+            begins: begins.len(),
+            ends: ends.len(),
+        }),
     }
 }
 
 /// Nothing when the core is byte for byte `copy`; otherwise the first line where they differ,
-/// named by its number in both files and quoted with its newline, so a difference in the
-/// final newline or a carriage return shows.
-pub fn same_core(core: &Core<'_>, copy: &str) -> Result<(), String> {
+/// named by its number in both files and kept with its newline, so a difference in the final
+/// newline or a carriage return shows.
+pub fn same_core(core: &Core<'_>, copy: &str) -> Result<(), AgentsError> {
     if core.text == copy {
         return Ok(());
     }
     let got: Vec<&str> = core.text.split_inclusive('\n').collect();
     let want: Vec<&str> = copy.split_inclusive('\n').collect();
     let i = got.iter().zip(&want).take_while(|(a, b)| a == b).count();
-    let show =
-        |line: Option<&&str>| line.map_or("the end of the text".to_owned(), |l| format!("{l:?}"));
-    Err(format!(
-        "{AGENTS}:{}: the shared core differs from {COPY}:{}: {AGENTS} has {}, the copy has {}",
-        core.lines.start + i,
-        i + 1,
-        show(got.get(i)),
-        show(want.get(i)),
-    ))
+    Err(AgentsError::CoreDiffers {
+        agents_line: core.lines.start + i,
+        copy_line: i + 1,
+        agents: got.get(i).map(|l| (*l).to_owned()),
+        copy: want.get(i).map(|l| (*l).to_owned()),
+    })
 }
 
 /// The line `sha256sum shared_core.md` writes: the digest in lower-case hex, two spaces, the
@@ -102,15 +158,61 @@ pub fn hash_line(copy: &[u8]) -> String {
 }
 
 /// Nothing when `hash_file` is exactly [`hash_line`] of `copy`.
-pub fn hash_matches(copy: &[u8], hash_file: &str) -> Result<(), String> {
+pub fn hash_matches(copy: &[u8], hash_file: &str) -> Result<(), AgentsError> {
     let want = hash_line(copy);
     if hash_file == want {
         Ok(())
     } else {
-        Err(format!(
-            "{HASH} is {hash_file:?}, not {want:?} (run `sha256sum shared_core.md` in docs/agents)"
-        ))
+        Err(AgentsError::HashMismatch {
+            found: hash_file.to_owned(),
+            want,
+        })
     }
+}
+
+/// The ids of the rules `text` states: the first word of each list item, at any indent (a
+/// `-`, `*` or `+` bullet, or a number followed by `.` or `)`), with any `*`, `` ` ``, `.` or `:`
+/// around it taken off, when that word is capital letters and then digits
+/// (`T1`, `R10`). A reference in prose, or a list item that starts with another word, states
+/// no rule.
+pub fn rule_ids(text: &str) -> Vec<&str> {
+    text.lines()
+        .filter_map(|line| {
+            let item = line.trim_start();
+            let rest = ["- ", "* ", "+ "]
+                .iter()
+                .find_map(|bullet| item.strip_prefix(bullet))
+                .or_else(|| {
+                    let digits =
+                        item.len() - item.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+                    let after = &item[digits..];
+                    (digits > 0)
+                        .then(|| {
+                            after
+                                .strip_prefix(". ")
+                                .or_else(|| after.strip_prefix(") "))
+                        })
+                        .flatten()
+                })?;
+            let word = rest
+                .split_whitespace()
+                .next()?
+                .trim_matches(['*', '`', '.', ':']);
+            let letters = word.len()
+                - word
+                    .trim_start_matches(|c: char| c.is_ascii_uppercase())
+                    .len();
+            let digits = &word[letters..];
+            (letters > 0 && !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+                .then_some(word)
+        })
+        .collect()
+}
+
+/// Whether `id` is a rule kept out of `AGENTS.md`: the interface and design review (`F`, `G`,
+/// and `S5`) and the hygiene layer (`H`).
+pub fn withheld(id: &str) -> bool {
+    id == "S5" || id.len() > 1 && matches!(id.as_bytes()[0], b'F' | b'G' | b'H')
 }
 
 /// A fence line: at most three spaces, then a run of three or more backticks or tildes (a run

@@ -97,6 +97,6 @@ ucdk is a Cargo workspace of Rust crates (`crates/*` and `xtask`), built with pl
 Where these rules are checked: `cargo xtask check` runs fmt and clippy (R1), cargo-deny's licences, bans and sources (R6), the
 `unsafe` rule (R2), the purity template and the dependency direction (R4, R5), the SPDX headers and the `sdk-fresh` gate
 (R10), the run-line rule (B4), the sign-off check (P4), the `main.rs` stubs (T4), the wall clock and the public-repository lint. That lint's word rule does not read
-the first line of rule T9 in the shared core (here and in its copy), since T9 names the words to forbid them; every other rule
+the first line of rule T9 in the shared core (here and in its copy), nor a wrapped pair that holds it, since T9 names the words to forbid them; every other rule
 reads it. `cargo xtask coverage` holds every crate, on its own, to 99% of its lines and 99% of its branches (T1, T3).
 `cargo xtask sdk-test` runs the SDK tests (T11, T19). `cargo test -p xtask --test agents_md` holds this file and `CLAUDE.md`.
