@@ -15,15 +15,23 @@ fn read(rel: &str) -> String {
     fs::read_to_string(xtask::workspace_root().join(rel)).expect(rel)
 }
 
-/// Catches the core of the real `AGENTS.md` drifting from its copy, the copy edited without
-/// its hash, and `CLAUDE.md` no longer importing `AGENTS.md`.
+/// Catches the core of the real `AGENTS.md` drifting from its copy.
 #[test]
-fn agents_md_core_is_the_hashed_copy_and_claude_md_imports_it() {
+fn agents_md_core_is_the_copy() {
     let agents = read(AGENTS);
-    let copy = read(COPY);
     let found = core(&agents).expect("AGENTS.md has a shared core");
-    assert_eq!(same_core(&found, &copy), Ok(()));
-    assert_eq!(hash_matches(copy.as_bytes(), &read(HASH)), Ok(()));
+    assert_eq!(same_core(&found, &read(COPY)), Ok(()));
+}
+
+/// Catches the copy edited without its hash.
+#[test]
+fn the_copy_is_the_one_its_hash_names() {
+    assert_eq!(hash_matches(read(COPY).as_bytes(), &read(HASH)), Ok(()));
+}
+
+/// Catches `CLAUDE.md` no longer importing `AGENTS.md`.
+#[test]
+fn claude_md_imports_agents_md() {
     assert!(
         imports_agents(&read(CLAUDE)),
         "{CLAUDE} has no line `{IMPORT}`"

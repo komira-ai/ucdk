@@ -379,17 +379,17 @@ fn card_id(line: &str) -> Option<String> {
 
 /// Every rule over every line of `text`; `subject` names the file or commit in the findings.
 pub fn scan_text(subject: &str, text: &str) -> Vec<Finding> {
-    scan(subject, text, &|_, _| false)
+    scan(subject, text, &|_| false)
 }
 
 /// [`scan_text`], with the word rule not applied to a line that `word_exempt` selects by its
-/// 0-based number and folded text.
-fn scan(subject: &str, text: &str, word_exempt: &dyn Fn(usize, &str) -> bool) -> Vec<Finding> {
+/// 0-based number.
+fn scan(subject: &str, text: &str, word_exempt: &dyn Fn(usize) -> bool) -> Vec<Finding> {
     let mut out = Vec::new();
     let lines: Vec<String> = text.lines().map(fold).collect();
     for (n, line) in lines.iter().enumerate() {
         for (rule, detect) in RULES {
-            if rule == "lint-word" && word_exempt(n, line) {
+            if rule == "lint-word" && word_exempt(n) {
                 continue;
             }
             if let Some(found) = detect(line) {
@@ -428,8 +428,8 @@ fn core_lines(path: &str, text: &str) -> Range<usize> {
     }
 }
 
-/// The tree scan: `files` are (path, text) pairs. The word rule does not read the line of rule
-/// T9 in the shared core, which names the words to forbid them; every other rule reads it, and
+/// The tree scan: `files` are (path, text) pairs. The word rule does not read the first line of
+/// rule T9 in the shared core, which names the words to forbid them; every other rule reads it, and
 /// the same line anywhere else is read by every rule.
 pub fn check_tree(files: &[(String, String)]) -> Vec<Finding> {
     files
@@ -437,9 +437,13 @@ pub fn check_tree(files: &[(String, String)]) -> Vec<Finding> {
         .filter(|(path, _)| !EXEMPT.contains(&path.as_str()))
         .flat_map(|(path, text)| {
             let core = core_lines(path, text);
-            scan(path, text, &|n, line| {
-                core.contains(&(n + 1)) && line.starts_with(T9)
-            })
+            // Only the first line of the core that starts as T9 does; a second one is read.
+            let t9 = text
+                .lines()
+                .enumerate()
+                .find(|(n, line)| core.contains(&(n + 1)) && fold(line).starts_with(T9))
+                .map(|(n, _)| n);
+            scan(path, text, &|n| Some(n) == t9)
         })
         .collect()
 }

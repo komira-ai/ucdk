@@ -501,7 +501,7 @@ fn pr_body_attribution_link_is_allowed() {
 }
 
 /// Catches the shared core failing the lint, and the exception for it reaching further than
-/// the one line it is for: the word rule does not read the line of rule T9 in the core's copy
+/// the one line it is for: the word rule does not read the first line of rule T9 in the core's copy
 /// or between the markers of `AGENTS.md`, and reads that line everywhere else, and every other
 /// line of the core; the other rules still read T9's line.
 #[test]
@@ -533,6 +533,9 @@ fn the_word_rule_skips_only_rule_t9_of_the_shared_core() {
         file("AGENTS.md", &agents(&t8)),
         file(copy, &t8),
         file(copy, &format!("  {t9}")),
+        // A second line of the core that starts as T9's.
+        file(copy, &format!("{t9}{t9}")),
+        file("AGENTS.md", &agents(&format!("{t9}{t9}"))),
     ];
     let found: Vec<_> = check_tree(&read)
         .into_iter()
@@ -549,6 +552,8 @@ fn the_word_rule_skips_only_rule_t9_of_the_shared_core() {
             at("AGENTS.md:3"),
             at(&format!("{copy}:1")),
             at(&format!("{copy}:1")),
+            at(&format!("{copy}:2")),
+            at("AGENTS.md:4"),
         ]
     );
     // A date on T9's line in the copy is still refused.
