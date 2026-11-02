@@ -171,7 +171,7 @@ pub fn hash_matches(copy: &[u8], hash_file: &str) -> Result<(), AgentsError> {
 }
 
 /// The ids of the rules `text` states: the first word of each list item, at any indent (a
-/// `-`, `*` or `+` bullet, or a number followed by `.` or `)`), with any `*`, `` ` ``, `.` or `:`
+/// `-`, `*` or `+` bullet, or a number followed by `.` or `)`, then a space or a tab), with any `*`, `` ` ``, `.` or `:`
 /// around it taken off, when that word is capital letters and then digits
 /// (`T1`, `R10`). A reference in prose, or a list item that starts with another word, states
 /// no rule.
@@ -179,21 +179,21 @@ pub fn rule_ids(text: &str) -> Vec<&str> {
     text.lines()
         .filter_map(|line| {
             let item = line.trim_start();
-            let rest = ["- ", "* ", "+ "]
-                .iter()
-                .find_map(|bullet| item.strip_prefix(bullet))
-                .or_else(|| {
+            // The marker: a bullet, or digits and `.` or `)`; then a space or a tab.
+            let marker = match item.chars().next() {
+                Some('-' | '*' | '+') => 1,
+                _ => {
                     let digits =
                         item.len() - item.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-                    let after = &item[digits..];
-                    (digits > 0)
-                        .then(|| {
-                            after
-                                .strip_prefix(". ")
-                                .or_else(|| after.strip_prefix(") "))
-                        })
-                        .flatten()
-                })?;
+                    let closed =
+                        digits > 0 && matches!(item[digits..].chars().next(), Some('.' | ')'));
+                    if closed { digits + 1 } else { 0 }
+                }
+            };
+            let rest = item
+                .get(marker..)
+                .filter(|_| marker > 0)?
+                .strip_prefix([' ', '\t'])?;
             let word = rest
                 .split_whitespace()
                 .next()?

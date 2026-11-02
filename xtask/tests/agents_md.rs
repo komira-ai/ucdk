@@ -87,10 +87,15 @@ fn rule_ids_are_the_first_word_of_a_list_item() {
 - **H6** bold
 - `H7`: in code, with a colon
 - T19. with a dot
+-\tH9 dash and a tab
+3.\tH3 number and a tab
+7)\tT7 parenthesis and a tab
 See F1 and H2 in prose.
 - Follow F1 first.
 -F1 no space after the bullet
 1.H1 no space after the number
+-\u{a0}H1 a no-break space is no separator
+1:\tH1 a colon is no number marker
 - f1 lower case
 - F no digits
 - 1F digits first
@@ -100,9 +105,21 @@ See F1 and H2 in prose.
 ";
     assert_eq!(
         rule_ids(text),
-        ["F1", "H2", "G3", "H4", "H5", "S5", "H6", "H7", "T19"]
+        [
+            "F1", "H2", "G3", "H4", "H5", "S5", "H6", "H7", "T19", "H9", "H3", "T7"
+        ]
     );
     assert_eq!(rule_ids(""), Vec::<&str>::new());
+    // A tab-separated withheld rule is found, and refused, like a space-separated one.
+    let tabbed = rule_ids("-\tH1 BLOCK. x\n1.\tF1 x\n-\tT1 BLOCK. y\n");
+    assert_eq!(tabbed, ["H1", "F1", "T1"]);
+    assert_eq!(
+        tabbed
+            .into_iter()
+            .filter(|id| withheld(id))
+            .collect::<Vec<_>>(),
+        ["H1", "F1"]
+    );
 }
 
 /// Catches a withheld rule let through, or a stated one withheld: F, G and H rules and S5 are
