@@ -150,11 +150,16 @@ impl Publisher for Probe {
     }
 }
 
+/// What a [`Watched`] build system does with the report path after a test invocation.
+pub type AfterTest<'a> = Box<dyn FnMut(&str) + Send + 'a>;
+
 /// A build system that does something just before each test invocation, and records the report
 /// path it was given and whether the directory of it existed.
 pub struct Watched<'a> {
     pub inner: &'a mut FakeBuildSystem,
     pub before_test: Box<dyn FnMut() + Send + 'a>,
+    /// Done with the report path just after each test invocation returned, when set.
+    pub after_test: Option<AfterTest<'a>>,
     pub reports: Vec<(String, bool)>,
 }
 
@@ -163,6 +168,7 @@ impl<'a> Watched<'a> {
         Self {
             inner,
             before_test: Box::new(before_test),
+            after_test: None,
             reports: Vec::new(),
         }
     }
@@ -190,7 +196,11 @@ impl BuildSystemSeam for Watched<'_> {
         let directory = Path::new(report).parent().expect("a directory").is_dir();
         self.reports.push((report.to_owned(), directory));
         (self.before_test)();
-        self.inner.test(inv, heartbeat)
+        let outcome = self.inner.test(inv, heartbeat);
+        if let Some(after) = self.after_test.as_mut() {
+            after(report);
+        }
+        outcome
     }
 
     fn copy_out(&mut self, out: &Located, into: &mut dyn EntryWriter) -> Result<(), SeamError> {

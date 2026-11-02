@@ -8,11 +8,19 @@
 //! confirmed after the last pass. A target that failed or ran nothing leaves the intent, which
 //! a rerun runs again: a failure is not a state, and the report of the run that failed names
 //! the target.
+//!
+//! Each invocation writes its report into a directory of its own under the scratch directory,
+//! allocated with an exclusive create so that no other invocation, of this engine or of another
+//! one sharing the scratch directory, can hold the same one, and a directory left behind by an
+//! earlier invocation is never reused. It is removed after the invocation; a directory that
+//! cannot be removed makes the row unreadable, never a pass.
 
 use std::fs;
-use std::path::Path;
+use std::io;
+use std::path::{Path, PathBuf};
 
-use ucdk_ledger::State;
+use sha2::{Digest, Sha256};
+use ucdk_ledger::{GuardError, State};
 use ucdk_release::action_input::{Given, action_input};
 use ucdk_release::codec;
 use ucdk_release::hashes::machine_hash;
@@ -32,8 +40,9 @@ pub const TEST_ASSERTION: &str = "the test target passes";
 
 /// What one invocation of the build system came to.
 enum Seen {
-    /// The lease was lost during the invocation, and the runner stopped what it started.
-    Lost,
+    /// A progress event could not keep the lease, and the runner stopped what it started: the
+    /// lease was lost, or the ledger could not be read or written.
+    Stopped(GuardError),
     Row(RowState, String),
 }
 
@@ -54,6 +63,10 @@ impl Engine<'_> {
         let records = self.records()?;
         match records.action(&stage.name, &action.name) {
             Some((found, State::Confirmed)) if found.input == input => {
+                // The input digest leaves out the run id, the timestamp and the parts of the
+                // machine the action does not read: a result is taken as this run's only when
+                // the run record pins this run.
+                self.check_pin(&records)?;
                 let message = "confirmed already, with the same inputs";
                 return Ok(Finished {
                     verdict: Verdict::Noop,
@@ -105,8 +118,10 @@ impl Engine<'_> {
             Verdict::Indeterminate => (Reason::BuildFailed, what_failed(&rows)),
             _ => (Reason::Validation, what_failed(&rows)),
         };
+        // Whatever the work came to, a lease another holder took while it ran is what the
+        // request reports.
+        leases.settle()?;
         if verdict == Verdict::Succeeded {
-            leases.settle()?;
             self.put(leases, &record, State::Confirmed)?;
         }
         Ok(Finished {
@@ -127,8 +142,22 @@ impl Engine<'_> {
     /// ledger has none: the machine, revision and stamp are pinned by the first stage that
     /// holds a Build or Test action, and a later request that presents another is refused.
     fn pin(&self, leases: &Leases<'_>, records: &Records) -> Flow<()> {
+        let record = codec::Record::Run(self.wanted_run());
+        match self.check_pin(records)? {
+            None => {
+                self.put(leases, &record, State::Intent)?;
+                self.put(leases, &record, State::Confirmed)
+            }
+            Some(State::Confirmed) => Ok(()),
+            // A run that was killed between the two writes left an intent for the same values.
+            Some(_) => self.put(leases, &record, State::Confirmed),
+        }
+    }
+
+    /// The run record this engine's run pins.
+    fn wanted_run(&self) -> codec::Run {
         let stamp = self.run.stamp;
-        let wanted = codec::Run {
+        codec::Run {
             run_id: self.run.id.to_owned(),
             machine: machine_hash(self.machine.machine()),
             revision: self.run.revision.to_owned(),
@@ -136,11 +165,15 @@ impl Engine<'_> {
             build: stamp.build_number,
             commit: stamp.source_commit.clone(),
             timestamp: stamp.timestamp_ms,
-        };
-        let record = codec::Record::Run(wanted.clone());
+        }
+    }
+
+    /// Refuses a run record that pins other values than this run's, naming them, and says in
+    /// what state the record is, or that there is none. Writes nothing.
+    pub(crate) fn check_pin(&self, records: &Records) -> Flow<Option<State>> {
+        let wanted = self.wanted_run();
         let Some((found, state)) = records.run() else {
-            self.put(leases, &record, State::Intent)?;
-            return self.put(leases, &record, State::Confirmed);
+            return Ok(None);
         };
         let differs: Vec<&str> = [
             ("run id", found.run_id != wanted.run_id),
@@ -166,16 +199,14 @@ impl Engine<'_> {
                 ),
             ));
         }
-        // A run that was killed between the two writes left an intent for the same values.
-        if state == State::Confirmed {
-            Ok(())
-        } else {
-            self.put(leases, &record, State::Confirmed)
-        }
+        Ok(Some(state))
     }
 
     /// Runs each target in the order listed, stopping at the first that is not a pass; the rest
-    /// are rows that were not reached.
+    /// are rows that were not reached. Before each target the lease is made good again
+    /// ([`Leases::settle`]), so a target that ran silently past the lease does not stop the
+    /// next one when nothing else touched the ledger, and a later target never starts under a
+    /// lease another holder took.
     fn targets(
         &mut self,
         leases: &Leases<'_>,
@@ -200,11 +231,19 @@ impl Engine<'_> {
                 rows.push(row(&name, RowState::RowNotReached, detail));
                 continue;
             }
-            leases.renew()?;
-            let dir = self.scratch.join(format!(
-                "{}-{}-a{}-{index}",
-                stage.name, action.name, self.run.attempt
-            ));
+            leases.settle()?;
+            let dir = match self.allocate(&stage.name, &action.name, index) {
+                Ok(dir) => dir,
+                Err(e) => {
+                    let detail = format!(
+                        "a report directory could not be made under {}: {e}",
+                        self.scratch.display()
+                    );
+                    reached = false;
+                    rows.push(row(&name, RowState::RowUnreadable, detail));
+                    continue;
+                }
+            };
             let report = dir.join(report_name).display().to_string();
             let invocation = Invocation {
                 system: &system,
@@ -216,15 +255,13 @@ impl Engine<'_> {
                 platform,
             };
             match self.invoke(leases, &dir, &invocation) {
-                Seen::Lost => {
-                    return Err(Finished::stopped(
-                        Verdict::Interrupted,
-                        Reason::LeaseLost,
-                        format!(
-                            "the lease was lost while {} ran; nothing more was recorded",
-                            target.label
-                        ),
-                    ));
+                Seen::Stopped(error) => {
+                    let mut stop = Finished::from(error);
+                    stop.message = format!(
+                        "{}; the invocation of {} was stopped and nothing more was recorded",
+                        stop.message, target.label
+                    );
+                    return Err(stop);
                 }
                 Seen::Row(state, detail) => {
                     reached = state == RowState::RowPassed;
@@ -235,22 +272,46 @@ impl Engine<'_> {
         Ok(rows)
     }
 
-    /// One invocation of the build system in a report directory of its own, made for it and
-    /// removed after it. A result is a pass only when the build system says so and a test ran.
-    fn invoke(&mut self, leases: &Leases<'_>, dir: &Path, invocation: &Invocation<'_>) -> Seen {
-        let _ = fs::remove_dir_all(dir);
-        if let Err(e) = fs::create_dir_all(dir) {
-            return Seen::Row(
-                RowState::RowUnreadable,
-                format!(
-                    "the report directory {} could not be made: {e}",
-                    dir.display()
-                ),
-            );
+    /// A report directory for the invocation of target `index` of `stage`/`action`, made with an
+    /// exclusive create: the name is a digest of the run, the attempt and the target, and a
+    /// counter that moves past every name another invocation or an earlier one holds.
+    fn allocate(&self, stage: &str, action: &str, index: usize) -> io::Result<PathBuf> {
+        let mut hasher = Sha256::new();
+        for part in [
+            self.run.id,
+            stage,
+            action,
+            &self.run.attempt.to_string(),
+            &index.to_string(),
+        ] {
+            // Each part is preceded by its length, so no two lists of parts read the same.
+            hasher.update((part.len() as u64).to_be_bytes());
+            hasher.update(part.as_bytes());
         }
-        let seen = match self.seams.build_system.test(invocation, leases) {
-            Ok(done) if done.passed && done.ran > 0 => Seen::Row(RowState::RowPassed, done.tail),
-            Ok(done) => Seen::Row(
+        let digest = hasher.finalize();
+        let key: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+        let mut n: u64 = 0;
+        loop {
+            let dir = self.scratch.join(format!("test-{key}-{n}"));
+            match fs::create_dir(&dir) {
+                Ok(()) => return Ok(dir),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => n += 1,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// One invocation of the build system in the report directory allocated for it, removed
+    /// after it. A result is a pass only when the build system says so and a test ran.
+    fn invoke(&mut self, leases: &Leases<'_>, dir: &Path, invocation: &Invocation<'_>) -> Seen {
+        let result = self.seams.build_system.test(invocation, leases);
+        let seen = match (leases.beat_failure(), result) {
+            (Some(error), _) => Seen::Stopped(error),
+            (None, Err(SeamError::Refused(Reason::LeaseLost))) => Seen::Stopped(GuardError::Lost),
+            (None, Ok(done)) if done.passed && done.ran > 0 => {
+                Seen::Row(RowState::RowPassed, done.tail)
+            }
+            (None, Ok(done)) => Seen::Row(
                 RowState::RowFailed,
                 if done.ran == 0 {
                     "no test ran".to_owned()
@@ -258,11 +319,19 @@ impl Engine<'_> {
                     done.tail
                 },
             ),
-            Err(SeamError::Refused(Reason::LeaseLost)) => Seen::Lost,
-            Err(SeamError::Permanent(why)) => Seen::Row(RowState::RowFailed, why),
-            Err(other) => Seen::Row(RowState::RowUnreadable, other.to_string()),
+            (None, Err(SeamError::Permanent(why))) => Seen::Row(RowState::RowFailed, why),
+            (None, Err(other)) => Seen::Row(RowState::RowUnreadable, other.to_string()),
         };
-        let _ = fs::remove_dir_all(dir);
-        seen
+        // A stop stands whatever the removal came to; a row does not, when the directory stays.
+        match (seen, fs::remove_dir_all(dir)) {
+            (Seen::Row(..), Err(e)) => Seen::Row(
+                RowState::RowUnreadable,
+                format!(
+                    "the report directory {} could not be removed: {e}",
+                    dir.display()
+                ),
+            ),
+            (seen, _) => seen,
+        }
     }
 }

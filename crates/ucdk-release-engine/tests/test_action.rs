@@ -7,6 +7,7 @@ mod common;
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::path::{Path, PathBuf};
 
 use common::{REVISION, Rig, Scripted, Watched, test_row};
 use ucdk_core::RecordPath;
@@ -55,11 +56,16 @@ fn a_target_that_passes_with_a_test_run_is_a_pass() {
     };
     assert_eq!(command.argv[..2], ["buck2", "test"]);
     assert_eq!(command.argv.last().map(String::as_str), Some(SET_TEST));
-    let report_flag = format!(
-        "--event-log={}/build-test-a1-0/events.json-lines",
-        rig.scratch.path().display()
+    let prefix = format!("--event-log={}/test-", rig.scratch.path().display());
+    let report_flag = command
+        .argv
+        .iter()
+        .find(|a| a.starts_with(&prefix))
+        .unwrap_or_else(|| panic!("a report under the scratch directory: {:?}", command.argv));
+    assert!(
+        report_flag.ends_with("-0/events.json-lines"),
+        "{report_flag}"
     );
-    assert!(command.argv.contains(&report_flag), "{:?}", command.argv);
 
     // The ledger says: the action is confirmed for these inputs, the run is pinned, and the
     // lease was given back.
@@ -81,7 +87,10 @@ fn a_target_that_passes_with_a_test_run_is_a_pass() {
     assert_eq!(run.machine, machine_hash(rig.machine.machine()));
     assert_eq!(run.revision, REVISION);
     assert_eq!(run.version, "1.2.3");
-    assert_eq!((run.build, run.commit.as_str()), (41, "abc123"));
+    assert_eq!(
+        (run.build, run.commit.as_str()),
+        (41, common::SOURCE_COMMIT)
+    );
     assert_eq!(rig.ledger.lease(), None);
 }
 
@@ -296,13 +305,22 @@ fn the_report_directory_is_made_per_invocation_under_scratch_and_removed() {
     let reports = watched.reports.clone();
     drop(watched);
 
-    let paths: Vec<&str> = reports.iter().map(|(p, _)| p.as_str()).collect();
-    assert_eq!(
-        paths,
-        [
-            format!("{}/build-test-a1-0/events.json-lines", scratch.display()),
-            format!("{}/build-test-a1-1/events.json-lines", scratch.display()),
-        ]
+    // One directory per invocation, each of its own, both directly under the scratch directory.
+    let dirs: Vec<PathBuf> = reports
+        .iter()
+        .map(|(p, _)| Path::new(p).parent().expect("a directory").to_owned())
+        .collect();
+    assert_eq!(dirs.len(), 2);
+    assert_ne!(dirs[0], dirs[1]);
+    assert!(
+        dirs.iter().all(|d| d.parent() == Some(scratch.as_path())),
+        "{dirs:?}"
+    );
+    assert!(
+        reports
+            .iter()
+            .all(|(p, _)| p.ends_with("/events.json-lines")),
+        "{reports:?}"
     );
     assert!(
         reports.iter().all(|(_, made)| *made),
@@ -313,22 +331,92 @@ fn the_report_directory_is_made_per_invocation_under_scratch_and_removed() {
         Vec::<String>::new(),
         "and is removed"
     );
+}
 
-    // A directory left by a run that was killed is not read by the next one.
-    let stale = scratch.join("verify-unit-a2-0");
-    fs::create_dir_all(&stale).expect("make the stale directory");
-    fs::write(stale.join("events.json-lines"), "stale").expect("write");
-    rig.attempt = 2;
-    rig.run_id = "r1".to_owned();
+#[test]
+fn a_directory_left_at_the_name_is_never_reused_nor_removed() {
+    // The first invocation fails, so the action is run again under the same name.
+    let mut rig = Rig::new("stale_dir");
+    rig.build.test_fails("//release:set_test");
     let mut build = FakeBuildSystem::new(BuildSystemKind::Buck2, &rig.clock);
-    let mut watched = Watched::new(&mut build, || {
-        assert!(
-            !stale.join("events.json-lines").exists(),
-            "the stale report was removed before the invocation"
-        );
-    });
-    rig.handle_with(&mut watched, "verify", &["action:unit"]);
-    assert_eq!(rig.scratch.entries(), Vec::<String>::new());
+    build.test_fails("//release:set_test");
+    let mut first = Watched::new(&mut build, || {});
+    rig.handle_with(&mut first, "build", &["action:test"]);
+    let used = Path::new(&first.reports[0].0)
+        .parent()
+        .expect("a directory")
+        .to_owned();
+    drop(first);
+    assert!(!used.exists(), "removed after the invocation");
+
+    // A run that was killed left that directory, with a report in it.
+    fs::create_dir(&used).expect("make the stale directory");
+    let stale = used.join("events.json-lines");
+    fs::write(&stale, "stale").expect("write");
+    let mut build = FakeBuildSystem::new(BuildSystemKind::Buck2, &rig.clock);
+    let mut again = Watched::new(&mut build, || {});
+    let outcome = rig.handle_with(&mut again, "build", &["action:test"]);
+    assert_eq!(outcome.verdict, Verdict::Succeeded, "{}", outcome.message);
+    let fresh = Path::new(&again.reports[0].0)
+        .parent()
+        .expect("a directory")
+        .to_owned();
+    drop(again);
+    assert_ne!(fresh, used, "the stale directory was not taken");
+    assert!(
+        fresh.to_string_lossy().ends_with("-1"),
+        "{}",
+        fresh.display()
+    );
+    assert_eq!(
+        fs::read_to_string(&stale).expect("still there"),
+        "stale",
+        "and what is not this invocation's is not removed"
+    );
+    assert_eq!(
+        rig.scratch.entries(),
+        [used
+            .file_name()
+            .expect("a name")
+            .to_string_lossy()
+            .into_owned()]
+    );
+}
+
+#[test]
+fn a_report_directory_that_cannot_be_removed_is_an_unreadable_row() {
+    let mut rig = Rig::new("stuck_dir");
+    let mut build = FakeBuildSystem::new(BuildSystemKind::Buck2, &rig.clock);
+    let reports = std::sync::Mutex::new(Vec::new());
+    // The build system leaves a file where its report directory was: removing it fails.
+    let mut watched = Watched::new(&mut build, || {});
+    watched.after_test = Some(Box::new(|report: &str| {
+        let dir = Path::new(report).parent().expect("a directory").to_owned();
+        fs::remove_dir_all(&dir).expect("remove");
+        fs::write(&dir, "not a directory").expect("write");
+        reports.lock().expect("lock").push(dir);
+    }));
+    let outcome = rig.handle_with(&mut watched, "build", &["action:test"]);
+    drop(watched);
+    assert_eq!(outcome.verdict, Verdict::Indeterminate);
+    assert_eq!(outcome.reason, Reason::BuildFailed);
+    let row = &outcome.actions[0].rows[0];
+    assert_eq!(state_of(row), RowState::RowUnreadable);
+    let dir = reports.into_inner().expect("lock").remove(0);
+    assert!(
+        row.detail.starts_with(&format!(
+            "the report directory {} could not be removed",
+            dir.display()
+        )),
+        "{}",
+        row.detail
+    );
+    let (_, state) = rig.ledger.action("build", "test").expect("the record");
+    assert_eq!(
+        state,
+        State::Intent,
+        "a pass that left its directory is not confirmed"
+    );
 }
 
 #[test]

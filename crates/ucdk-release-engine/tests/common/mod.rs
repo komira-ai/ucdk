@@ -51,6 +51,7 @@ use ucdk_release_seams::{
 
 pub const PLATFORM: &str = "linux-x86_64";
 pub const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+pub const SOURCE_COMMIT: &str = "89abcdef0123456789abcdef0123456789abcdef";
 pub const START: u64 = 1_000_000;
 pub const TTL: Duration = Duration::from_secs(600);
 pub const GENERATION: &str = "r1-a1";
@@ -59,7 +60,7 @@ pub fn stamp() -> BuildStamp {
     BuildStamp {
         version: "1.2.3".to_owned(),
         build_number: 41,
-        source_commit: "abc123".to_owned(),
+        source_commit: SOURCE_COMMIT.to_owned(),
         timestamp_ms: 1_700_000_000_000,
     }
 }

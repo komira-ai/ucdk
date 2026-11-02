@@ -9,16 +9,23 @@ use std::time::Duration;
 use ucdk_ledger::{Change, DEFAULT_LEASE_TTL, LeaseGuard, Ledger, State};
 use ucdk_release::codec;
 use ucdk_release::machine::{Checked, tests, validations};
+use ucdk_release::revision::{BuildStamp as CheckedStamp, Revision};
 use ucdk_release::rows::{ExpectedRow, account_rows};
 use ucdk_release::selection::{Holder, Item, Selection};
-use ucdk_release_proto::v1::{Action, BuildStamp, Reason, Row, Test, Validation, Verdict};
+use ucdk_release_proto::v1::{
+    Action, BuildStamp, BuildSystem as BuildSystemSpec, Reason, Row, Test, Validation, Verdict,
+};
 use ucdk_release_seams::{ArtifactStore, BuildSystem, Pause, Publisher};
 
 use crate::leases::Leases;
 use crate::outcome::{Finished, Flow, Outcome, Report};
 use crate::records::{Records, row};
 
-/// What the driver gives a run: who it is, and the facts every action of it sees.
+/// What the driver gives a run: who it is, and the facts every action of it sees. The engine
+/// checks them before it takes the lease ([`Engine::handle`]): the attempt is at least 1, the
+/// revision and the stamp's source commit are full commit ids, and the stamp's build number and
+/// timestamp are positive. A run that breaks one is refused with `SOURCE`, and nothing is run or
+/// written.
 #[derive(Debug, Clone, Copy)]
 pub struct Run<'a> {
     /// The run id. One release is one run id across all its stages.
@@ -96,6 +103,26 @@ impl<'a> Engine<'a> {
     /// request that is refused for its shape takes no lease and writes nothing.
     pub fn handle(&mut self, request: &Request) -> Outcome {
         let machine = self.machine;
+        if let Err(why) = self.check_run() {
+            return Outcome::halted(Verdict::Refused, Reason::Source, why);
+        }
+        let named = machine
+            .machine()
+            .build_system
+            .as_ref()
+            .map(BuildSystemSpec::kind);
+        let given = self.seams.build_system.kind();
+        if named != Some(given) {
+            return Outcome::halted(
+                Verdict::Refused,
+                Reason::BuildFailed,
+                format!(
+                    "the build system given is {}, and the machine names {}",
+                    given.as_str_name(),
+                    named.unwrap_or_default().as_str_name()
+                ),
+            );
+        }
         let Some(stage) = machine.stage(&request.stage) else {
             return Outcome::halted(
                 Verdict::Refused,
@@ -172,6 +199,24 @@ impl<'a> Engine<'a> {
         }
         leases.release();
         outcome
+    }
+
+    /// The facts of the run, checked by the rules of the checked revision and stamp types.
+    fn check_run(&self) -> Result<(), String> {
+        let run = &self.run;
+        if run.attempt == 0 {
+            return Err("the attempt is 0; attempts count from 1".to_owned());
+        }
+        Revision::parse(run.revision).map_err(|e| format!("the run's revision {e}"))?;
+        let signed = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
+        CheckedStamp::new(
+            run.revision,
+            &run.stamp.source_commit,
+            signed(run.stamp.build_number),
+            signed(run.stamp.timestamp_ms),
+        )
+        .map_err(|e| format!("the run's stamp: {e}"))?;
+        Ok(())
     }
 
     /// The release records of the run ledger.

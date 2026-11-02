@@ -61,6 +61,9 @@ impl Engine<'_> {
         decl: &Validation,
     ) -> Flow<Finished> {
         let records = self.records()?;
+        // A validation pins nothing, and is not taken as this run's when the run record pins
+        // another run.
+        self.check_pin(&records)?;
         let (set, hash) = self.load_set(&records, stage)?;
         let closure = decl.kind() == ValidationKind::SetClosure;
         if closure
@@ -94,8 +97,10 @@ impl Engine<'_> {
             self.read_back(&wanted, decl.wait_polls)
         };
         let verdict = accounted(&expected, &rows)?;
+        // Whatever the reading came to, a lease another holder took while it read is what the
+        // request reports.
+        leases.settle()?;
         if verdict == Verdict::Succeeded {
-            leases.settle()?;
             self.put(leases, &record(closure.then_some(hash)), State::Confirmed)?;
         }
         let (reason, message) = match verdict {

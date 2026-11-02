@@ -10,10 +10,11 @@
 //!   from the store, `CHANNEL_READBACK` over a channel read through its publisher
 //!   ([`validation`] holds the rules).
 //!
-//! The run's lease is taken after every refusal that needs no ledger, renewed before each
-//! invocation, kept alive on each progress event the build system reports, and given back
-//! however the request ended. A result that comes after a silence longer than the lease is
-//! recorded by taking the lease again when no one else touched the ledger.
+//! The run's lease is taken after every refusal that needs no ledger, made good again before
+//! each invocation and after each result, kept alive on each progress event the build system
+//! reports, and given back however the request ended. A lease that lapsed during a silence
+//! longer than it is taken again only when no one else touched the ledger since; a lease that
+//! another holder took is reported as lost whatever the work came to.
 //!
 //! The engine reads no clock: time reaches it through the ledger, and a poll is a counted
 //! [`Pause`](ucdk_release_seams::Pause). The only effect of its own is the directory it makes
