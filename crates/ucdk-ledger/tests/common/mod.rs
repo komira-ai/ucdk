@@ -4,6 +4,7 @@
 //! records the tests write, both ledgers behind one type, a ledger that can be made to fail,
 //! and a counter with a hook that stands in for the calls a lease guards.
 
+pub mod hook;
 pub mod release;
 
 use std::collections::BTreeSet;
@@ -184,6 +185,7 @@ pub struct FlakyLedger {
     fail_reads: AtomicBool,
     fail_acquire: AtomicBool,
     lose_acquire_answer: AtomicBool,
+    lose_acquire_if_answer: AtomicBool,
     fail_release: AtomicBool,
     acquire_calls: AtomicU64,
     acquire_if_calls: AtomicU64,
@@ -209,6 +211,7 @@ impl FlakyLedger {
             fail_reads: AtomicBool::default(),
             fail_acquire: AtomicBool::default(),
             lose_acquire_answer: AtomicBool::default(),
+            lose_acquire_if_answer: AtomicBool::default(),
             fail_release: AtomicBool::default(),
             acquire_calls: AtomicU64::default(),
             acquire_if_calls: AtomicU64::default(),
@@ -251,6 +254,12 @@ impl FlakyLedger {
     /// landed and its answer was lost.
     pub fn lose_acquire_answer(&self, on: bool) {
         self.lose_acquire_answer.store(on, Ordering::SeqCst);
+    }
+
+    /// Makes every `acquire_if` reach the ledger and then fail as unavailable, as when the
+    /// conditional grant landed and its answer was lost.
+    pub fn lose_acquire_if_answer(&self, on: bool) {
+        self.lose_acquire_if_answer.store(on, Ordering::SeqCst);
     }
 
     /// Makes every release fail as unavailable, whether or not the lease is given back.
@@ -328,7 +337,11 @@ impl Ledger for FlakyLedger {
             return Err(error);
         }
         self.acquire_if_calls.fetch_add(1, Ordering::SeqCst);
-        self.inner.acquire_if(holder, ttl, token, fence)
+        let lease = self.inner.acquire_if(holder, ttl, token, fence)?;
+        if self.lose_acquire_if_answer.load(Ordering::SeqCst) {
+            return Err(LeaseError::Unavailable("the answer was lost".to_owned()));
+        }
+        Ok(lease)
     }
 
     fn renew(&self, fence: Fence, ttl: Duration) -> Result<Lease, LedgerError> {

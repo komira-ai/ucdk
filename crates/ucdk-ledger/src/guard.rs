@@ -18,9 +18,7 @@
 use std::fmt;
 use std::time::Duration;
 
-use ucdk_core::millis;
-
-use crate::lease::{Fence, LeaseError};
+use crate::lease::{Fence, LeaseError, LeaseState};
 use crate::record::{Change, Ledger, LedgerError, Token};
 
 /// How long a lease lasts when the caller has no reason to choose: the holder renews before each
@@ -116,7 +114,10 @@ impl<'a> LeaseGuard<'a> {
     /// # Errors
     ///
     /// [`GuardError::Held`] when another holder has it, [`GuardError::Unconfirmed`] when the
-    /// ledger could not say whether the grant landed, [`GuardError::Ledger`] otherwise.
+    /// ledger could not say whether the grant landed, [`GuardError::Lost`] when the grant was
+    /// displaced before the guard could read the document under it (it lapsed, or the lease was
+    /// granted again, in between: no guard is made, and nothing is written), [`GuardError::Ledger`]
+    /// otherwise.
     pub fn acquire(
         ledger: &'a dyn Ledger,
         holder: impl Into<String>,
@@ -125,12 +126,29 @@ impl<'a> LeaseGuard<'a> {
         let holder = holder.into();
         match ledger.acquire(&holder, ttl) {
             Ok(lease) => {
-                // While the lease is live no one else can write, so the document stays at this
-                // token until the guard writes. A read that fails leaves the grant in doubt.
-                let last = ledger
+                // While the lease is live no unfenced writer gets in, so the document stays at
+                // this token until the guard writes. A read that fails leaves the grant in doubt.
+                let snapshot = ledger
                     .read()
-                    .map_err(|e| GuardError::Unconfirmed { why: e.to_string() })?
-                    .token;
+                    .map_err(|e| GuardError::Unconfirmed { why: e.to_string() })?;
+                // The read is a second call, and the grant may not have outlived the gap (the
+                // caller stalled until it lapsed, and another holder, or another attempt of
+                // this one, took the lease). The snapshot is the baseline only when it still
+                // shows this grant: the highest fence is the granted one, and the lease on the
+                // document is this holder's under it and live at the snapshot's own clock
+                // reading. Otherwise the guard was displaced before it began. A write that
+                // landed under this fence in the gap is part of the document as read, and the
+                // baseline is that document; the fence is still ours.
+                let ours = snapshot.fence == lease.fence
+                    && snapshot.lease.as_ref().is_some_and(|held| {
+                        held.holder == holder
+                            && held.fence == lease.fence
+                            && held.state(snapshot.at) == LeaseState::Live
+                    });
+                if !ours {
+                    return Err(GuardError::Lost);
+                }
+                let last = snapshot.token;
                 Ok(Self {
                     ledger,
                     holder,
@@ -230,9 +248,10 @@ impl<'a> LeaseGuard<'a> {
 
     /// Extends the lease, but only when less than half of the guard's `ttl` is left by the
     /// ledger's own clock (the reading taken with the read of the document), so a holder that
-    /// reports progress often does not write the ledger on every report. A lease that is not
-    /// this guard's any more, or that has lapsed, is not "fresh", so the renewal is made and the
-    /// ledger's answer says so.
+    /// reports progress often does not write the ledger on every report. Exactly half left is
+    /// not renewed; the comparison is exact in nanoseconds, so a `ttl` of odd milliseconds is
+    /// not rounded down. A lease that is not this guard's any more, or that has lapsed, is not
+    /// "fresh", so the renewal is made and the ledger's answer says so.
     ///
     /// # Errors
     ///
@@ -240,9 +259,11 @@ impl<'a> LeaseGuard<'a> {
     pub fn renew_if_due(&mut self) -> Result<(), GuardError> {
         self.check()?;
         let snapshot = self.ledger.read().map_err(|e| self.classify(e))?;
-        let half = millis(self.ttl) / 2;
         let fresh = snapshot.lease.is_some_and(|held| {
-            held.fence == self.fence && held.expires_at.saturating_sub(snapshot.at) >= half
+            let remaining = held.expires_at.saturating_sub(snapshot.at);
+            held.fence == self.fence
+                && held.expires_at > snapshot.at
+                && u128::from(remaining) * 2_000_000 >= self.ttl.as_nanos()
         });
         if fresh { Ok(()) } else { self.renew() }
     }

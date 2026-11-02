@@ -256,14 +256,85 @@ fn acquire_if_refuses_a_grant_made_since_even_to_the_same_holder() {
 #[test]
 fn acquire_if_still_refuses_another_holders_live_lease() {
     on_every_clocked_ledger("acquire_if_held", |ledger, _| {
-        let read = ledger.read().expect("read");
-        ledger.acquire("alice", TTL).expect("acquire");
-        // The precondition is stale as well, and the holder is what is reported.
-        let refused = ledger.acquire_if("bob", TTL, &read.token, Fence::new(7));
+        let lease = ledger.acquire("alice", TTL).expect("acquire");
+        let stale = ledger.read().expect("read").token;
+        // A fenced write moves the document token; the fence bob presents is the current one,
+        // so only his token is stale.
+        ledger
+            .write_fenced(lease.fence, &stale, Change::Put(record("app/run")))
+            .expect("write");
+        let before = ledger.read().expect("read");
+        assert_ne!(before.token, stale, "the token moved");
+        let refused = ledger.acquire_if("bob", TTL, &stale, before.fence);
         assert!(
             matches!(refused, Err(LeaseError::Held { ref holder, .. }) if holder == "alice"),
             "{refused:?}"
         );
+        assert_eq!(ledger.read().expect("read"), before, "nothing changed");
+    });
+}
+
+#[test]
+fn acquire_if_refuses_another_holder_until_the_skew_bound_has_passed() {
+    on_every_clocked_ledger("acquire_if_skew", |ledger, clock| {
+        let lease = ledger.acquire("alice", TTL).expect("acquire");
+        let read = ledger.read().expect("read");
+        let skew = MAX_CLOCK_SKEW.as_millis() as u64;
+        // Just inside the bound: lapsed, and still alice's.
+        for at in [lease.expires_at, lease.expires_at + skew - 1] {
+            move_to(clock, at);
+            let before = ledger.read().expect("read");
+            let refused = ledger.acquire_if("bob", TTL, &read.token, read.fence);
+            assert!(
+                matches!(refused, Err(LeaseError::Held { ref holder, .. }) if holder == "alice"),
+                "at {at}: {refused:?}"
+            );
+            assert_eq!(
+                ledger.read().expect("read"),
+                before,
+                "nothing changed at {at}"
+            );
+        }
+        // At the bound: granted, under the next fence, without moving the token.
+        move_to(clock, lease.expires_at + skew);
+        let granted = ledger
+            .acquire_if("bob", TTL, &read.token, read.fence)
+            .expect("granted past the bound");
+        assert_eq!(granted.holder, "bob");
+        assert_eq!(granted.fence.value(), lease.fence.value() + 1);
+        let after = ledger.read().expect("read");
+        assert_eq!(after.token, read.token);
+        assert_eq!(after.fence, granted.fence);
+        assert_eq!(after.lease.expect("held").holder, "bob");
+    });
+}
+
+#[test]
+fn acquire_if_grants_another_holder_after_a_release() {
+    on_every_clocked_ledger("acquire_if_released", |ledger, _| {
+        let lease = ledger.acquire("alice", TTL).expect("acquire");
+        let read = ledger.read().expect("read");
+        ledger.release(lease.fence).expect("release");
+        let granted = ledger
+            .acquire_if("bob", TTL, &read.token, read.fence)
+            .expect("granted at once");
+        assert_eq!(granted.holder, "bob");
+        assert_eq!(granted.fence.value(), lease.fence.value() + 1);
+        let after = ledger.read().expect("read");
+        assert_eq!(after.fence, granted.fence);
+        assert_eq!(after.lease.expect("held").holder, "bob");
+        // A second conditional grant from the same reading finds the fence moved.
+        let before = ledger.read().expect("read");
+        assert_eq!(
+            ledger
+                .acquire_if("carol", TTL, &read.token, read.fence)
+                .map(|_| ()),
+            Err(LeaseError::Held {
+                holder: "bob".to_owned(),
+                remaining: TTL + MAX_CLOCK_SKEW
+            })
+        );
+        assert_eq!(ledger.read().expect("read"), before);
     });
 }
 

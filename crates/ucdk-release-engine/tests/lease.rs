@@ -253,7 +253,7 @@ fn a_takeover_during_a_target_that_failed_or_could_not_be_read_is_a_lost_lease()
         ("takeover_failed", |b| b.test_fails("//release:set_test")),
         ("takeover_unreadable", |b| b.die_at_call(1)),
         ("takeover_ran_nothing", |b| {
-            b.test_runs_nothing("//release:set_test")
+            b.test_runs_nothing("//release:set_test");
         }),
     ];
     for (name, fault) in faults {
