@@ -499,3 +499,63 @@ fn pr_body_attribution_link_is_allowed() {
     assert_eq!(found.len(), 1, "{found:?}");
     assert_eq!(found[0].subject, "pull request body:4");
 }
+
+/// Catches the shared core failing the lint, and the exception for it reaching further than
+/// the one line it is for: the word rule does not read the line of rule T9 in the core's copy
+/// or between the markers of `AGENTS.md`, and reads that line everywhere else, and every other
+/// line of the core; the other rules still read T9's line.
+#[test]
+fn the_word_rule_skips_only_rule_t9_of_the_shared_core() {
+    let word = join(&["mu", "tant"]);
+    let t9 = format!("- T9 BLOCK. No {word} tables.\n");
+    let t8 = format!("- T8 BLOCK. A {word} here.\n");
+    let agents =
+        |core: &str| format!("intro\n<!-- shared-core:begin -->\n{core}<!-- shared-core:end -->\n");
+    let copy = "docs/agents/shared_core.md";
+    assert_eq!(
+        check_tree(&[
+            file(copy, &format!("x\n{t9}")),
+            file("AGENTS.md", &agents(&t9))
+        ]),
+        vec![]
+    );
+    let read = [
+        // Before the core, and with no end marker (so no core).
+        file("AGENTS.md", &format!("{t9}{}", agents(""))),
+        file(
+            "AGENTS.md",
+            &format!("intro\n<!-- shared-core:begin -->\n{t9}"),
+        ),
+        // In a file that is neither.
+        file("docs/agents/notes.md", &t9),
+        file("CONTRIBUTING.md", &t9),
+        // A line of the core that is not rule T9's, or does not start with it.
+        file("AGENTS.md", &agents(&t8)),
+        file(copy, &t8),
+        file(copy, &format!("  {t9}")),
+    ];
+    let found: Vec<_> = check_tree(&read)
+        .into_iter()
+        .map(|f| (f.rule, f.subject))
+        .collect();
+    let at = |s: &str| ("lint-word", s.to_owned());
+    assert_eq!(
+        found,
+        [
+            at("AGENTS.md:1"),
+            at("AGENTS.md:3"),
+            at("docs/agents/notes.md:1"),
+            at("CONTRIBUTING.md:1"),
+            at("AGENTS.md:3"),
+            at(&format!("{copy}:1")),
+            at(&format!("{copy}:1")),
+        ]
+    );
+    // A date on T9's line in the copy is still refused.
+    let dated = format!("- T9 BLOCK. On {}-{:02}-{:02}.\n", 2025, 10, 5);
+    let found: Vec<_> = check_tree(&[file(copy, &dated)])
+        .into_iter()
+        .map(|f| (f.rule, f.subject))
+        .collect();
+    assert_eq!(found, [("lint-date", format!("{copy}:1"))]);
+}

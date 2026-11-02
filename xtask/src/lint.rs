@@ -12,9 +12,11 @@
 //! metadata only (author, committer and the matching trailers); `trailer_name` lets exactly
 //! those trailer lines through, and their name part is scanned like any other text.
 
-use crate::Finding;
+use std::ops::Range;
+
 use crate::dco::CommitInfo;
 use crate::event::Event;
+use crate::{Finding, agents};
 
 /// Files the tree scan skips: this file (its patterns would match themselves) and the licence
 /// text (which carries its own date). The tests build every sample at run time, so they are
@@ -377,10 +379,19 @@ fn card_id(line: &str) -> Option<String> {
 
 /// Every rule over every line of `text`; `subject` names the file or commit in the findings.
 pub fn scan_text(subject: &str, text: &str) -> Vec<Finding> {
+    scan(subject, text, &|_, _| false)
+}
+
+/// [`scan_text`], with the word rule not applied to a line that `word_exempt` selects by its
+/// 0-based number and folded text.
+fn scan(subject: &str, text: &str, word_exempt: &dyn Fn(usize, &str) -> bool) -> Vec<Finding> {
     let mut out = Vec::new();
     let lines: Vec<String> = text.lines().map(fold).collect();
     for (n, line) in lines.iter().enumerate() {
         for (rule, detect) in RULES {
+            if rule == "lint-word" && word_exempt(n, line) {
+                continue;
+            }
             if let Some(found) = detect(line) {
                 out.push(Finding::new(rule, format!("{subject}:{}", n + 1), found));
             }
@@ -402,12 +413,34 @@ pub fn scan_text(subject: &str, text: &str) -> Vec<Finding> {
     out
 }
 
-/// The tree scan: `files` are (path, text) pairs.
+/// How the line of rule T9 starts. T9, in the shared core of `AGENTS.md` (see
+/// [`crate::agents`]), forbids the process words by naming them.
+const T9: &str = "- T9 ";
+
+/// The 1-based numbers of the lines of `path` that hold the shared core: all of its checked-in
+/// copy, the lines between the markers of `AGENTS.md` (none when the markers cannot delimit a
+/// core), and none of any other file.
+fn core_lines(path: &str, text: &str) -> Range<usize> {
+    match path {
+        agents::COPY => 1..usize::MAX,
+        agents::AGENTS => agents::core(text).map_or(0..0, |core| core.lines),
+        _ => 0..0,
+    }
+}
+
+/// The tree scan: `files` are (path, text) pairs. The word rule does not read the line of rule
+/// T9 in the shared core, which names the words to forbid them; every other rule reads it, and
+/// the same line anywhere else is read by every rule.
 pub fn check_tree(files: &[(String, String)]) -> Vec<Finding> {
     files
         .iter()
         .filter(|(path, _)| !EXEMPT.contains(&path.as_str()))
-        .flat_map(|(path, text)| scan_text(path, text))
+        .flat_map(|(path, text)| {
+            let core = core_lines(path, text);
+            scan(path, text, &|n, line| {
+                core.contains(&(n + 1)) && line.starts_with(T9)
+            })
+        })
         .collect()
 }
 
