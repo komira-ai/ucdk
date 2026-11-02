@@ -17,6 +17,7 @@ ucdk-release-proto = { path = "../ucdk-release-proto" }
 ucdk-release-seams = { path = "../ucdk-release-seams" }
 
 [dev-dependencies]
+ucdk-api = { path = "../ucdk-api" }
 ucdk-release-fake = { path = "../ucdk-release-fake" }
 
 [lints]
