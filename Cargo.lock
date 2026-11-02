@@ -762,6 +762,8 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "sha2",
+ "ucdk-core",
  "ucdk-ledger",
  "ucdk-release",
  "ucdk-release-proto",

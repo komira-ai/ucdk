@@ -33,13 +33,15 @@ pub enum Op {
     Poll,
     /// `PUT /packages/{n}/{v}/yank`.
     Yank,
+    /// `DELETE /groups/{id}`: gives a staged group back, and may have done so once it was sent.
+    Abort,
 }
 
 impl Op {
     /// Whether a request of this kind may have changed the registry once it was sent, so that a
     /// failure with no clear refusal is `Unknown` and never `Permanent`.
     fn may_have_landed(self) -> bool {
-        matches!(self, Op::Commit | Op::Poll | Op::Yank)
+        matches!(self, Op::Commit | Op::Poll | Op::Yank | Op::Abort)
     }
 }
 
@@ -202,7 +204,9 @@ pub fn map_reply(op: Op, response: &Response, ceiling: Duration) -> Option<Mappe
         (Op::Commit, Some("upload_invalid")) => transient(),
         // Authorisation of a commit that was sent: the token may have been honoured first.
         (Op::Commit, _) => unknown(),
-        (Op::Read, Some("package_not_found" | "version_not_found")) => Mapped::Missing,
+        (Op::Read, Some("package_not_found" | "version_not_found")) if status == 404 => {
+            Mapped::Missing
+        }
         (Op::Create | Op::Yank, Some("package_not_found" | "not_owner")) => refuse(),
         (Op::Create, Some("limit_exceeded" | "payload_too_large")) => refuse(),
         (_, Some("token_expired")) if status == 401 => {
@@ -222,7 +226,7 @@ pub fn map_reply(op: Op, response: &Response, ceiling: Duration) -> Option<Mappe
             permanent()
         }
         (Op::Read | Op::Create, _) => transient(),
-        (Op::Yank, _) => unknown(),
+        (Op::Yank | Op::Abort, _) => unknown(),
     })
 }
 

@@ -19,23 +19,34 @@
 //! - [`Envelope`], [`authorise`]: the grant's secret and the client-side checks of a grant
 //!   (registry, phase, coverage, expiry) that send nothing when they refuse;
 //! - [`MopmGrantSource`]: the exchange of the job's CI identity token for a short-lived grant,
-//!   with [`GithubIdentity`] as the source of the token.
+//!   with [`GithubIdentity`] as the source of the token;
+//! - [`group_id`], the answers' readers and [`Registry`]: the group read, the version read,
+//!   `declare`, `stage` (which refuses a name that was not declared) and `abort` against a
+//!   [`Transport`].
 //!
-//! The publisher itself, the group verbs and the HTTP adapter are not here yet.
+//! The publisher itself and the HTTP adapter are not here yet.
 
+mod answers;
 mod config;
 mod echo;
 mod errors;
 mod exchange;
 mod grammar;
 mod grants;
+mod group_id;
 mod identity;
 mod json;
 mod mapping;
 mod platform;
+mod registry;
 mod requests;
 mod transport;
 mod url;
+
+pub use answers::{
+    Created, FileFact, Group, GroupMember, GroupStatus, MemberAnswer, RecordFile, Target,
+    UploadFile, VersionRecord, VersionState, parse_created, parse_group, parse_record,
+};
 
 pub use config::{Call, Config, ConfigError, MAX_PAGE, MOPM_TOKEN_TTL, Proxy, Roots, RootsError};
 pub use echo::{
@@ -52,6 +63,7 @@ pub use grammar::{
     valid_build, valid_name, valid_reason, valid_sha256, valid_version,
 };
 pub use grants::{Envelope, Malformed, Use, Verb, authorise};
+pub use group_id::{group_id, valid_group_id};
 pub use identity::{
     Claims, Expected, GithubIdentity, IdentitySource, IdentityToken, IdentityUnavailable, Mismatch,
     Verified, check_identity,
@@ -61,6 +73,7 @@ pub use mapping::{
     check_key, check_observe, check_reason, check_shape, members,
 };
 pub use platform::{SUBDIRS_V1, Subdir};
+pub use registry::{Caller, Registry, SetFile};
 pub use requests::read_version;
 pub use transport::{
     Header, HeaderValue, Method, Request, Response, Secret, Transport, TransportError,
