@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Reading the sealed set a validation is about: from the `stage` record of the stage that built
 //! it, through the set document in the store, checked against the record. Nothing in the
-//! document is trusted: its hash is recomputed from its members, and it must be the hash the
-//! record names.
+//! document is trusted: its hash is recomputed from its members, it must be the hash the
+//! record names, and its scope (the revision, the platform and the producing stage and
+//! environment) must be the one it was read for.
 
 use ucdk_core::Hash256;
-use ucdk_release::machine::{builds, needed_builds};
+use ucdk_release::machine::{builds, needed_builds, stage_environment};
 use ucdk_release::set_document;
 use ucdk_release::store::{SetScope, StoreKey};
 use ucdk_release_proto::v1::{Reason, ReleaseSet, Stage, Verdict};
@@ -89,6 +90,37 @@ impl Engine<'_> {
                     "the set document at {} has hash {}, and the stage record names {hash}",
                     key.as_str(),
                     set.set_hash
+                ),
+            ));
+        }
+        // A document is hashed over its members and its scope, so a self-consistent document
+        // of another scope passes the checks above; the scope is the caller's to compare.
+        let producer = set.producer.clone().unwrap_or_default();
+        let differs: Vec<String> = [
+            ("revision", set.revision.as_str(), scope.revision.as_str()),
+            ("platform", set.platform.as_str(), scope.platform.as_str()),
+            (
+                "producing stage",
+                producer.stage.as_str(),
+                owner.name.as_str(),
+            ),
+            (
+                "producing environment",
+                producer.environment.as_str(),
+                stage_environment(owner),
+            ),
+        ]
+        .into_iter()
+        .filter(|(_, found, wanted)| found != wanted)
+        .map(|(name, found, wanted)| format!("{name} {found:?}, not {wanted:?}"))
+        .collect();
+        if !differs.is_empty() {
+            return Err(stop(
+                Reason::SetHash,
+                format!(
+                    "the set document at {} is of another scope: {}",
+                    key.as_str(),
+                    differs.join("; ")
                 ),
             ));
         }
