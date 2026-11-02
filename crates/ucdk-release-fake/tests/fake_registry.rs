@@ -1100,3 +1100,26 @@ fn a_declaration_that_is_not_plain_distinct_names_is_refused_naming_the_entry() 
     );
     assert_eq!(registry.declare(&list(&["a", "b"])), Ok(()));
 }
+
+#[test]
+fn the_registry_keeps_a_coordinate_under_the_text_a_publication_record_keeps() {
+    // One framing for both: the key the fake registry and its grants use is the release codec's
+    // coordinate text, so a coordinate in the ledger and in the registry is named alike.
+    for (channel, kind, name) in [
+        ("stable", ArtifactType::File as i32, "tool"),
+        ("st\u{e9}ble", ArtifactType::Oci as i32, "a/b"),
+        ("", -7, "1:x"),
+    ] {
+        let c = Coordinate {
+            channel: channel.to_owned(),
+            r#type: kind,
+            name: name.to_owned(),
+            version: "1.2.3".to_owned(),
+            platform: "linux-x86_64".to_owned(),
+        };
+        assert_eq!(
+            ucdk_release_fake::coordinate_key(&c),
+            ucdk_release::codec::coordinate_text(&c)
+        );
+    }
+}
