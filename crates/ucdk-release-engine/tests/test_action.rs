@@ -242,6 +242,29 @@ fn an_only_selection_of_a_confirmed_action_with_the_same_inputs_is_noop() {
 }
 
 #[test]
+fn a_whole_stage_stops_at_its_first_failure_and_never_reaches_the_rest() {
+    let mut rig = Rig::new("stage_stops");
+    rig.build.test_fails("//release:unit");
+    let outcome = rig.handle("verify", &[]);
+    assert_eq!(outcome.verdict, Verdict::ValidationFailed);
+    assert_eq!(outcome.reason, Reason::Validation);
+    let reported: Vec<&str> = outcome.actions.iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(
+        reported,
+        ["unit"],
+        "lint, after it in the stage, was not reached"
+    );
+    assert_eq!(rig.build.commands().len(), 1);
+    assert!(
+        rig.ledger.action("verify", "lint").is_none(),
+        "nothing written for lint"
+    );
+    let (_, state) = rig.ledger.action("verify", "unit").expect("the record");
+    assert_eq!(state, State::Intent);
+    assert_eq!(rig.ledger.lease(), None, "the lease was given back");
+}
+
+#[test]
 fn a_failed_test_action_is_run_again_and_leaves_its_record_unconfirmed() {
     let mut rig = Rig::new("run_again");
     rig.build.test_fails(SET_TEST);

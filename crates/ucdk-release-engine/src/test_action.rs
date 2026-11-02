@@ -18,11 +18,11 @@ use ucdk_release::codec;
 use ucdk_release::hashes::machine_hash;
 use ucdk_release::invocation::report_file_name;
 use ucdk_release::machine::stage_platform;
-use ucdk_release::rows::{ExpectedRow, account_rows};
+use ucdk_release::rows::ExpectedRow;
 use ucdk_release_proto::v1::{Action, Reason, Row, RowState, Stage, Test, Verdict};
 use ucdk_release_seams::{Invocation, SeamError, Verb};
 
-use crate::engine::Engine;
+use crate::engine::{Engine, accounted};
 use crate::leases::Leases;
 use crate::outcome::{Finished, Flow, Report, action_report, row, what_failed};
 use crate::records::Records;
@@ -50,8 +50,7 @@ impl Engine<'_> {
             stamp: self.run.stamp,
             set: None,
         };
-        let input = action_input(self.machine, &stage.name, &action.name, &given)
-            .expect("a Test action of a checked machine has an input and takes no set");
+        let input = action_input(self.machine, &stage.name, &action.name, &given)?;
         let records = self.records()?;
         match records.action(&stage.name, &action.name) {
             Some((found, State::Confirmed)) if found.input == input => {
@@ -98,10 +97,9 @@ impl Engine<'_> {
             .iter()
             .map(|t| ExpectedRow::new(&t.label, TEST_ASSERTION))
             .collect();
-        // The rows were made from the same targets as the derived ones, and a Test action has
-        // at least one target, so the accounting cannot find a fault.
-        let verdict = account_rows(&expected, &rows)
-            .expect("one row for each derived row, in order, and at least one");
+        // The rows were made from the same targets as the derived ones; a fault the accounting
+        // finds all the same stops the request as a spec fault, never a pass.
+        let verdict = accounted(&expected, &rows)?;
         let (reason, message) = match verdict {
             Verdict::Succeeded => (Reason::Unspecified, String::new()),
             Verdict::Indeterminate => (Reason::BuildFailed, what_failed(&rows)),

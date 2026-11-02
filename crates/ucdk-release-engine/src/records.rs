@@ -9,6 +9,8 @@ use ucdk_ledger::{Origin, OwnerPath, Record as Row, Snapshot, State};
 use ucdk_release::codec::{self, CodecError, Encoded};
 use ucdk_release::transitions::Kind;
 
+use crate::outcome::Flow;
+
 /// Every release record of a ledger, decoded, with the state the ledger holds it in.
 pub(crate) struct Records(Vec<(codec::Record, State)>);
 
@@ -80,11 +82,9 @@ impl Records {
 }
 
 /// The ledger row of `record` in `state`.
-pub(crate) fn row(record: &codec::Record, state: State) -> Result<Row, CodecError> {
+pub(crate) fn row(record: &codec::Record, state: State) -> Flow<Row> {
     let encoded = record.encode()?;
-    let path = encoded
-        .path()
-        .expect("a release tag and a key segment make a record path");
+    let path = encoded.path()?;
     Ok(Row {
         owner: OwnerPath::of(&path),
         path,

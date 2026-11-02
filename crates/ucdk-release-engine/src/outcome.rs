@@ -2,7 +2,9 @@
 //! What a request answers: a verdict, the reason when it did not pass, a sentence for the
 //! operator, and the report of each action and validation that ran.
 
+use ucdk_core::ModelError;
 use ucdk_ledger::{GuardError, LedgerError};
+use ucdk_release::action_input::InputError;
 use ucdk_release::codec::CodecError;
 use ucdk_release::rows::RowFault;
 use ucdk_release_proto::v1::{ActionReport, Reason, Row, RowState, ValidationReport, Verdict};
@@ -101,6 +103,20 @@ impl From<CodecError> for Finished {
     }
 }
 
+/// A Test action the machine gives no input to: a spec fault, refused before it runs.
+impl From<InputError> for Finished {
+    fn from(error: InputError) -> Self {
+        Self::stopped(Verdict::Refused, Reason::Selector, error.to_string())
+    }
+}
+
+/// A record whose path the codec's tag and name do not make: nothing is written.
+impl From<ModelError> for Finished {
+    fn from(error: ModelError) -> Self {
+        Self::stopped(Verdict::Failed, Reason::Ledger, error.to_string())
+    }
+}
+
 /// A fault in the accounting of rows (nothing derived, a row missing or out of place) is a spec
 /// fault, and never a pass.
 impl From<RowFault> for Finished {
@@ -156,4 +172,34 @@ pub(crate) fn what_failed(rows: &[Row]) -> String {
         .map(|row| format!("{} ({})", row.name, row.detail))
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_test_action_with_no_input_is_refused_as_a_selector_fault() {
+        let stop = Finished::from(InputError::UnknownAction {
+            stage: "build".to_owned(),
+            action: "test".to_owned(),
+        });
+        assert_eq!(
+            (stop.verdict, stop.reason),
+            (Verdict::Refused, Reason::Selector)
+        );
+        assert_eq!(stop.message, "the stage build has no action test");
+        assert!(stop.report.is_none());
+    }
+
+    #[test]
+    fn a_record_with_no_path_fails_as_a_ledger_fault() {
+        let stop = Finished::from(ModelError::BadSegment("A".to_owned()));
+        assert_eq!(
+            (stop.verdict, stop.reason),
+            (Verdict::Failed, Reason::Ledger)
+        );
+        assert_eq!(stop.message, "`A` is not a valid path segment");
+        assert!(stop.report.is_none());
+    }
 }

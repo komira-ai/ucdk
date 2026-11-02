@@ -61,7 +61,7 @@ pub struct Engine<'a> {
 /// One item of a request, resolved against the stage.
 enum Work<'s> {
     Test(&'s Action, &'s Test),
-    Validation(&'s Holder, Validation),
+    Validation(&'s Holder, &'s Validation),
 }
 
 impl<'a> Engine<'a> {
@@ -109,30 +109,32 @@ impl<'a> Engine<'a> {
         };
         let mut work = Vec::new();
         for item in &items {
-            match item {
-                Item::Action { action, .. } => {
-                    match tests(stage).find(|(a, _)| a.name == *action) {
-                        Some((found, body)) => work.push(Work::Test(found, body)),
-                        None => {
-                            return Outcome::halted(
-                                Verdict::Refused,
-                                Reason::Selector,
-                                format!(
-                                    "{action} is not a Test action; this engine runs Test actions \
-                                 and validations"
-                                ),
-                            );
-                        }
-                    }
-                }
-                Item::Validation { holder, name } => {
-                    let decl = validations(stage)
+            // `resolve` names only what the stage declares, so a validation is always found;
+            // an action is found only when it is a Test action.
+            let (found, name) = match item {
+                Item::Action { action, .. } => (
+                    tests(stage)
+                        .find(|(a, _)| a.name == *action)
+                        .map(|(found, body)| Work::Test(found, body)),
+                    action,
+                ),
+                Item::Validation { holder, name } => (
+                    validations(stage)
                         .find(|v| v.name == *name)
-                        .cloned()
-                        .unwrap_or_default();
-                    work.push(Work::Validation(holder, decl));
-                }
-            }
+                        .map(|decl| Work::Validation(holder, decl)),
+                    name,
+                ),
+            };
+            let Some(found) = found else {
+                return Outcome::halted(
+                    Verdict::Refused,
+                    Reason::Selector,
+                    format!(
+                        "{name} is not a Test action; this engine runs Test actions and validations"
+                    ),
+                );
+            };
+            work.push(found);
         }
         let holder = format!("run:{}/{}", self.run.id, stage.name);
         let guard = match LeaseGuard::acquire(self.ledger, holder, self.ttl) {
