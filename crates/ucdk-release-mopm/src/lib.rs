@@ -21,8 +21,8 @@
 //! - [`MopmGrantSource`]: the exchange of the job's CI identity token for a short-lived grant,
 //!   with [`GithubIdentity`] as the source of the token;
 //! - [`group_id`], the answers' readers and [`Registry`]: the group read, the version read,
-//!   `declare`, `stage` (which refuses a name that was not declared) and `abort` against a
-//!   [`Transport`].
+//!   `declare`, `stage` (which refuses a name that was not declared) and `abort`, and the reads
+//!   that decide nothing, `observe`, `newest` and `list`, against a [`Transport`].
 //!
 //! The publisher itself and the HTTP adapter are not here yet.
 
@@ -36,6 +36,7 @@ mod grants;
 mod group_id;
 mod identity;
 mod json;
+mod listing;
 mod mapping;
 mod platform;
 mod registry;
@@ -68,12 +69,13 @@ pub use identity::{
     Claims, Expected, GithubIdentity, IdentitySource, IdentityToken, IdentityUnavailable, Mismatch,
     Verified, check_identity,
 };
+pub use listing::{Page, parse_index, parse_package, parse_page, valid_prefix};
 pub use mapping::{
     ArchiveFacts, Candidate, Key, MAX_FILE_BYTES, MAX_GROUP_BYTES, MAX_MEMBERS, Member, MemberFile,
     check_key, check_observe, check_reason, check_shape, members,
 };
 pub use platform::{SUBDIRS_V1, Subdir};
-pub use registry::{Caller, Registry, SetFile};
+pub use registry::{Caller, MAX_LIST_PAGES, Registry, SetFile};
 pub use requests::read_version;
 pub use transport::{
     Header, HeaderValue, Method, Request, Response, Secret, Transport, TransportError,

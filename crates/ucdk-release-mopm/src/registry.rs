@@ -37,6 +37,10 @@ use crate::requests::get;
 use crate::transport::{Header, Method, Request, Response, Secret, Transport};
 use crate::url::Url;
 
+mod observe;
+
+pub use observe::MAX_LIST_PAGES;
+
 /// A presigned upload URL lives at most 300 seconds. Every `PUT` attempt, a retry included, starts
 /// only on an answer younger than half of that; an answer this old or older is replaced first by
 /// the identical create, for fresh URLs.
